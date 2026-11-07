@@ -27,12 +27,18 @@ jobs:
           $p = Start-Process .\tinypdf.exe -ArgumentList '--shot','preview.png','sample.pdf' -Wait -PassThru
           "exit code: $($p.ExitCode)" | Tee-Object shot.log
           if (!(Test-Path preview.png)) { exit 1 }
-      - name: Publish release
+      - name: Publish
         if: always()
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in tinypdf.exe preview.png build.log shot.log sample.pdf; do [ -f "$f" ] && files="$files $f"; done
-          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Tiny PDF build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe. Build $GITHUB_RUN_NUMBER"
+          for f in tinypdf.exe preview.png build.log shot.log sample.pdf; do if [ -f "$f" ]; then files="$files $f"; fi; done
+          set +e
+          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Tiny PDF build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
+          echo "release exit: $?" >> release.log
+          mkdir dist && cp $files release.log dist/ && cd dist
+          git init -q -b dist && git config user.name ci && git config user.email ci@users.noreply.github.com
+          git add -A && git commit -qm "build $GITHUB_RUN_NUMBER"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" dist
