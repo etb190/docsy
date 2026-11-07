@@ -7,10 +7,13 @@
 // light as a 10-page one. No stock scrollbars anywhere: scrolling is wheel,
 // drag-pan and keys, and the only bar on screen is a slim KillerPDF-style
 // overlay thumb (4px wide, 8px under the cursor) owning an invisible 12px gutter.
-// The frame is KillerPDF's too: the real OS side borders stay, but WM_NCCALCSIZE
-// strips the native caption, so a custom 32px title bar (grain, wordmark, file
-// name, 44x32 min/max/close buttons with the green/red hovers, the Win11 snap
-// flyout on the maximize button and DWM rounded corners) owns the top row.
+// The frame is KillerPDF's too: the real OS side borders stay, but the window
+// is created without WS_CAPTION (and WM_NCCALCSIZE gives the top row to the
+// client), so the native caption can never appear - not even on the first
+// paint. A custom 32px title bar (grain, wordmark, 44x32 min/max/close
+// buttons with the green/red hovers, the Win11 snap flyout on the maximize
+// button and DWM rounded corners) owns the top row; nothing read from the
+// document (no file name) is drawn anywhere on it.
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
@@ -93,7 +96,7 @@ struct Side {
 };
 static Side sd;
 static HFONT g_uifont = nullptr, g_sidefont = nullptr;
-static HFONT g_glyphfont = nullptr, g_wordfont = nullptr, g_filefont = nullptr;
+static HFONT g_glyphfont = nullptr, g_wordfont = nullptr;
 
 static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi)); }
 static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi)); }
@@ -103,12 +106,16 @@ static int SBar() { return (int)(12 * g.dpi); }   // overlay bar gutter: KillerP
 static HBRUSH GrainBrush(int which);   // defined with the grain tile below
 
 // ---------------- custom caption (KillerPDF's frame) ----------------
-// The window keeps WS_OVERLAPPEDWINDOW, so Windows still owns the resize
-// borders, the drag, the double-click maximize, Aero Snap and the snap flyout;
-// WM_NCCALCSIZE just gives the caption row back to the client, where the app
-// paints its own bar. KillerPDF's tokens: TitleBarHeight 32, buttons 44x32 with
-// a transparent face, green #22bb56 hover on min/max and #E04444 on close with
-// white glyphs, MDL2 E921/E922/E923/E8BB at 10px, filename 18px in #a3a3a3.
+// The window keeps WS_THICKFRAME (so Windows still owns the resize borders,
+// the drag, the double-click maximize, Aero Snap and the snap flyout) but is
+// created WITHOUT WS_CAPTION. A window that still carries WS_CAPTION gets its
+// stock title bar painted by DWM on the first activation until a
+// minimize/restore forces a frame recalc - the exact launch glitch this
+// removes: with no caption style there is nothing left to paint, ever.
+// WM_NCCALCSIZE gives the caption row to the client, where the app paints its
+// own bar. KillerPDF's tokens: TitleBarHeight 32, buttons 44x32 with a
+// transparent face, green #22bb56 hover on min/max and #E04444 on close with
+// white glyphs, MDL2 E921/E922/E923/E8BB at 10px.
 static int CAP() { return (int)(32 * g.dpi); }
 
 static void CapRects(RECT r[3], int w) {              // 0 min, 1 max, 2 close - right-aligned
@@ -170,8 +177,9 @@ static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
 
 // The caption row: grain over #1c1c1c, icon + two-tone wordmark at the left
 // ("Doc" light, "sy" in KillerPDF's AccentLogo green, over its soft shadow),
-// the open file's name in the middle, and the three window buttons at the
-// right. The bar spans both children, so the main window paints it.
+// and the three window buttons at the right - and nothing read from the
+// document: the file name is deliberately not shown anywhere (bar or window
+// text). The bar spans both children, so the main window paints it.
 static void DrawCaptionBar(HDC dc, int w) {
     RECT bar{ 0, 0, w, CAP() };
     FillRect(dc, &bar, GrainBrush(2));
@@ -196,12 +204,6 @@ static void DrawCaptionBar(HDC dc, int w) {
     RECT sr{ wr.left + sz.cx, 0, wr.right, CAP() };
     SetTextColor(dc, RGB(0x1e, 0xa5, 0x4c));                  // AccentLogo green
     DrawTextW(dc, L"sy", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-
-    // file name, truncated before the buttons (KillerPDF's FileNameLabel)
-    RECT fr{ tx + (int)(96 * g.dpi), (int)(3 * g.dpi), w - 3 * (int)(44 * g.dpi) - (int)(12 * g.dpi), CAP() };
-    SelectObject(dc, CaptionFont(g_filefont, 18, false, L"Segoe UI"));
-    SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
-    DrawTextW(dc, g.n ? g.name.c_str() : L"", -1, &fr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     // window buttons
     SelectObject(dc, CaptionFont(g_glyphfont, 10, false, L"Segoe MDL2 Assets"));
@@ -353,14 +355,9 @@ static int PageAt(int y) { return PageIn(g.top, g.n, y); }
 static void SideSync();
 static void LayoutMain();
 
-static void UpdateTitle() {
-    static wchar_t last[600];
-    int c = g.n ? PageAt(g.sy + g.ch / 3) : -1;
-    if (c != g.cur) { g.cur = c; SideSync(); }
-    wchar_t t[600];
-    if (!g.n) lstrcpyW(t, L"Docsy");
-    else swprintf_s(t, L"%s  -  %d / %d  -  %d%%  -  Docsy", g.name.c_str(), c + 1, g.n, (int)std::lround(g.zoom * 100));
-    if (g.main && lstrcmpW(t, last)) { lstrcpyW(last, t); SetWindowTextW(g.main, t); }
+static void UpdateTitle() {   // sidebar highlight follows the page under the upper
+    int c = g.n ? PageAt(g.sy + g.ch / 3) : -1;   // third. The window text stays "Docsy"
+    if (c != g.cur) { g.cur = c; SideSync(); }    // - the open file's name shows nowhere.
 }
 
 static void UpdateScroll() {
@@ -1083,7 +1080,11 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) {          // the caption buttons take KillerPDF's hand cursor
+        // The caption buttons take KillerPDF's hand cursor. The maximize button
+        // answers HTMAXBUTTON, not HTCLIENT, so the check must cover both hit
+        // codes - otherwise Windows never sets a cursor over it and the
+        // pointer vanishes on the middle button.
+        if (LOWORD(lp) == HTCLIENT || LOWORD(lp) == HTMAXBUTTON) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             RECT r; GetClientRect(h, &r);
             int which;
@@ -1098,7 +1099,6 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_sidefont) { DeleteObject(g_sidefont); g_sidefont = nullptr; }
         if (g_glyphfont) { DeleteObject(g_glyphfont); g_glyphfont = nullptr; }
         if (g_wordfont) { DeleteObject(g_wordfont); g_wordfont = nullptr; }
-        if (g_filefont) { DeleteObject(g_filefont); g_filefont = nullptr; }
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.tw = 0;
         SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1220,10 +1220,19 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     sc.lpszClassName = L"DocsySide";
     RegisterClassExW(&sc);
 
-    DWORD style = WS_OVERLAPPEDWINDOW;
+    // WS_CAPTION is dropped (see the chrome notes above): a captioned window
+    // has DWM paint its stock title bar on the first activation until a
+    // minimize/restore forces a frame recalc - the "minimize then maximize
+    // once on launch" glitch. Without the style there is no native caption to
+    // paint at all; the thickframe still owns resize borders, Aero Snap, the
+    // system menu and the Win11 snap flyout. SWP_FRAMECHANGED syncs the final
+    // frame before the first present.
+    DWORD style = WS_OVERLAPPEDWINDOW & ~WS_CAPTION;
     CreateWindowExW(0, L"Docsy", L"Docsy", style, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                     nullptr, nullptr, hi, nullptr);
     if (!g.main) return 1;
+    SetWindowPos(g.main, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
     if (shot) {
         if (lstrcmpW(argv[3], L"-") && !Open(argv[3])) return 2;
