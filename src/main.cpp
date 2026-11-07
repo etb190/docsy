@@ -7,6 +7,10 @@
 // light as a 10-page one. No stock scrollbars anywhere: scrolling is wheel,
 // drag-pan and keys, and the only bar on screen is a slim KillerPDF-style
 // overlay thumb (4px wide, 8px under the cursor) owning an invisible 12px gutter.
+// The frame is KillerPDF's too: the real OS side borders stay, but WM_NCCALCSIZE
+// strips the native caption, so a custom 32px title bar (grain, wordmark, file
+// name, 44x32 min/max/close buttons with the green/red hovers, the Win11 snap
+// flyout on the maximize button and DWM rounded corners) owns the top row.
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
@@ -65,6 +69,9 @@ struct App {
     int sideW = 0;                      // user-sized sidebar width (0 = KillerPDF's 180px default)
     bool resizing = false;              // splitter drag: defer refits and thumb rebuilds
     int rsX = 0, rsW0 = 0;
+    int osFrame = 0;                    // OS side-border width from WM_NCCALCSIZE (the top resize grip)
+    int capHot = -1;                    // hovered caption button: 0 min, 1 max, 2 close, -1 none
+    bool capPressed = false;            // the maximize button held down (non-client, SnapLayouts-style)
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
@@ -86,11 +93,139 @@ struct Side {
 };
 static Side sd;
 static HFONT g_uifont = nullptr, g_sidefont = nullptr;
+static HFONT g_glyphfont = nullptr, g_wordfont = nullptr, g_filefont = nullptr;
 
 static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi)); }
 static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi)); }
 static int Gap() { return max(4, (int)(10 * g.dpi)); }
 static int SBar() { return (int)(12 * g.dpi); }   // overlay bar gutter: KillerPDF's ScrollBarThickness
+
+// ---------------- custom caption (KillerPDF's frame) ----------------
+// The window keeps WS_OVERLAPPEDWINDOW, so Windows still owns the resize
+// borders, the drag, the double-click maximize, Aero Snap and the snap flyout;
+// WM_NCCALCSIZE just gives the caption row back to the client, where the app
+// paints its own bar. KillerPDF's tokens: TitleBarHeight 32, buttons 44x32 with
+// a transparent face, green #22bb56 hover on min/max and #E04444 on close with
+// white glyphs, MDL2 E921/E922/E923/E8BB at 10px, filename 18px in #a3a3a3.
+static int CAP() { return (int)(32 * g.dpi); }
+
+static void CapRects(RECT r[3], int w) {              // 0 min, 1 max, 2 close - right-aligned
+    int bw = (int)(44 * g.dpi), bh = CAP();
+    r[2] = { w - bw, 0, w, bh };
+    r[1] = { w - 2 * bw, 0, w - bw, bh };
+    r[0] = { w - 3 * bw, 0, w - 2 * bw, bh };
+}
+
+static bool CapHit(POINT c, int w, int& which) {      // c: client coords
+    if (c.y < 0 || c.y >= CAP()) return false;
+    RECT r[3]; CapRects(r, w);
+    for (int i = 0; i < 3; i++)
+        if (c.x >= r[i].left && c.x < r[i].right) { which = i; return true; }
+    return false;
+}
+
+static void InvalidateCap(HWND h) {
+    RECT r; GetClientRect(h, &r);
+    RECT band{ 0, 0, r.right, CAP() };
+    InvalidateRect(h, &band, FALSE);
+}
+
+static void SetCapHot(HWND h, int hot) {
+    if (g.capHot == hot) return;
+    g.capHot = hot;
+    InvalidateCap(h);
+}
+
+static void ToggleMax(HWND h) {
+    ShowWindow(h, IsZoomed(h) ? SW_RESTORE : SW_MAXIMIZE);
+}
+
+// DWM frame attributes (Controls/DwmChrome.cs): rounded corners that square off
+// when maximized, and the 1px system border tinted the theme's AppBorderBrush
+// #3f3f3f. Both are no-ops before Windows 11 - failures are swallowed there.
+static void DwmApply(HWND h) {
+    using DwmSetFn = HRESULT (WINAPI*)(HWND, DWORD, const void*, UINT);
+    static DwmSetFn pfn = nullptr; static bool tried = false;
+    if (!tried) {
+        tried = true;
+        HMODULE d = LoadLibraryW(L"dwmapi.dll");
+        if (d) pfn = (DwmSetFn)(void*)GetProcAddress(d, "DwmSetWindowAttribute");
+    }
+    if (!pfn) return;
+    int roundc = IsZoomed(h) ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
+    pfn(h, 33, &roundc, sizeof roundc);               // DWMWA_WINDOW_CORNER_PREFERENCE
+    COLORREF border = RGB(0x3f, 0x3f, 0x3f);          // DWMWA_BORDER_COLOR, 0x00BBGGRR
+    pfn(h, 34, &border, sizeof border);
+}
+
+static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
+    if (!slot)
+        slot = CreateFontW(-(int)std::lround(px * g.dpi), 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
+                           0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
+    return slot;
+}
+
+// The caption row: grain over #1c1c1c, icon + two-tone wordmark at the left
+// ("Doc" light, "sy" in KillerPDF's AccentLogo green, over its soft shadow),
+// the open file's name in the middle, and the three window buttons at the
+// right. The bar spans both children, so the main window paints it.
+static void DrawCaptionBar(HDC dc, int w) {
+    RECT bar{ 0, 0, w, CAP() };
+    FillRect(dc, &bar, GrainBrush(2));
+    SetBkMode(dc, TRANSPARENT);
+
+    // icon + wordmark
+    int isz = (int)(16 * g.dpi);
+    static HICON s_ic = nullptr; static int s_icsz = 0;   // loaded once per DPI, kept for repaints
+    if (s_ic && s_icsz != isz) { DestroyIcon(s_ic); s_ic = nullptr; }
+    if (!s_ic) s_ic = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, isz, isz, LR_DEFAULTCOLOR);
+    s_icsz = isz;
+    if (s_ic) DrawIconEx(dc, (int)(8 * g.dpi), (CAP() - isz) / 2, s_ic, isz, isz, 0, nullptr, DI_NORMAL);
+    HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_wordfont, 12, true, L"Segoe UI"));
+    int tx = (int)(8 * g.dpi) + isz + (int)(5 * g.dpi);
+    SetTextColor(dc, RGB(16, 16, 16));                        // the crisp copy's soft dark shadow
+    RECT sh1{ tx + 1, 1, tx + (int)(96 * g.dpi) + 1, CAP() + 1 };
+    DrawTextW(dc, L"Docsy", -1, &sh1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    RECT wr{ tx, 0, tx + (int)(96 * g.dpi), CAP() };
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, L"Doc", -1, &wr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    SIZE sz; GetTextExtentPoint32W(dc, L"Doc", 3, &sz);
+    RECT sr{ wr.left + sz.cx, 0, wr.right, CAP() };
+    SetTextColor(dc, RGB(0x1e, 0xa5, 0x4c));                  // AccentLogo green
+    DrawTextW(dc, L"sy", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+
+    // file name, truncated before the buttons (KillerPDF's FileNameLabel)
+    RECT fr{ tx + (int)(96 * g.dpi), (int)(3 * g.dpi), w - 3 * (int)(44 * g.dpi) - (int)(12 * g.dpi), CAP() };
+    SelectObject(dc, CaptionFont(g_filefont, 18, false, L"Segoe UI"));
+    SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+    DrawTextW(dc, g.n ? g.name.c_str() : L"", -1, &fr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // window buttons
+    SelectObject(dc, CaptionFont(g_glyphfont, 10, false, L"Segoe MDL2 Assets"));
+    RECT r[3]; CapRects(r, w);
+    const wchar_t* glyph[3] = { L"\uE921", IsZoomed(g.main) ? L"\uE923" : L"\uE922", L"\uE8BB" };
+    for (int i = 0; i < 3; i++) {
+        bool hot = g.capHot == i;
+        if (hot) {
+            if (i == 2) {                                     // close: solid danger red
+                HBRUSH rb = CreateSolidBrush(RGB(0xE0, 0x44, 0x44));
+                RECT rr = r[i]; FillRect(dc, &rr, rb); DeleteObject(rb);
+            } else {                                          // min/max: the accent green,
+                Gdiplus::Graphics gs(dc);                     // KillerPDF's ButtonFill gradient
+                Gdiplus::LinearGradientBrush gb(Gdiplus::Rect(r[i].left, r[i].top,
+                                                   r[i].right - r[i].left, r[i].bottom - r[i].top),
+                                                   Gdiplus::Color(255, 0x22, 0xbb, 0x56),
+                                                   Gdiplus::Color(255, 0x1d, 0x9d, 0x48), 90.0f);
+                gs.FillRectangle(&gb, r[i].left, r[i].top, r[i].right - r[i].left, r[i].bottom - r[i].top);
+            }
+        }
+        SetTextColor(dc, hot ? RGB(255, 255, 255)
+                             : i == 2 ? RGB(0xb6, 0xb6, 0xb6) : RGB(0xe0, 0xe0, 0xe0));
+        DrawTextW(dc, glyph[i], -1, &r[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    SelectObject(dc, of);
+}
 
 // ---- film-grain margins (port of KillerPDF's procedural GrainTexture) ----
 // One seamless 256x256 tile of gray specks: Gaussian around 128, softened with wrapping
@@ -102,16 +237,18 @@ static int SBar() { return (int)(12 * g.dpi); }   // overlay bar gutter: KillerP
 // docsy greys are neutral, so the theme-tinted "lean" specks of the original never
 // apply. The seed is fixed so every build shows the identical pattern, and the tile stays
 // fixed to the window while pages scroll, matching KillerPDF's viewport-fixed overlay.
-// Two surfaces share the tile: the page margins (lighter grey) and the sidebar (darker).
-static HBRUSH g_grainBrush[2] = { nullptr, nullptr };
-static HBITMAP g_grainBmp[2] = { nullptr, nullptr };
+// Two page-side surfaces share the tile - the page margins (lighter grey) and
+// the sidebar (darker) - plus the third, darkest one for the custom title bar
+// (KillerPDF's TitleBarBrush #1c1c1c, which carries the same grain overlay).
+static HBRUSH g_grainBrush[3] = { nullptr, nullptr, nullptr };
+static HBITMAP g_grainBmp[3] = { nullptr, nullptr, nullptr };
 
 static HBRUSH GrainBrush(int which) {
     if (g_grainBrush[which]) return g_grainBrush[which];
     const int S = 256;
     const double Spread = 150.0, Soften = 0.10, Contrast = 1.35;
     const double Alpha = 70.0 / 255.0 * 0.24;   // tile alpha 70 times the dark-theme GrainOpacity
-    const BYTE back[2][3] = { { 60, 63, 65 }, { 38, 40, 43 } };  // margins, sidebar
+    const BYTE back[3][3] = { { 60, 63, 65 }, { 38, 40, 43 }, { 28, 28, 28 } };  // margins, sidebar, title bar
     auto cl = [](double v) { return v < 0 ? 0.0 : v > 255 ? 255.0 : v; };
     unsigned long long st = 1337;  // splitmix64: deterministic stream, same fixed-seed intent
     auto rnd = [&st]() {
@@ -798,15 +935,16 @@ static void LayoutMain() {
     RECT r; GetClientRect(g.main, &r);
     int w = r.right, h = r.bottom;
     int sw = (g.sideOn && g.n) ? SW() : 0;
+    int cap = CAP(), ch = max(0, h - cap);      // both children sit below the custom caption row
     sd.w = sw;
     if (g.side) {
-        MoveWindow(g.side, 0, 0, sw, h, TRUE);
+        MoveWindow(g.side, 0, cap, sw, ch, TRUE);
         if (sw) {
             RECT sr; GetClientRect(g.side, &sr);
             if (sr.right != sd.cw || sr.bottom != sd.ch) { sd.cw = sr.right; sd.ch = sr.bottom; SideLayout(); }
         }
     }
-    MoveWindow(g.view, sw, 0, w - sw, h, TRUE);
+    MoveWindow(g.view, sw, cap, w - sw, ch, TRUE);
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
     g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
@@ -837,17 +975,127 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                                  WS_CHILD,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
+        DwmApply(h);   // rounded corners + themed 1px border (Windows 11; no-op before)
         return 0;
     }
     case WM_SIZE:
         LayoutMain();
+        DwmApply(h);   // corners square off while maximized, round again on restore
         return 0;
+    case WM_PAINT: {   // the custom caption row; the children paint their own areas
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        DrawCaptionBar(dc, r.right);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_NCCALCSIZE: {
+        // KillerPDF's frame: keep the real OS side and bottom borders, give the
+        // caption row to the client. A maximized window clamps to the work area
+        // so the stripped frame cannot overhang the taskbar or the screen edges.
+        if (!wp || IsIconic(h)) break;
+        NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
+        RECT orig = p->rgrc[0];
+        if (IsZoomed(h)) {
+            HMONITOR mon = MonitorFromRect(&orig, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{ sizeof mi };
+            if (!mon || !GetMonitorInfoW(mon, &mi)) break;
+            p->rgrc[0].left   = max(orig.left,   mi.rcWork.left);
+            p->rgrc[0].top    = max(orig.top,    mi.rcWork.top);
+            p->rgrc[0].right  = min(orig.right,  mi.rcWork.right);
+            p->rgrc[0].bottom = min(orig.bottom, mi.rcWork.bottom);
+            return 0;
+        }
+        DefWindowProcW(h, m, wp, lp);          // the OS lays out its full frame...
+        g.osFrame = p->rgrc[0].left - orig.left;
+        p->rgrc[0].top = orig.top;             // ...and only the caption is dropped
+        return 0;
+    }
+    case WM_NCHITTEST: {
+        // KillerPDF's classification order: caption controls first (they must
+        // stay client input, and the maximize button answers HTMAXBUTTON so
+        // Windows offers the Win11 snap-layout flyout), then the top resize
+        // grip that replaced the removed OS border, then the drag row, and the
+        // real side/bottom borders come from DefWindowProc.
+        POINT s{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT rc; GetWindowRect(h, &rc);        // for the top-grip comparison (screen coords)
+        RECT cc; GetClientRect(h, &cc);        // the buttons live in client coordinates
+        POINT c = s; ScreenToClient(h, &c);
+        int which;
+        if (CapHit(c, cc.right, which)) return which == 1 ? HTMAXBUTTON : HTCLIENT;
+        if (!IsZoomed(h) && g.osFrame > 0 && s.y < rc.top + g.osFrame) {
+            if (s.x <  rc.left + g.osFrame) return HTTOPLEFT;
+            if (s.x >= rc.right - g.osFrame) return HTTOPRIGHT;
+            return HTTOP;
+        }
+        if (c.y >= 0 && c.y < CAP()) return HTCAPTION;
+        break;
+    }
+    case WM_NCMOUSEMOVE: {                     // hover lives in the non-client zone too
+        SetCapHot(h, wp == HTMAXBUTTON ? 1 : -1);
+        if (wp == HTMAXBUTTON) {
+            TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE | TME_NONCLIENT, h, 0 };
+            TrackMouseEvent(&t);
+        }
+        break;
+    }
+    case WM_NCMOUSELEAVE:
+        if (g.capHot >= 0 || g.capPressed) { g.capHot = -1; g.capPressed = false; InvalidateCap(h); }
+        break;
+    case WM_NCLBUTTONDOWN:
+        // Claim the press, or Windows runs its own caption-button loop and
+        // paints a stock button over ours (SnapLayouts.cs does the same).
+        if (wp == HTMAXBUTTON) { g.capPressed = true; InvalidateCap(h); return 0; }
+        break;
+    case WM_NCLBUTTONUP:
+        if (wp == HTMAXBUTTON) {
+            bool was = g.capPressed;
+            g.capPressed = false; InvalidateCap(h);
+            if (was) ToggleMax(h);
+            return 0;
+        }
+        if (g.capPressed) { g.capPressed = false; InvalidateCap(h); }   // released off the button
+        break;
+    case WM_MOUSEMOVE: {                       // the client part of the bar: min and close
+        POINT c{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT r; GetClientRect(h, &r);
+        int which;
+        int hot = CapHit(c, r.right, which) ? which : -1;
+        if (hot >= 0) TrackLeave(h);
+        SetCapHot(h, hot);
+        break;
+    }
+    case WM_MOUSELEAVE:
+        if (g.capHot >= 0) { g.capHot = -1; InvalidateCap(h); }
+        break;
+    case WM_LBUTTONDOWN: {
+        POINT c{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT r; GetClientRect(h, &r);
+        int which;
+        if (CapHit(c, r.right, which)) {
+            if (which == 0) ShowWindow(h, SW_MINIMIZE);
+            else if (which == 2) PostMessageW(h, WM_CLOSE, 0, 0);
+            return 0;
+        }
+        break;
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {          // the caption buttons take KillerPDF's hand cursor
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            RECT r; GetClientRect(h, &r);
+            int which;
+            if (CapHit(p, r.right, which)) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+        }
+        break;
     case WM_DPICHANGED: {
         g.dpi = HIWORD(wp) / 96.0;
         RECT* r = (RECT*)lp;
         ClearCache();
         if (g_uifont) { DeleteObject(g_uifont); g_uifont = nullptr; }
         if (g_sidefont) { DeleteObject(g_sidefont); g_sidefont = nullptr; }
+        if (g_glyphfont) { DeleteObject(g_glyphfont); g_glyphfont = nullptr; }
+        if (g_wordfont) { DeleteObject(g_wordfont); g_wordfont = nullptr; }
+        if (g_filefont) { DeleteObject(g_filefont); g_filefont = nullptr; }
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.tw = 0;
         SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -905,9 +1153,26 @@ static int Shot(const wchar_t* out, int w, int h) {
     if (!b) return 4;
     HGDIOBJ old = SelectObject(dc, b);
     int sw = (g.sideOn && g.n) ? sd.w : 0;
-    if (sw) SideDraw(dc, sw, h, 0);
-    Draw(dc, w - sw, h, sw);
-    PaintViewBars(dc, w - sw, h, sw);
+    int cap = CAP(), ch = max(1, h - cap);
+    // the children render above the caption row, so composite them shifted
+    if (sw) {
+        HDC m1 = CreateCompatibleDC(dc);
+        HBITMAP b1 = CreateCompatibleBitmap(dc, sw, ch);
+        HGDIOBJ o1 = SelectObject(m1, b1);
+        SideDraw(m1, sw, ch, 0);
+        BitBlt(dc, 0, cap, sw, ch, m1, 0, 0, SRCCOPY);
+        SelectObject(m1, o1); DeleteObject(b1); DeleteDC(m1);
+    }
+    {
+        HDC m2 = CreateCompatibleDC(dc);
+        HBITMAP b2 = CreateCompatibleBitmap(dc, max(1, w - sw), ch);
+        HGDIOBJ o2 = SelectObject(m2, b2);
+        Draw(m2, w - sw, ch, 0);
+        PaintViewBars(m2, w - sw, ch, 0);
+        BitBlt(dc, sw, cap, w - sw, ch, m2, 0, 0, SRCCOPY);
+        SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
+    }
+    DrawCaptionBar(dc, w);
     GdiFlush();
     SelectObject(dc, old);
     wchar_t full[MAX_PATH * 2];
@@ -959,9 +1224,15 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
 
     if (shot) {
         if (lstrcmpW(argv[3], L"-") && !Open(argv[3])) return 2;
-        RECT r{ 0, 0, 880, 680 };
-        AdjustWindowRectEx(&r, style, FALSE, 0);
-        SetWindowPos(g.main, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        // Size the window so the client is exactly 880x680: WM_NCCALCSIZE gives
+        // the caption back to the client, so only the side borders remain.
+        SetWindowPos(g.main, nullptr, 0, 0, 880, 680, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        for (int pass = 0; pass < 2; pass++) {
+            RECT c; GetClientRect(g.main, &c);
+            if (c.right == 880 && c.bottom == 680) break;
+            SetWindowPos(g.main, nullptr, 0, 0, 880 * 2 - c.right, 680 * 2 - c.bottom,
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         RECT c; GetClientRect(g.main, &c);
         for (int k = 0; k <= g.n; k++) if (!SidePump()) break;   // render the visible thumbs now
         return Shot(argv[2], c.right, c.bottom);
