@@ -329,7 +329,7 @@ static void HandleDrop(HDROP d) {
 static int SW() {                                                     // sidebar window width
     int w = g.sideW ? g.sideW : (int)(180 * g.dpi);                   // KillerPDF's pages-panel default
     int lo = (int)(120 * g.dpi);                                      // nMinColumn
-    int hi = (int)(234 * g.dpi);                                      // nMaxPages: 200px thumb + margins + bar
+    int hi = (int)(234 * g.dpi);                                      // nMaxPages (KillerPDF's pages cap)
     RECT r;
     if (g.main && GetClientRect(g.main, &r) && r.right > 0)
         hi = max(lo, min(hi, (int)r.right - (int)(160 * g.dpi)));
@@ -350,10 +350,9 @@ static void SideScrollTo(int y) {
 
 static void SideLayout() {
     if (!g.n || sd.cw <= 0) { sd.docH = 0; return; }
-    int avail = sd.cw - SBar();                    // the bar's gutter is reserved, KillerPDF-style
     if (!g.resizing) {                             // splitter drags keep the old pitch and thumbs;
-        int tw = std::clamp(avail - 2 * (int)(16 * g.dpi), 1, (int)(200 * g.dpi));  // 8+8 margins, 200px cap
-        if (sd.tw != tw) {                         // the release rebuilds at the final width
+        int tw = (int)(96 * g.dpi);                // fixed-size thumbs, centred: smaller than
+        if (sd.tw != tw) {                         // KillerPDF's ~134px stretch-to-width card
             sd.tw = tw;
             for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
             sd.th.clear();
