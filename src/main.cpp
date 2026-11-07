@@ -68,6 +68,7 @@ static App g;
 struct Side {
     int w = 0, cw = 0, ch = 0, scroll = 0, docH = 0, tw = 0, cur = -1;
     int hit = -1, moved = 0, pend = 0;  // drag-scroll state
+    POINT dp{};                         // last drag position
     unsigned long long hold = 0, tick = 0;
     std::vector<int> top;               // pixel top of each sidebar item
     std::unordered_map<int, Ent> th;
