@@ -391,18 +391,23 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
-// CI preview: render the first view offscreen to a PNG.
-static bool Shot(const wchar_t* out, int w, int h) {
+// CI preview: render the first view offscreen to a PNG. Returns 0 on success, else 10+GDI+ status.
+static int Shot(const wchar_t* out, int w, int h) {
     BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
     void* bits = nullptr;
     HDC dc = CreateCompatibleDC(nullptr);
     HBITMAP b = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (!b) return false;
-    SelectObject(dc, b);
+    if (!b) return 4;
+    HGDIOBJ old = SelectObject(dc, b);
     Draw(dc, w, h); GdiFlush();
-    Gdiplus::Bitmap bm(w, h, w * 4, PixelFormat32bppRGB, (BYTE*)bits);
+    SelectObject(dc, old);
+    wchar_t full[MAX_PATH * 2];
+    GetFullPathNameW(out, (DWORD)_countof(full), full, nullptr);
+    Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromHBITMAP(b, nullptr);
     CLSID png = { 0x557cf406, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x00, 0x00, 0xf8, 0x7a, 0x5e, 0xbc } };
-    return bm.Save(out, &png, nullptr) == Gdiplus::Ok;
+    Gdiplus::Status st = bm->Save(full, &png, nullptr);
+    delete bm;
+    return st == Gdiplus::Ok ? 0 : 10 + (int)st;
 }
 
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
@@ -431,7 +436,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
         SetWindowPos(g.hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         RECT c; GetClientRect(g.hwnd, &c); g.cw = c.right; g.ch = c.bottom;
         ApplyFit();
-        return Shot(argv[2], g.cw, g.ch) ? 0 : 3;
+        return Shot(argv[2], g.cw, g.ch);
     }
 
     ShowWindow(g.hwnd, show);

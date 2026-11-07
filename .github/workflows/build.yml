@@ -34,7 +34,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in tinypdf.exe preview.png build.log shot.log sample.pdf; do if [ -f "$f" ]; then files="$files $f"; fi; done
+          for f in tinypdf.exe preview.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Tiny PDF build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log
