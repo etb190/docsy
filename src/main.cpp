@@ -1485,9 +1485,11 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // them - the "small cuts" the reference never shows. So the canvas fill and
 // the 1px ring are GDI+ paths, anti-aliased exactly like the Border renders
 // them: one rounded shape (RadCard 6, the same tucked -1 bounds the old region
-// had), filled with the canvas grain through a texture brush and framed by a
-// 1px pen whose band covers the fill's outermost pixel - KillerPDF's border
-// over its background. The pages keep the cheap 1px-inset region clip.
+// had, whose outer edge the region fix had to chase one pixel past - path
+// fills land on exact pixels by themselves), filled with the canvas grain
+// through a texture brush and framed by the filled radius-6/radius-5 band -
+// KillerPDF's border over its background. The pages keep the cheap 1px-inset
+// region clip.
 static int CardW() { return max(0, g.cw - (int)(8 * g.dpi)); }
 
 static Gdiplus::GraphicsPath* CardPath(float x, float y, float w, float h, float rad, float inset) {
@@ -1526,12 +1528,23 @@ static void CardFill(HDC dc, int x, int y, int w, int h, int rad) {
 }
 
 static void CardFrame(HDC dc, int x, int y, int w, int h, int rad) {
+    // KillerPDF's 1px PaneBorder ring, filled rather than stroked: a GDI+ pen
+    // straddles its path and smears the straight edges over two pixels, while
+    // fills land on exact pixels. The band between the outer RadCard arc and
+    // its radius-1 inner arc IS WPF's border band - crisp straight edges like
+    // the old FrameRgn, blended arcs like the Border.
+    Gdiplus::GraphicsPath* outer = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0);
+    Gdiplus::GraphicsPath* inner = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 1);
+    Gdiplus::GraphicsPath ring;
+    ring.AddPath(outer, FALSE);
+    ring.AddPath(inner, FALSE);
+    ring.SetFillMode(Gdiplus::FillModeAlternate);
     Gdiplus::Graphics gs(dc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::GraphicsPath* p = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0.5f);
-    Gdiplus::Pen pen(Gdiplus::Color(255, 0x55, 0x55, 0x55), 1.0f);
-    gs.DrawPath(&pen, p);
-    delete p;
+    Gdiplus::SolidBrush br(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+    gs.FillPath(&br, &ring);
+    delete outer;
+    delete inner;
 }
 
 static void Draw(HDC dc, int w, int h, int xoff) {
