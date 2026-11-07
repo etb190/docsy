@@ -1,0 +1,39 @@
+name: build
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  win:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build
+        shell: cmd
+        run: cl /nologo /std:c++17 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /Fe:tinypdf.exe src\main.cpp /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest > build.log 2>&1
+      - name: Show build log
+        if: always()
+        shell: bash
+        run: cat build.log || true
+      - name: Preview
+        id: preview
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python ci/make_sample.py sample.pdf
+          $p = Start-Process .\tinypdf.exe -ArgumentList '--shot','preview.png','sample.pdf' -Wait -PassThru
+          "exit code: $($p.ExitCode)" | Tee-Object shot.log
+          if (!(Test-Path preview.png)) { exit 1 }
+      - name: Publish release
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          files=""
+          for f in tinypdf.exe preview.png build.log shot.log sample.pdf; do [ -f "$f" ] && files="$files $f"; done
+          gh release create latest $files --target "$GITHUB_SHA" --title "Tiny PDF (latest build)" --notes "Portable single-file exe. Build $GITHUB_RUN_NUMBER"
