@@ -1491,10 +1491,13 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
     HRGN clip = card ? CreateRoundRectRgn(xoff + 1, -1, xoff + cw - 1, h - 1, 2 * rad, 2 * rad) : nullptr;
     if (clip) SelectClipRgn(dc, clip);   // ContentClip: the card's inside, 1px inside its border
-    HRGN canvas = card ? CreateRoundRectRgn(xoff, -1, xoff + cw, h, 2 * rad, 2 * rad) : nullptr;
+    HRGN canvas = card ? CreateRoundRectRgn(xoff, -1, xoff + cw + 1, h + 1, 2 * rad, 2 * rad) : nullptr;
     if (canvas) SelectClipRgn(dc, canvas);   // CanvasClip: the fill and the frame share ONE
     RECT cr{ xoff, 0, xoff + cw, h };        // region, so no bare field ring can open between
-    FillRect(dc, &cr, GrainBrush(0));        // the card's canvas and its edge at any DPI
+    FillRect(dc, &cr, GrainBrush(0));        // the card's canvas and its edge at any DPI.
+                                             // GDI's rounded regions give up their last row
+                                             // and column, so the rect runs one past the
+                                             // card and the canvas still reaches the edge
     if (canvas) SelectClipRgn(dc, clip);     // the pages stay 1px inside the frame
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
