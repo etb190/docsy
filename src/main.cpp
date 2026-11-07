@@ -188,11 +188,12 @@ static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
     return slot;
 }
 
-// The caption row: grain over #1c1c1c, icon + two-tone wordmark at the left
-// ("Doc" light, "sy" in KillerPDF's AccentLogo green, over its soft shadow),
-// and the three window buttons at the right - and nothing read from the
-// document: the file name is deliberately not shown anywhere (bar or window
-// text). The bar spans both children, so the main window paints it.
+// The caption row: grain over #1c1c1c, icon + wordmark at the left ("Docsy"
+// in one light tone over its soft dark shadow - KillerPDF's two-tone
+// AccentLogo green was dropped), and the three window buttons at the right -
+// and nothing read from the document: the file name is deliberately not shown
+// anywhere (bar or window text). The bar spans both children, so the main
+// window paints it.
 static void DrawCaptionBar(HDC dc, int w) {
     RECT bar{ 0, 0, w, CAP() };
     FillRect(dc, &bar, GrainBrush(2));
@@ -211,12 +212,9 @@ static void DrawCaptionBar(HDC dc, int w) {
     RECT sh1{ tx + 1, 1, tx + (int)(96 * g.dpi) + 1, CAP() + 1 };
     DrawTextW(dc, L"Docsy", -1, &sh1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
     RECT wr{ tx, 0, tx + (int)(96 * g.dpi), CAP() };
-    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-    DrawTextW(dc, L"Doc", -1, &wr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
-    SIZE sz; GetTextExtentPoint32W(dc, L"Doc", 3, &sz);
-    RECT sr{ wr.left + sz.cx, 0, wr.right, CAP() };
-    SetTextColor(dc, RGB(0x1e, 0xa5, 0x4c));                  // AccentLogo green
-    DrawTextW(dc, L"sy", -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));                  // one flat light tone - the
+    DrawTextW(dc, L"Docsy", -1, &wr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+    // two-tone AccentLogo colouring (KillerPDF's green "sy") was dropped
 
     // window buttons
     SelectObject(dc, CaptionFont(g_glyphfont, 10, false, L"Segoe MDL2 Assets"));
@@ -547,7 +545,12 @@ static bool SidePump() {
     return true;
 }
 
-// Keeps the sidebar highlight in step with the view and follows the current page.
+// Keeps the sidebar highlight in step with the view and follows the current
+// page. The follow is edge-reversed on purpose: a selection that runs off the
+// bottom of the rail is scrolled flush to the TOP edge (the pages after it
+// stay in sight below), and one that runs off the top lands flush at the
+// bottom edge - instead of the usual ensure-visible, which anchored it the
+// other way around and parked the selected card at the bottom of the rail.
 static void SideSync() {
     if (!g.side || !g.n) { sd.cur = -1; return; }
     int c = g.cur;
@@ -555,8 +558,8 @@ static void SideSync() {
     sd.cur = c;
     if (c >= 0 && sd.docH > 0 && GetTickCount64() >= sd.hold) {
         int y0 = sd.top[c], y1 = sd.top[c + 1];
-        if (y0 < sd.scroll) SideScrollTo(y0 - (int)(4 * g.dpi));
-        else if (y1 > sd.scroll + sd.ch) SideScrollTo(y1 - sd.ch + (int)(4 * g.dpi));
+        if (y1 > sd.scroll + sd.ch) SideScrollTo(y0 - (int)(4 * g.dpi));          // off the bottom: card at the top
+        else if (y0 < sd.scroll) SideScrollTo(y1 - sd.ch + (int)(4 * g.dpi));     // off the top: card at the bottom
     }
     if (g.side && (GetWindowLongW(g.side, GWL_STYLE) & WS_VISIBLE)) InvalidateRect(g.side, nullptr, FALSE);
 }
@@ -666,7 +669,12 @@ static void SideDraw(HDC dc, int w, int h, int xoff) {
 static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
-    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    // WM_MOUSEACTIVATE keeps its default (MA_ACTIVATE): a click anywhere on the
+    // rail must raise and focus the window. The old MA_NOACTIVATE was an
+    // anti-flash band-aid from when the frame still carried WS_CAPTION
+    // (activating made DWM repaint the native caption); with the style gone
+    // there is nothing left to flash, and swallowing activation kept clicks on
+    // the sidebar from bringing Docsy to the foreground.
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         if (sd.cw > 0 && sd.ch > 0) {
@@ -846,7 +854,11 @@ static void ViewWheel(WPARAM wp, LPARAM lp) {
 static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
-    case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+    // WM_MOUSEACTIVATE keeps its default (MA_ACTIVATE): clicking the document
+    // must raise and focus the window. MA_NOACTIVATE here was a leftover
+    // anti-flash band-aid from the WS_CAPTION era - the style is gone, nothing
+    // native can flash on activation any more, and the swallow only meant
+    // clicks on the pages could not bring Docsy to the foreground.
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         if (g.cw > 0 && g.ch > 0) {
