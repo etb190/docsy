@@ -62,6 +62,57 @@ static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi))
 static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi)); }
 static int Gap() { return max(4, (int)(10 * g.dpi)); }
 
+// ---- film-grain margins (port of KillerPDF's procedural GrainTexture) ----
+// One seamless 256x256 tile of gray specks: Gaussian around 128, softened with wrapping
+// neighbours so the tile repeats without a seam, then contrast-boosted to keep dark and
+// bright specks distinct. KillerPDF paints this tile at alpha 70/255 over the surface;
+// we pre-blend the same alpha over the margin grey once, so a pattern brush reproduces
+// the identical texture with no per-pixel blend cost. The docsy margin grey is neutral,
+// so the theme-tinted "lean" specks of the original never apply. The seed is fixed so
+// every build shows the identical pattern, and the tile stays fixed to the window while
+// pages scroll, matching KillerPDF's viewport-fixed grain overlay.
+static HBRUSH g_grainBrush = nullptr;
+static HBITMAP g_grainBmp = nullptr;
+
+static HBRUSH GrainBrush() {
+    if (g_grainBrush) return g_grainBrush;
+    const int S = 256;
+    const double Spread = 150.0, Soften = 0.10, Contrast = 1.35, Alpha = 70.0 / 255.0;
+    const BYTE back[3] = { 60, 63, 65 };
+    auto cl = [](double v) { return v < 0 ? 0.0 : v > 255 ? 255.0 : v; };
+    unsigned long long st = 1337;  // splitmix64: deterministic stream, same fixed-seed intent
+    auto rnd = [&st]() {
+        st += 0x9E3779B97F4A7C15ULL;
+        unsigned long long z = st;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return ((z ^ (z >> 31)) >> 11) * (1.0 / 9007199254740992.0);  // [0,1)
+    };
+    std::vector<double> raw((size_t)S * S);
+    for (double& v : raw) {
+        double u1 = 1.0 - rnd(), u2 = rnd();
+        v = cl(128.0 + Spread * std::sqrt(-2.0 * std::log(u1)) * std::cos(2 * 3.14159265358979323846 * u2));
+    }
+    BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), S, S, 1, 32, BI_RGB };
+    BYTE* px = nullptr;
+    g_grainBmp = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
+    if (!px || !g_grainBmp) return (HBRUSH)GetStockObject(GRAY_BRUSH);
+    for (int y = 0; y < S; y++) {
+        for (int x = 0; x < S; x++) {
+            double around = (raw[((y + S - 1) % S) * S + x] + raw[((y + 1) % S) * S + x]
+                           + raw[y * S + (x + S - 1) % S] + raw[y * S + (x + 1) % S]) / 4.0;
+            double soft = raw[y * S + x] * (1.0 - Soften) + around * Soften;
+            double shade = cl(128.0 + (soft - 128.0) * Contrast);
+            BYTE* p = px + ((size_t)y * S + x) * 4;
+            for (int c = 0; c < 3; c++) p[c] = (BYTE)std::lround(back[c] * (1.0 - Alpha) + shade * Alpha);
+            p[3] = 255;
+        }
+    }
+    g_grainBrush = CreatePatternBrush(g_grainBmp);
+    if (!g_grainBrush) return (HBRUSH)GetStockObject(GRAY_BRUSH);
+    return g_grainBrush;
+}
+
 static void ClearCache() {
     for (auto& kv : g.cache) DeleteObject(kv.second.b);
     g.cache.clear();
@@ -229,9 +280,8 @@ static void OpenDlg() {
 }
 
 static void Draw(HDC dc, int w, int h) {
-    HBRUSH br = CreateSolidBrush(RGB(60, 63, 65));
     RECT r{ 0, 0, w, h };
-    FillRect(dc, &r, br); DeleteObject(br);
+    FillRect(dc, &r, GrainBrush());   // textured margins instead of flat grey
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
