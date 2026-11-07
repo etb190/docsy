@@ -1,9 +1,12 @@
 // Docsy - minimal, fast, native Win32 PDF reader.
 // Uses the PDF engine built into Windows (Windows.Data.Pdf): no bundled renderer.
 // The main window hosts two children: the page view (right) and the thumbnail
-// sidebar (left). The sidebar is fully virtualized: only thumbnails actually in
-// view are rendered (a few per timer tick) and off-screen ones are evicted, so
-// a 2,000-page book scrolls as light as a 10-page one.
+// sidebar (left; drag the splitter between them to resize it). The sidebar is
+// fully virtualized: only thumbnails actually in view are rendered (a few per
+// timer tick) and off-screen ones are evicted, so a 2,000-page book scrolls as
+// light as a 10-page one. No stock scrollbars anywhere: scrolling is wheel,
+// drag-pan and keys, and the only bar on screen is a slim KillerPDF-style
+// overlay thumb (4px wide, 8px under the cursor) owning an invisible 12px gutter.
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
@@ -57,6 +60,11 @@ struct App {
     int sx = 0, sy = 0, cw = 0, ch = 0, docW = 0, docH = 0, gap = 10, maxw = 0, lastVis = 0;
     int cur = -1;                       // current page (view centre), drives the sidebar highlight
     POINT dp{};
+    bool vHot = false, vDrag = false, hHot = false, hDrag = false;   // overlay bar states
+    int vGrab = 0, hGrab = 0;
+    int sideW = 0;                      // user-sized sidebar width (0 = KillerPDF's 180px default)
+    bool resizing = false;              // splitter drag: defer refits and thumb rebuilds
+    int rsX = 0, rsW0 = 0;
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
@@ -68,6 +76,8 @@ static App g;
 struct Side {
     int w = 0, cw = 0, ch = 0, scroll = 0, docH = 0, tw = 0, cur = -1;
     int hit = -1, moved = 0, pend = 0;  // drag-scroll state
+    bool barHot = false, barDrag = false;   // the sidebar's own overlay bar
+    int barGrab = 0;
     POINT dp{};                         // last drag position
     unsigned long long hold = 0, tick = 0;
     std::vector<int> top;               // pixel top of each sidebar item
@@ -75,11 +85,12 @@ struct Side {
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
 };
 static Side sd;
-static HFONT g_uifont = nullptr;
+static HFONT g_uifont = nullptr, g_sidefont = nullptr;
 
 static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi)); }
 static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi)); }
 static int Gap() { return max(4, (int)(10 * g.dpi)); }
+static int SBar() { return (int)(12 * g.dpi); }   // overlay bar gutter: KillerPDF's ScrollBarThickness
 
 // ---- film-grain margins (port of KillerPDF's procedural GrainTexture) ----
 // One seamless 256x256 tile of gray specks: Gaussian around 128, softened with wrapping
@@ -214,18 +225,8 @@ static void UpdateTitle() {
 
 static void UpdateScroll() {
     g.busy = true;
-    for (int k = 0; k < 3; k++) {
-        g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
-        g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
-        SCROLLINFO si{ sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS };
-        si.nMin = 0; si.nMax = max(0, g.docH - 1); si.nPage = (UINT)g.ch; si.nPos = g.sy;
-        SetScrollInfo(g.view, SB_VERT, &si, TRUE);
-        si.nMax = max(0, g.docW - 1); si.nPage = (UINT)g.cw; si.nPos = g.sx;
-        SetScrollInfo(g.view, SB_HORZ, &si, TRUE);
-        RECT r; GetClientRect(g.view, &r);
-        if (r.right == g.cw && r.bottom == g.ch) break;
-        g.cw = r.right; g.ch = r.bottom;
-    }
+    g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
+    g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
     g.busy = false;
 }
 
@@ -258,8 +259,7 @@ static void SetZoom(double z, bool fit, int ax, int ay) {
 static void ApplyFit(bool pageFit = false) {
     if (!g.n || g.cw <= 0) return;
     float mw = 0; for (float w : g.pw) mw = max(mw, w);
-    int W = g.cw;
-    if (!(GetWindowLongW(g.view, GWL_STYLE) & WS_VSCROLL)) W -= GetSystemMetricsForDpi(SM_CXVSCROLL, (UINT)(g.dpi * 96));
+    int W = g.cw - SBar();   // the reserved overlay-bar column, as the old scrollbar subtracted itself
     double z = (W - 2.0 * Gap()) / (mw * g.dpi);
     if (pageFit) {
         int c = PageAt(g.sy + g.ch / 3);
@@ -273,8 +273,6 @@ static void ScrollTo(int x, int y) {
     y = std::clamp(y, 0, max(0, g.docH - g.ch));
     if (x == g.sx && y == g.sy) return;
     g.sx = x; g.sy = y;
-    SetScrollPos(g.view, SB_VERT, y, TRUE);
-    SetScrollPos(g.view, SB_HORZ, x, TRUE);
     InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
 }
@@ -328,22 +326,23 @@ static void HandleDrop(HDROP d) {
 
 // ---------------- sidebar ----------------
 
-static int SW() { return (int)(184 * g.dpi); }                        // sidebar window width
+static int SW() {                                                     // sidebar window width
+    int w = g.sideW ? g.sideW : (int)(180 * g.dpi);                   // KillerPDF's pages-panel default
+    int lo = (int)(120 * g.dpi);                                      // nMinColumn
+    int hi = (int)(234 * g.dpi);                                      // nMaxPages: 200px thumb + margins + bar
+    RECT r;
+    if (g.main && GetClientRect(g.main, &r) && r.right > 0)
+        hi = max(lo, min(hi, (int)r.right - (int)(160 * g.dpi)));
+    return std::clamp(w, lo, hi);
+}
 static int STH(int i) { return max(1, (int)std::lround(sd.tw * g.ph[i] / max(1.f, g.pw[i]))); }
 static int SidePageAt(int y) { return PageIn(sd.top, g.n, y); }
-
-static void SideScrollInfo() {
-    SCROLLINFO si{ sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS };
-    si.nMin = 0; si.nMax = max(0, sd.docH - 1); si.nPage = (UINT)sd.ch; si.nPos = sd.scroll;
-    SetScrollInfo(g.side, SB_VERT, &si, TRUE);
-}
 
 static void SideScrollTo(int y) {
     y = std::clamp(y, 0, max(0, sd.docH - sd.ch));
     if (y == sd.scroll) return;
     sd.scroll = y;
     if (g.side && (GetWindowLongW(g.side, GWL_STYLE) & WS_VISIBLE)) {
-        SetScrollPos(g.side, SB_VERT, y, TRUE);
         InvalidateRect(g.side, nullptr, FALSE);
         SetTimer(g.side, 2, 25, nullptr);   // pump newly visible thumbs
     }
@@ -351,20 +350,22 @@ static void SideScrollTo(int y) {
 
 static void SideLayout() {
     if (!g.n || sd.cw <= 0) { sd.docH = 0; return; }
-    int pad = (int)(12 * g.dpi);
-    if (sd.tw != sd.cw - 2 * pad) {
-        sd.tw = sd.cw - 2 * pad;
-        for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-        sd.th.clear();
+    int avail = sd.cw - SBar();                    // the bar's gutter is reserved, KillerPDF-style
+    if (!g.resizing) {                             // splitter drags keep the old pitch and thumbs;
+        int tw = std::clamp(avail - 2 * (int)(16 * g.dpi), 1, (int)(200 * g.dpi));  // 8+8 margins, 200px cap
+        if (sd.tw != tw) {                         // the release rebuilds at the final width
+            sd.tw = tw;
+            for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
+            sd.th.clear();
+        }
+        int lab = (int)(20 * g.dpi), gp = (int)(8 * g.dpi);   // 2px gap + label, 8px tail: the 8,6 / 0,2 rhythm
+        sd.top.assign((size_t)g.n + 1, 0);
+        int y = (int)(8 * g.dpi);
+        for (int i = 0; i < g.n; i++) { sd.top[i] = y; y += STH(i) + lab + gp; }
+        sd.top[g.n] = y;
+        sd.docH = y - gp + (int)(8 * g.dpi);
     }
-    int lab = (int)(18 * g.dpi), gp = (int)(8 * g.dpi);
-    sd.top.assign((size_t)g.n + 1, 0);
-    int y = pad;
-    for (int i = 0; i < g.n; i++) { sd.top[i] = y; y += STH(i) + lab + gp; }
-    sd.top[g.n] = y;
-    sd.docH = y - gp + pad;
     sd.scroll = std::clamp(sd.scroll, 0, max(0, sd.docH - sd.ch));
-    SideScrollInfo();
     InvalidateRect(g.side, nullptr, FALSE);
     SetTimer(g.side, 2, 25, nullptr);
 }
@@ -420,21 +421,61 @@ static void EnsureSideBack(HDC ref, int w, int h) {
     sd.bw = w; sd.bh = h;
 }
 
+// Overlay-bar geometry, ported from KillerPDF: the thumb keeps the viewport's
+// proportional size but never shrinks below a 64px grab floor (ThumbViewportFloor,
+// floored at half the track), and its position maps the scroll linearly over the
+// free track. The track itself paints nothing - the bar is the only visible part.
+static void BarThumb(int docLen, int viewLen, int scroll, int& tlen, int& tpos) {
+    if (docLen <= viewLen || docLen <= 0 || viewLen <= 0) { tlen = 0; tpos = 0; return; }
+    int t = (int)((long long)viewLen * viewLen / docLen);
+    int fl = (int)min(64.0 * g.dpi, viewLen * 0.5);
+    tlen = std::clamp(t, fl, viewLen);
+    tpos = std::clamp((int)((long long)(viewLen - tlen) * max(0, scroll) / (docLen - viewLen)), 0, viewLen - tlen);
+}
+
+// The KillerPDF thumb: a slim rounded bar in the theme green, a third alpha at
+// rest and solid under the cursor. GDI+ blends it straight onto the back buffer.
+static void RoundRectFill(HDC dc, int x, int y, int w, int h, int r, bool hot) {
+    if (w <= 0 || h <= 0) return;
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::GraphicsPath p;
+    r = max(1, min(r, min(w, h) / 2));
+    p.AddArc(x, y, 2 * r, 2 * r, 180, 90);
+    p.AddArc(x + w - 2 * r, y, 2 * r, 2 * r, 270, 90);
+    p.AddArc(x + w - 2 * r, y + h - 2 * r, 2 * r, 2 * r, 0, 90);
+    p.AddArc(x, y + h - 2 * r, 2 * r, 2 * r, 90, 90);
+    p.CloseFigure();
+    Gdiplus::SolidBrush br(Gdiplus::Color(hot ? (BYTE)255 : (BYTE)0x55, (BYTE)0x22, (BYTE)0xBB, (BYTE)0x56));
+    gs.FillPath(&br, &p);
+}
+
+static HFONT SideFont() {   // KillerPDF's page labels: 14px
+    if (!g_sidefont)
+        g_sidefont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    return g_sidefont;
+}
+
+static void TrackLeave(HWND h) { TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE, h, 0 }; TrackMouseEvent(&t); }
+
 // Paints the sidebar rail: darker noisy background, thumbs (or page-shaped
-// placeholders while they render), page numbers, current-page accent ring.
+// placeholders while they render), page numbers, current-page accent ring, and
+// the rail's own overlay bar inside the reserved 12px gutter on the right.
 static void SideDraw(HDC dc, int w, int h, int xoff) {
     RECT r{ xoff, 0, xoff + w, h };
     FillRect(dc, &r, GrainBrush(1));
     if (!g.n || sd.cw <= 0 || sd.top.empty()) return;
-    int pad = (int)(12 * g.dpi), lab = (int)(18 * g.dpi);
+    int avail = sd.cw - SBar();
     COLORREF accent = RGB(139, 92, 246);
-    HGDIOBJ of = SelectObject(dc, UiFont());
+    HGDIOBJ of = SelectObject(dc, SideFont());
     SetBkMode(dc, TRANSPARENT);
     HDC m = CreateCompatibleDC(dc);
     int first = SidePageAt(sd.scroll);
     for (int i = first; i < g.n && sd.top[i] < sd.scroll + h; i++) {
         int th = STH(i);
-        int x = xoff + pad + (sd.cw - 2 * pad - sd.tw) / 2;
+        int x = xoff + (avail - sd.tw) / 2;
         int y = sd.top[i] - sd.scroll;
         RECT tr{ x, y, x + sd.tw, y + th };
         auto it = sd.th.find(i);
@@ -457,7 +498,7 @@ static void SideDraw(HDC dc, int w, int h, int xoff) {
         }
         wchar_t num[16];
         swprintf_s(num, L"%d", i + 1);
-        RECT nr{ xoff, y + th + 1, xoff + w, y + th + 1 + lab };
+        RECT nr{ xoff, y + th + 2, xoff + avail, y + th + 2 + (int)(18 * g.dpi) };
         SetTextColor(dc, i == sd.cur ? RGB(178, 146, 255) : RGB(176, 178, 184));
         DrawTextW(dc, num, -1, &nr, DT_CENTER | DT_TOP | DT_SINGLELINE);
     }
@@ -465,6 +506,12 @@ static void SideDraw(HDC dc, int w, int h, int xoff) {
     SelectObject(dc, of);
     RECT div{ xoff + w - 1, 0, xoff + w, h };
     FillRect(dc, &div, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    if (sd.docH > sd.ch && sd.ch > 0) {
+        int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp);
+        bool hot = sd.barHot || sd.barDrag;
+        int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
+        RoundRectFill(dc, xoff + w - SBar() + (SBar() - bw) / 2, tp, bw, tl, (int)(3 * g.dpi), hot);
+    }
 }
 
 static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
@@ -486,34 +533,39 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (wp == 2 && !SidePump()) KillTimer(h, 2);
         return 0;
     case WM_SIZE: return 0;
-    case WM_VSCROLL: {
-        SCROLLINFO si{ sizeof si, SIF_ALL };
-        GetScrollInfo(h, SB_VERT, &si);
-        int p = si.nPos, line = (int)(56 * g.dpi);
-        switch (LOWORD(wp)) {
-        case SB_LINEUP: p -= line; break;
-        case SB_LINEDOWN: p += line; break;
-        case SB_PAGEUP: p -= (int)si.nPage; break;
-        case SB_PAGEDOWN: p += (int)si.nPage; break;
-        case SB_THUMBTRACK: case SB_THUMBPOSITION: p = si.nTrackPos; break;
-        case SB_TOP: p = 0; break;
-        case SB_BOTTOM: p = INT_MAX / 2; break;
-        }
-        SideScrollTo(p);
-        return 0;
-    }
     case WM_MOUSEWHEEL:
         SideScrollTo(sd.scroll - GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 240) / 120);
         return 0;
-    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDOWN: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         SetCapture(h);
-        sd.dp = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int gb = SBar();
+        if (g.n && sd.docH > sd.ch && p.x >= sd.cw - gb && p.x < sd.cw - 1) {
+            int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp);
+            if (p.y >= tp && p.y < tp + tl) { sd.barDrag = true; sd.barGrab = p.y - tp; }
+            else SideScrollTo(sd.scroll + (p.y < tp ? -(int)(sd.ch * 0.9) : (int)(sd.ch * 0.9)));
+            return 0;
+        }
+        sd.dp = p;
         sd.hit = SidePageAt(sd.dp.y + sd.scroll);
         sd.moved = 0; sd.pend = 0;
         return 0;
-    case WM_MOUSEMOVE:
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (sd.barDrag) {
+            int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp);
+            SideScrollTo((int)((long long)(p.y - sd.barGrab) * max(0, sd.docH - sd.ch) / max(1, sd.ch - tl)));
+            return 0;
+        }
+        bool hot = g.n && sd.docH > sd.ch && p.x >= sd.cw - SBar() && p.x < sd.cw - 1;
+        if (hot) { int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp); hot = p.y >= tp && p.y < tp + tl; }
+        if (hot != sd.barHot) {
+            sd.barHot = hot;
+            if (hot) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
         if (GetCapture() == h) {
-            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             int dy = p.y - sd.dp.y;
             sd.dp = p;
             if (dy) {
@@ -523,16 +575,28 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
         }
         return 0;
-    case WM_LBUTTONUP:
+    }
+    case WM_MOUSELEAVE:
+        if (sd.barHot) { sd.barHot = false; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONUP: {
+        bool bar = sd.barDrag;
+        sd.barDrag = false;
         if (GetCapture() == h) ReleaseCapture();
-        if (sd.moved <= (int)(4 * g.dpi) && sd.hit >= 0 && sd.hit < g.n) {
+        if (!bar && sd.moved <= (int)(4 * g.dpi) && sd.hit >= 0 && sd.hit < g.n) {
             sd.hold = GetTickCount64() + 600;   // the jump must not scroll the sidebar back
             ScrollTo(g.sx, max(0, g.top[sd.hit] - Gap() / 2));
         }
         sd.moved = 0; sd.hit = -1; sd.pend = 0;
         return 0;
+    }
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            bool edge = g.sideOn && g.n && sd.cw > 0 && p.x >= sd.cw - 1;
+            SetCursor(LoadCursorW(nullptr, edge ? IDC_SIZEWE : IDC_ARROW));
+            return TRUE;
+        }
         break;
     case WM_DROPFILES: HandleDrop((HDROP)wp); return 0;
     }
@@ -557,7 +621,8 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     }
     HDC m = CreateCompatibleDC(dc);
     int first = PageAt(g.sy), last = first;
-    int offx = g.docW < w ? (w - g.docW) / 2 : -g.sx;
+    int gut = g.docH > h ? SBar() : 0;   // the reserved bar column, like KillerPDF's Grid layout
+    int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -g.sx;
     for (int i = first; i < g.n && g.top[i] < g.sy + h; i++) {
         last = i;
         int pw = PW(i), ph = PH(i);
@@ -597,6 +662,29 @@ static void EnsureBack(HDC ref, int w, int h) {
     g.bw = w; g.bh = h;
 }
 
+// The page view's overlay bars. Like KillerPDF's document pane they live in a
+// reserved 12px gutter (the vertical one spans the full height, the horizontal
+// one stops short of it), the track paints nothing, and the thumb is the only
+// visible part: 4px and a third alpha at rest, 8px and solid under the cursor.
+static void PaintViewBars(HDC dc, int w, int h, int xoff) {
+    if (!g.n) return;
+    int gb = SBar(), r = (int)(3 * g.dpi);
+    bool vshow = g.docH > h;
+    if (vshow) {
+        int tl, tp; BarThumb(g.docH, h, g.sy, tl, tp);
+        bool hot = g.vHot || g.vDrag;
+        int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
+        RoundRectFill(dc, xoff + w - gb + (gb - bw) / 2, tp, bw, tl, r, hot);
+    }
+    if (g.docW > w) {
+        int track = w - (vshow ? gb : 0);
+        int tl, tp; BarThumb(g.docW, track, g.sx, tl, tp);
+        bool hot = g.hHot || g.hDrag;
+        int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
+        RoundRectFill(dc, xoff + tp, h - gb + (gb - bw) / 2, tl, bw, r, hot);
+    }
+}
+
 static void ViewWheel(WPARAM wp, LPARAM lp) {
     int d = GET_WHEEL_DELTA_WPARAM(wp);
     if (LOWORD(wp) & MK_CONTROL) {
@@ -604,22 +692,6 @@ static void ViewWheel(WPARAM wp, LPARAM lp) {
         SetZoom(g.zoom * std::pow(1.12, d / 120.0), false, p.x, p.y);
     } else if (LOWORD(wp) & MK_SHIFT) ScrollTo(g.sx - d * (int)(g.dpi * 80) / 120, g.sy);
     else ScrollTo(g.sx, g.sy - d * (int)(g.dpi * 80) / 120);
-}
-
-static int ScrollMsg(HWND h, int bar, WPARAM wp) {
-    SCROLLINFO si{ sizeof si, SIF_ALL };
-    GetScrollInfo(h, bar, &si);
-    int p = si.nPos, line = (int)(40 * g.dpi);
-    switch (LOWORD(wp)) {
-    case SB_LINEUP: p -= line; break;
-    case SB_LINEDOWN: p += line; break;
-    case SB_PAGEUP: p -= (int)si.nPage; break;
-    case SB_PAGEDOWN: p += (int)si.nPage; break;
-    case SB_THUMBTRACK: case SB_THUMBPOSITION: p = si.nTrackPos; break;
-    case SB_TOP: p = 0; break;
-    case SB_BOTTOM: p = INT_MAX / 2; break;
-    }
-    return p;
 }
 
 static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
@@ -631,6 +703,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g.cw > 0 && g.ch > 0) {
             EnsureBack(dc, g.cw, g.ch);
             Draw(g.bdc, g.cw, g.ch, 0);
+            PaintViewBars(g.bdc, g.cw, g.ch, 0);
             BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);
             SetTimer(h, 1, 5, nullptr);
         }
@@ -639,24 +712,80 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_TIMER:
         KillTimer(h, 1); Prefetch(); return 0;
-    case WM_VSCROLL: ScrollTo(g.sx, ScrollMsg(h, SB_VERT, wp)); return 0;
-    case WM_HSCROLL: ScrollTo(ScrollMsg(h, SB_HORZ, wp), g.sy); return 0;
     case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;
     case WM_MOUSEHWHEEL:
         ScrollTo(g.sx + GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 80) / 120, g.sy); return 0;
     case WM_KEYDOWN: return 0;   // keys live on the main window
-    case WM_LBUTTONDOWN:
-        SetCapture(h); g.drag = true; g.dp = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; return 0;
-    case WM_MOUSEMOVE:
+    case WM_LBUTTONDOWN: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        SetCapture(h);
+        int gb = SBar();
+        bool vshow = g.n && g.docH > g.ch;
+        if (vshow && p.x >= g.cw - gb) {   // the vertical bar: drag the thumb, page on the track
+            int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp);
+            if (p.y >= tp && p.y < tp + tl) { g.vDrag = true; g.vGrab = p.y - tp; }
+            else ScrollTo(g.sx, g.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
+            return 0;
+        }
+        if (g.n && g.docW > g.cw && p.y >= g.ch - gb && p.x < g.cw - (vshow ? gb : 0)) {
+            int tl, tp; BarThumb(g.docW, g.cw - (vshow ? gb : 0), g.sx, tl, tp);
+            if (p.x >= tp && p.x < tp + tl) { g.hDrag = true; g.hGrab = p.x - tp; }
+            else ScrollTo(g.sx + (p.x < tp ? -(int)(g.cw * 0.9) : (int)(g.cw * 0.9)), g.sy);
+            return 0;
+        }
+        if (g.sideOn && g.n && p.x < (int)(5 * g.dpi)) {   // the splitter: drag to resize the sidebar
+            g.resizing = true; g.rsX = p.x; g.rsW0 = SW();
+            return 0;
+        }
+        g.drag = true; g.dp = p;
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (g.resizing) {
+            int w = g.rsW0 + (p.x - g.rsX);
+            if (w != g.sideW) { g.sideW = w; LayoutMain(); }   // thumbs rebuild once, on release
+            return 0;
+        }
+        if (g.vDrag) {
+            int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp);
+            ScrollTo(g.sx, (int)((long long)(p.y - g.vGrab) * max(0, g.docH - g.ch) / max(1, g.ch - tl)));
+            return 0;
+        }
+        if (g.hDrag) {
+            int tl, tp; BarThumb(g.docW, g.cw - ((g.n && g.docH > g.ch) ? SBar() : 0), g.sx, tl, tp);
+            ScrollTo((int)((long long)(p.x - g.hGrab) * max(0, g.docW - g.cw) / max(1, g.cw - (g.docH > g.ch ? SBar() : 0) - tl)), g.sy);
+            return 0;
+        }
         if (g.drag) {
-            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ScrollTo(g.sx - (p.x - g.dp.x), g.sy - (p.y - g.dp.y)); g.dp = p;
         }
+        bool vhot = g.n && g.docH > g.ch && p.x >= g.cw - SBar();
+        if (vhot) { int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl; }
+        bool hhot = !vhot && g.n && g.docW > g.cw && p.y >= g.ch - SBar() && p.x < g.cw - (vhot ? SBar() : 0);
+        if (hhot) { int tl, tp; BarThumb(g.docW, g.cw - (vhot ? SBar() : 0), g.sx, tl, tp); hhot = p.x >= tp && p.x < tp + tl; }
+        if (vhot != g.vHot || hhot != g.hHot) {
+            g.vHot = vhot; g.hHot = hhot;
+            if (vhot || hhot) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g.vHot || g.hHot) { g.vHot = g.hHot = false; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONUP:
-        g.drag = false; ReleaseCapture(); return 0;
+        if (g.resizing) { g.resizing = false; ReleaseCapture(); LayoutMain(); return 0; }
+        g.vDrag = g.hDrag = g.drag = false;
+        ReleaseCapture();
+        return 0;
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT && g.n) { SetCursor(LoadCursorW(nullptr, g.drag ? IDC_SIZEALL : IDC_HAND)); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT && g.n) {
+            if (g.vDrag || g.hDrag || g.vHot || g.hHot) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            if (g.sideOn && p.x < (int)(5 * g.dpi)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
+            SetCursor(LoadCursorW(nullptr, g.drag ? IDC_SIZEALL : IDC_HAND)); return TRUE;
+        }
         break;
     case WM_DROPFILES: HandleDrop((HDROP)wp); return 0;
     }
@@ -681,7 +810,9 @@ static void LayoutMain() {
     MoveWindow(g.view, sw, 0, w - sw, h, TRUE);
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
-    if (!g.busy && g.cw > 0 && g.ch > 0) {
+    g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
+    g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
+    if (!g.resizing && !g.busy && g.cw > 0 && g.ch > 0) {
         if (g.fit) ApplyFit(); else Layout();
         UpdateTitle();
     }
@@ -701,10 +832,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_CREATE: {
         g.main = h; g.dpi = GetDpiForWindow(h) / 96.0;
         g.view = CreateWindowExW(0, L"DocsyView", nullptr,
-                                 WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL,
+                                 WS_CHILD | WS_VISIBLE,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         g.side = CreateWindowExW(0, L"DocsySide", nullptr,
-                                 WS_CHILD | WS_VSCROLL,
+                                 WS_CHILD,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
         return 0;
@@ -717,6 +848,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RECT* r = (RECT*)lp;
         ClearCache();
         if (g_uifont) { DeleteObject(g_uifont); g_uifont = nullptr; }
+        if (g_sidefont) { DeleteObject(g_sidefont); g_sidefont = nullptr; }
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.tw = 0;
         SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -776,6 +908,7 @@ static int Shot(const wchar_t* out, int w, int h) {
     int sw = (g.sideOn && g.n) ? sd.w : 0;
     if (sw) SideDraw(dc, sw, h, 0);
     Draw(dc, w - sw, h, sw);
+    PaintViewBars(dc, w - sw, h, sw);
     GdiFlush();
     SelectObject(dc, old);
     wchar_t full[MAX_PATH * 2];
