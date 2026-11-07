@@ -274,7 +274,7 @@ static void EnsureBack(HDC ref, int w, int h) {
     if (g.bbm) { SelectObject(g.bdc, g.bold); DeleteObject(g.bbm); }
     else g.bdc = CreateCompatibleDC(ref);
     g.bbm = CreateCompatibleBitmap(ref, w, h);
-    g.bold = SelectObject(g.bdc, g.bbm);
+    g.bold = (HBITMAP)SelectObject(g.bdc, g.bbm);
     g.bw = w; g.bh = h;
 }
 

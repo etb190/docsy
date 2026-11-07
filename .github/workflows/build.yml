@@ -13,7 +13,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Build
         shell: cmd
-        run: cl /nologo /std:c++17 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /Fe:tinypdf.exe src\main.cpp /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest > build.log 2>&1
+        run: cl /nologo /std:c++20 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /Fe:tinypdf.exe src\main.cpp /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest > build.log 2>&1
       - name: Show build log
         if: always()
         shell: bash
