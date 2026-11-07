@@ -3069,6 +3069,14 @@ static void FindDraw(HDC dc, int ox, int oy) {
     g_grainPX = spx; g_grainPY = spy;
 
     FdRects R; FdLayout(editW, R);
+    // every content rect rides the window's origin: (0,0) on the real window,
+    // the window's view offset in the CI shot - the shadow and panel above
+    // already add (ox,oy) themselves
+    if (ox || oy) {
+        RECT* fr[] = { &R.bar, &R.icon, &R.edit, &R.status,
+                       &R.btn[0], &R.btn[1], &R.btn[2], &R.btn[3], &R.btn[4] };
+        for (RECT* rp : fr) { rp->left += ox; rp->top += oy; rp->right += ox; rp->bottom += oy; }
+    }
     SetBkMode(dc, TRANSPARENT);
     // the query edit: a radius-3 box on BackgroundBrush #1c1c1c with the
     // CardBorderBrush #404040 ring; the real edit control covers the interior,
@@ -3287,7 +3295,7 @@ static void FindPlace() {
     if (vw <= 0) return;
     int editW = FdEditW(vw);
     int bw = FdD(FdBarFix) + editW, bh = FdD(FdBarH);
-    MoveWindow(g_find, vw - FdD(16) + FdD(FdPadX) - bw, FdD(6) - FdD(FdPadT),
+    MoveWindow(g_find, vw - FdD(16) - bw - FdD(FdPadX), FdD(6) - FdD(FdPadT),
                bw + 2 * FdD(FdPadX), bh + FdD(FdPadT) + FdD(FdPadB), TRUE);
     FdRects R; FdLayout(editW, R);
     MoveWindow(g_fedit, R.edit.left, R.edit.top,
@@ -3613,7 +3621,7 @@ static int Shot(const wchar_t* out, int w, int h) {
         if (fd.open) {                                  // the floating Find bar, over its pixels
             int editW = FdEditW(w - sw);
             int bw = FdD(FdBarFix) + editW;
-            FindDraw(m2, (w - sw) - FdD(16) + FdD(FdPadX) - bw, FdD(6) - FdD(FdPadT));
+            FindDraw(m2, (w - sw) - FdD(16) - bw - FdD(FdPadX), FdD(6) - FdD(FdPadT));
         }
         BitBlt(dc, sw, cap, w - sw, ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
