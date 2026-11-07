@@ -1481,15 +1481,15 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // tile, so the margins, the rail and the footer read as one container that no
 // single component owns.
 //
-// The corners are WPF arcs there and GDI regions here could only stair-step
-// them - the "small cuts" the reference never shows. So the canvas fill and
-// the 1px ring are GDI+ paths, anti-aliased exactly like the Border renders
-// them: one rounded shape (RadCard 6, the same tucked -1 bounds the old region
-// had, whose outer edge the region fix had to chase one pixel past - path
-// fills land on exact pixels by themselves), filled with the canvas grain
-// through a texture brush and framed by the filled radius-6/radius-5 band -
-// KillerPDF's border over its background. The pages keep the cheap 1px-inset
-// region clip.
+// The corners are WPF arcs there, and GDI regions here can only step them -
+// the "small cuts" the reference never shows. The split that keeps the best of
+// both renderers: GDI owns the straight edges (its region fill and FrameRgn
+// ring are pixel-exact, which GDI+ pens are not), and GDI+ repaints just the
+// four corner squares the way the Border composes them - field grain outside
+// the outer RadCard arc, canvas grain inside its radius-1 inner arc, the 1px
+// PaneBorderBrush #555555 band between, all anti-aliased, on grain tiles
+// translated to GDI's own brush-org phase. The pages keep the cheap region
+// clip.
 static int CardW() { return max(0, g.cw - (int)(8 * g.dpi)); }
 
 static Gdiplus::GraphicsPath* CardPath(float x, float y, float w, float h, float rad, float inset) {
@@ -1503,46 +1503,67 @@ static Gdiplus::GraphicsPath* CardPath(float x, float y, float w, float h, float
     return p;
 }
 
-static Gdiplus::Brush* CanvasGrain() {   // the canvas tile, as a GDI+ texture brush
-    static Gdiplus::Bitmap* bm = nullptr;
-    static Gdiplus::TextureBrush* tb = nullptr;
-    if (!tb) {
-        GrainBrush(0);                   // make sure the DIB tile exists
+static int g_grainPX = 0, g_grainPY = 0;   // GDI's brush-org phase, stashed by the paint
+
+static Gdiplus::TextureBrush* GrainTex(int which) {   // a grain tile as a GDI+ brush,
+    static Gdiplus::TextureBrush* tb[2] = { nullptr, nullptr };   // phased like GDI's own
+    static float ox = -1, oy = -1;
+    if (ox != (float)g_grainPX || oy != (float)g_grainPY) {   // the phase moves with the
+        for (int i = 0; i < 2; i++) { delete tb[i]; tb[i] = nullptr; }   // pane layout
+        ox = (float)g_grainPX; oy = (float)g_grainPY;
+    }
+    if (!tb[which]) {
+        GrainBrush(which);               // make sure the DIB tile exists
         BITMAP gb{};
-        if (!g_grainBmp[0] || !GetObject(g_grainBmp[0], sizeof gb, &gb) || !gb.bmBits) return nullptr;
+        if (!g_grainBmp[which] || !GetObject(g_grainBmp[which], sizeof gb, &gb) || !gb.bmBits) return nullptr;
         BITMAPINFO bi{};
         bi.bmiHeader = { sizeof(BITMAPINFOHEADER), gb.bmWidth, gb.bmHeight, 1, (WORD)gb.bmBitsPixel, BI_RGB };
-        bm = Gdiplus::Bitmap::FromBITMAPINFO(&bi, gb.bmBits);   // copies the tile once
-        if (bm) tb = new Gdiplus::TextureBrush(bm, Gdiplus::WrapModeTile);
+        Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromBITMAPINFO(&bi, gb.bmBits);   // copies the tile
+        if (bm) {
+            tb[which] = new Gdiplus::TextureBrush(bm, Gdiplus::WrapModeTile);
+            tb[which]->TranslateTransform((float)((g_grainPX % 256 + 256) % 256),
+                                          (float)((g_grainPY % 256 + 256) % 256));
+        }
     }
-    return tb;
+    return tb[which];
 }
 
-static void CardFill(HDC dc, int x, int y, int w, int h, int rad) {
+// GDI's rounded regions can only step around the corners - the "small cuts"
+// KillerPDF never shows. So after the GDI fill and ring (whose straight edges
+// are pixel-exact and stay), the four corner squares are repainted by GDI+ the
+// way the WPF Border composes them: field grain outside the outer RadCard arc,
+// canvas grain inside its radius-1 inner arc, the 1px PaneBorderBrush #555555
+// band between - every edge anti-aliased. The grain tiles are translated to
+// GDI's brush-org phase, so the patches melt into the pane without a seam, and
+// the band meets FrameRgn's straight ring flush at the arc tangents.
+static HBRUSH CardEdgeBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x55, 0x55, 0x55)); return b; }  // PaneBorderBrush
+
+static void CardCorners(HDC dc, int x, int y, int w, int h, int rad) {
     Gdiplus::Graphics gs(dc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::GraphicsPath* p = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0);
-    if (Gdiplus::Brush* tex = CanvasGrain()) gs.FillPath(tex, p);
-    else { Gdiplus::SolidBrush b(Gdiplus::Color(255, 58, 58, 58)); gs.FillPath(&b, p); }
-    delete p;
-}
-
-static void CardFrame(HDC dc, int x, int y, int w, int h, int rad) {
-    // KillerPDF's 1px PaneBorder ring, filled rather than stroked: a GDI+ pen
-    // straddles its path and smears the straight edges over two pixels, while
-    // fills land on exact pixels. The band between the outer RadCard arc and
-    // its radius-1 inner arc IS WPF's border band - crisp straight edges like
-    // the old FrameRgn, blended arcs like the Border.
     Gdiplus::GraphicsPath* outer = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0);
     Gdiplus::GraphicsPath* inner = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 1);
-    Gdiplus::GraphicsPath ring;
-    ring.AddPath(outer, FALSE);
-    ring.AddPath(inner, FALSE);
-    ring.SetFillMode(Gdiplus::FillModeAlternate);
-    Gdiplus::Graphics gs(dc);
-    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::SolidBrush br(Gdiplus::Color(255, 0x55, 0x55, 0x55));
-    gs.FillPath(&br, &ring);
+    Gdiplus::GraphicsPath band;          // the ring: even-odd between the two arcs
+    band.AddPath(outer, FALSE);
+    band.AddPath(inner, FALSE);
+    band.SetFillMode(Gdiplus::FillModeAlternate);
+    Gdiplus::SolidBrush edge(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+    int sq = rad + 2;                    // the arc plus its AA tails, per corner
+    RECT cs[4] = {
+        { x, y, x + sq, y + sq },                    // top-left (its top row stays tucked)
+        { x + w - sq, y, x + w, y + sq },            // top-right
+        { x, y + h - sq, x + sq, y + h },            // bottom-left
+        { x + w - sq, y + h - sq, x + w, y + h },    // bottom-right
+    };
+    for (int i = 0; i < 4; i++) {
+        gs.SetClip(Gdiplus::Rect(cs[i].left, cs[i].top, sq, sq), Gdiplus::CombineModeReplace);
+        if (Gdiplus::TextureBrush* f = GrainTex(1))   // the field the card floats on
+            gs.FillRectangle(f, Gdiplus::Rect(cs[i].left, cs[i].top, sq, sq));
+        if (Gdiplus::TextureBrush* c = GrainTex(0))   // the canvas, inside the inner arc
+            gs.FillPath(c, inner);
+        else { Gdiplus::SolidBrush cb(Gdiplus::Color(255, 58, 58, 58)); gs.FillPath(&cb, inner); }
+        gs.FillPath(&edge, &band);                    // the PaneBorder band, arcs blended
+    }
     delete outer;
     delete inner;
 }
@@ -1553,10 +1574,16 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     int cw = min(w, CardW());
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
-    if (card) CardFill(dc, xoff, -1, cw, h + 1, rad);   // the canvas, WPF-smooth corners
-    else { RECT cr{ xoff, 0, xoff + cw, h }; FillRect(dc, &cr, GrainBrush(0)); }
     HRGN clip = card ? CreateRoundRectRgn(xoff + 1, -1, xoff + cw - 1, h - 1, 2 * rad, 2 * rad) : nullptr;
     if (clip) SelectClipRgn(dc, clip);   // ContentClip: the card's inside, 1px inside its border
+    HRGN canvas = card ? CreateRoundRectRgn(xoff, -1, xoff + cw + 1, h + 1, 2 * rad, 2 * rad) : nullptr;
+    if (canvas) SelectClipRgn(dc, canvas);   // CanvasClip: the fill and the frame share ONE
+    RECT cr{ xoff, 0, xoff + cw, h };        // region, so no bare field ring can open between
+    FillRect(dc, &cr, GrainBrush(0));        // the card's canvas and its edge at any DPI.
+                                             // GDI's rounded regions give up their last row
+                                             // and column, so the rect runs one past the
+                                             // card and the canvas still reaches the edge
+    if (canvas) SelectClipRgn(dc, clip);     // the pages stay 1px inside the frame
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
@@ -1567,7 +1594,8 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-        if (card) CardFrame(dc, xoff, -1, cw, h + 1, rad);
+        if (canvas) { FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1); DeleteObject(canvas); }
+        if (card) CardCorners(dc, xoff, -1, cw, h + 1, rad);
         return;
     }
     HDC m = CreateCompatibleDC(dc);
@@ -1630,8 +1658,12 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         DrawTextW(dc, g.hint.c_str(), -1, &hn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-    if (card) CardFrame(dc, xoff, -1, cw, h + 1, rad);   // the 1px card edge, drawn last so no
-                                                         // page can ever cut into its ring
+    if (canvas) {   // the 1px card edge, KillerPDF's PaneBorderBrush #555555: pixel-exact
+        FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1);   // on the straights, drawn before the
+        DeleteObject(canvas);                          // corners so the AA arcs land on top
+    }
+    if (card) CardCorners(dc, xoff, -1, cw, h + 1, rad);   // WPF-smooth corner arcs over the
+                                                           // steps the regions leave behind
     g.lastVis = last;
     Evict(first, last);
 }
@@ -1710,6 +1742,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             EnsureBack(dc, g.cw, g.ch);
             POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the grain tile phase is the
             SetBrushOrgEx(g.bdc, -po.x, -po.y, nullptr);            // window's, so the field the
+            g_grainPX = -po.x; g_grainPY = -po.y;   // corner patches phase their tiles to it
             Draw(g.bdc, g.cw, g.ch, 0);                             // card floats on never shows a
             PaintViewBars(g.bdc, g.cw, g.ch, 0);                    // seam at a pane boundary
             BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);
