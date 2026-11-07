@@ -4,13 +4,16 @@
 // sidebar (left; drag the splitter between them to resize it). The sidebar is
 // fully virtualized: only thumbnails actually in view are rendered (a few per
 // timer tick) and off-screen ones are evicted, so a 2,000-page book scrolls as
-// light as a 10-page one. No stock scrollbars anywhere: scrolling is wheel,
-// drag-pan and keys, and the only bar on screen is a slim KillerPDF-style
-// overlay thumb (4px wide, 8px under the cursor) owning an invisible 12px gutter.
+// light as a 10-page one. No stock scrollbars anywhere: scrolling is wheel and
+// keys, and the only bar on screen is a slim KillerPDF-style overlay thumb (4px
+// wide, 8px under the cursor) owning an invisible 12px gutter.
 // Text selection is KillerPDF's flowing model too: a press on text drags a caret
-// pair along the page's reading order (column-aware, line-banded cells from the
-// built-in OCR pass over the page) and paints one 60/255 accent quad per
-// selected line; select or double-click copies at once; empty page areas still pan.
+// pair of individual characters along the page's reading order (column-aware,
+// line-banded cells: the built-in OCR pass over the page supplies word boxes, each
+// sliced into per-character cells the way KillerPDF's engine supplies letters) and
+// paints one 60/255 accent quad per selected line; select or double-click copies
+// at once. The page never pans under the mouse - the wheel and the keys own
+// scrolling, so a grab always means text selection, never a scroll.
 // The frame is KillerPDF's too: the real OS side borders stay, but the window
 // is created without WS_CAPTION (and WM_NCCALCSIZE gives the top row to the
 // client), so the native caption can never appear - not even on the first
@@ -67,12 +70,12 @@ struct Ent { HBITMAP b; int w, h; unsigned long long t; };
 // read in column-aware order, and a drag tracks the run of units between two carets
 // (page, index) in that reading order. Geometry lives in page-DIP space with the
 // top-left origin the OCR boxes report, so painting is the same scale the page
-// bitmap already uses. Empty page areas stay with the pan gesture, exactly like
-// KillerPDF keeps its marquee for empty space.
-struct TxtCell {                      // one selectable unit: an OCR word box
-    std::wstring text;
-    float l = 0, r = 0, t = 0, b = 0; // page DIPs, top-left origin, y down
-    int word = 0, line = 0;           // ordinals assigned when the page flattens
+// bitmap already uses. Empty page areas are dead to the mouse - the wheel and the
+// keys own scrolling, so a grab on the page always means selection, never a scroll.
+struct TxtCell {                      // one selectable unit: a character sliced out
+    std::wstring text;                // of an OCR word box (word-granular boxes are
+    float l = 0, r = 0, t = 0, b = 0; // what the OS OCR reports; TtSplitChars cuts
+    int word = 0, line = 0;           // them into KillerPDF's letter-granular cells)
 };
 struct TxtLine {                      // a contiguous slice of the flattened cells
     int start = 0, count = 0;
@@ -97,10 +100,10 @@ struct App {
     std::vector<float> pw, ph;          // page size in DIPs
     std::vector<int> top;               // pixel top of each page
     double zoom = 1.0, dpi = 1.0;       // zoom: pixels per DIP (x dpi scale)
-    bool fit = true, quiet = false, drag = false, busy = false, sideOn = false;
+    bool fit = true, quiet = false, busy = false, sideOn = false;
     int sx = 0, sy = 0, cw = 0, ch = 0, docW = 0, docH = 0, gap = 10, maxw = 0, lastVis = 0;
     int cur = -1;                       // current page (view centre), drives the sidebar highlight
-    POINT dp{};
+    unsigned long long scrollTick = 0;  // last scroll stamp: defers the text pre-warm until settling
     bool vHot = false, vDrag = false, hHot = false, hDrag = false;   // overlay bar states
     int vGrab = 0, hGrab = 0;
     int sideW = 0;                      // user-sized sidebar width (0 = KillerPDF's 180px default)
@@ -112,6 +115,7 @@ struct App {
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
+    HDC capdc = nullptr; HBITMAP capbm = nullptr, capold = nullptr; int capw = 0, caph = 0;
     // flowing text selection: carets over the flattened text cells of a page,
     // plus the lazily built per-page text geometry (LRU-capped like the thumbs)
     std::unordered_map<int, TxtPage> txt;
@@ -184,11 +188,13 @@ static void InvalidateCap(HWND h) {
 }
 
 static void SetCapHot(HWND h, int hot) {
-    if (g.capHot == hot) return;
-    g.capHot = hot;
-    if (hot >= 0) SetTimer(h, 3, 250, nullptr);   // while a button is hovered the band also
-    else KillTimer(h, 3);                          // repaints on a slow tick, so a surface
-    InvalidateCap(h);                              // that dropped it heals without re-hover
+    if (g.capHot == hot) return;                     // repaints only on a hover flip -
+    g.capHot = hot;                                  // never per mouse move
+    if (hot >= 0) SetTimer(h, 3, 250, nullptr);      // while a button is hovered the band also
+    else KillTimer(h, 3);                            // repaints on a slow tick, so a surface
+    InvalidateCap(h);                                // that dropped it heals without re-hover
+    // (the tick repaint is buffered now, so an unchanged band reblits identically
+    // and cannot strobe the way the old direct paint did)
 }
 
 static void ToggleMax(HWND h) {
@@ -237,7 +243,9 @@ static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
 // AccentLogo green was dropped), and the three window buttons at the right -
 // and nothing read from the document: the file name is deliberately not shown
 // anywhere (bar or window text). The bar spans both children, so the main
-// window paints it.
+// window paints it. Painted through a memory bitmap and blitted in one call:
+// a direct paint showed every intermediate step (grain fill, wordmark, button
+// gradient) on each repaint, which read as the buttons flashing under the cursor.
 static void DrawCaptionBar(HDC dc, int w) {
     RECT bar{ 0, 0, w, CAP() };
     FillRect(dc, &bar, GrainBrush(2));
@@ -285,6 +293,25 @@ static void DrawCaptionBar(HDC dc, int w) {
         DrawTextW(dc, glyph[i], -1, &r[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     SelectObject(dc, of);
+}
+
+// The band's own back buffer, the way the view and the sidebar already paint.
+static void EnsureCapBack(HDC ref, int w) {
+    int caph = CAP();
+    if (g.capbm && g.capw == w && g.caph == caph) return;
+    if (g.capbm) { SelectObject(g.capdc, g.capold); DeleteObject(g.capbm); }
+    else g.capdc = CreateCompatibleDC(ref);
+    g.capbm = CreateCompatibleBitmap(ref, w, caph);
+    g.capold = (HBITMAP)SelectObject(g.capdc, g.capbm);
+    g.capw = w; g.caph = caph;
+}
+
+// Draw the caption band into dst with a single atomic blit.
+static void PaintCaptionInto(HDC dst, int w) {
+    if (!dst || w <= 0) return;
+    EnsureCapBack(dst, w);
+    DrawCaptionBar(g.capdc, w);
+    BitBlt(dst, 0, 0, w, CAP(), g.capdc, 0, 0, SRCCOPY);
 }
 
 // ---- film-grain margins (port of KillerPDF's procedural GrainTexture) ----
@@ -551,9 +578,44 @@ static void TtLines(TxtPage& pt) {
     pt.cells = std::move(flat);
 }
 
+// KillerPDF's cells are the engine's LETTERS; ours start as OCR word boxes. Slice
+// every word box into one cell per character - a uniform advance across the box,
+// which is what hit-testing needs since the caret only compares mid-points - so
+// drags move character by character instead of snapping whole words, exactly at
+// KillerPDF's granularity. Every character keeps the word's ordinal, so the space
+// between words, the double-click word range and the copied text are unchanged.
+static void TtSplitChars(TxtPage& pt) {
+    if (pt.cells.empty() || pt.lines.empty()) return;
+    std::vector<TxtCell> out; out.reserve(pt.cells.size() * 4);
+    std::vector<TxtLine> lines; lines.reserve(pt.lines.size());
+    int lineStart = 0;
+    for (const TxtLine& ln : pt.lines) {
+        for (int i = ln.start; i < ln.end(); i++) {
+            const TxtCell& w = pt.cells[i];
+            int n = max(1, (int)w.text.size());
+            float wl = (w.r - w.l) / n;
+            for (int j = 0; j < n; j++) {
+                TxtCell c;
+                c.text.assign(1, w.text[j]);
+                c.l = w.l + wl * j; c.r = w.l + wl * (j + 1);
+                c.t = w.t; c.b = w.b;
+                c.word = w.word; c.line = (int)lines.size();
+                out.push_back(std::move(c));
+            }
+        }
+        TxtLine nl = ln;                       // the band is the word band: contiguous
+        nl.start = lineStart;                  // character tiles span the same extent
+        nl.count = (int)out.size() - lineStart;
+        lineStart = (int)out.size();
+        lines.push_back(nl);
+    }
+    pt.cells = std::move(out);
+    pt.lines = std::move(lines);
+}
+
 // True when the point sits ON text: inside a line's vertical band and within its
 // horizontal extent (small slop). This is the gate that decides flowing selection
-// vs the pan gesture - empty page areas must keep the pan.
+// vs doing nothing - a press on text selects, a press anywhere else is dead.
 static bool TtOverText(const TxtPage& pt, float x, float y) {
     const float slop = 2.0f;   // DIPs
     for (const TxtLine& ln : pt.lines)
@@ -687,6 +749,7 @@ static TxtPage* TtFor(int i) {
         }
     } catch (...) { /* no OCR pack / render failure: selection is just not offered here */ }
     TtLines(pt);
+    TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
     pt.tick = ++g.tick;
     g.txt[i] = std::move(pt);
     while (g.txt.size() > 48) {           // LRU: drop the stalest page's geometry
@@ -697,6 +760,14 @@ static TxtPage* TtFor(int i) {
         g.txt.erase(oldest);
     }
     return &g.txt[i];
+}
+
+// Peek at already-built text geometry without triggering the OCR build - the
+// cursor only advertises text that is ready, and the build itself happens off
+// the click path (the pre-warm timer, or the first press as a last resort).
+static TxtPage* TtPeek(int i) {
+    auto it = g.txt.find(i);
+    return it != g.txt.end() ? &it->second : nullptr;
 }
 
 static void SelClear() {
@@ -811,7 +882,11 @@ static void LayoutMain();
 
 static void UpdateTitle() {   // sidebar highlight follows the page under the upper
     int c = g.n ? PageAt(g.sy + g.ch / 3) : -1;   // third. The window text stays "Docsy"
-    if (c != g.cur) { g.cur = c; SideSync(); }    // - the open file's name shows nowhere.
+    if (c != g.cur) {                             // - the open file's name shows nowhere.
+        g.cur = c;
+        if (g.view) SetTimer(g.view, 4, 160, nullptr);   // pre-warm the page's text once
+        SideSync();                           // the scroll settles (never mid-gesture)
+    }
 }
 
 static void UpdateScroll() {
@@ -819,6 +894,7 @@ static void UpdateScroll() {
     g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
     g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
     g.busy = false;
+    g.scrollTick = GetTickCount64();
 }
 
 static void Layout() {
@@ -864,6 +940,7 @@ static void ScrollTo(int x, int y) {
     y = std::clamp(y, 0, max(0, g.docH - g.ch));
     if (x == g.sx && y == g.sy) return;
     g.sx = x; g.sy = y;
+    g.scrollTick = GetTickCount64();
     InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
 }
@@ -1335,6 +1412,18 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
+        if (wp == 4) {                         // deferred text pre-warm: OCR the settled
+            KillTimer(h, 4);                   // page once it exists and scrolling has been
+            if (g.n && !g.selArm) {            // quiet for a moment - off the click path
+                if (GetTickCount64() - g.scrollTick > 250) {
+                    int pg = PageAt(g.sy + g.ch / 3);
+                    if (g.txt.find(pg) == g.txt.end()) TtFor(pg);
+                } else {
+                    SetTimer(h, 4, 160, nullptr);   // still moving: try again after it settles
+                }
+            }
+            return 0;
+        }
         KillTimer(h, 1); Prefetch(); return 0;
     case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;
     case WM_MOUSEHWHEEL:
@@ -1361,11 +1450,12 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g.resizing = true; g.rsX = p.x; g.rsW0 = SW();
             return 0;
         }
-        // flowing text selection: a press ON text starts KillerPDF's caret drag; a press
-        // on empty page keeps the pan (KillerPDF keeps its marquee there instead)
+        // flowing text selection: a press ON text starts KillerPDF's caret drag. A press
+        // anywhere else starts nothing - the wheel and the keys own scrolling, so the
+        // old grab-and-pan gesture (which fought the selection drag) is gone.
         int pg; float fx, fy;
         if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
-            TxtPage* pt = TtFor(pg);
+            TxtPage* pt = TtFor(pg);   // builds once if the pre-warm has not reached it yet
             if (pt && TtOverText(*pt, fx, fy)) {
                 SelClear();
                 g.selArm = true; g.selDrag = false;
@@ -1376,7 +1466,6 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             if (g.selRange || g.selArm) SelClear();   // a plain click off text drops it
         }
-        g.drag = true; g.dp = p;
         return 0;
     }
     case WM_MOUSEMOVE: {
@@ -1395,9 +1484,6 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int tl, tp; BarThumb(g.docW, g.cw - ((g.n && g.docH > g.ch) ? SBar() : 0), g.sx, tl, tp);
             ScrollTo((int)((long long)(p.x - g.hGrab) * max(0, g.docW - g.cw) / max(1, g.cw - (g.docH > g.ch ? SBar() : 0) - tl)), g.sy);
             return 0;
-        }
-        if (g.drag) {
-            ScrollTo(g.sx - (p.x - g.dp.x), g.sy - (p.y - g.dp.y)); g.dp = p;
         }
         // live selection drag: the focus caret tracks the pointer (cross-page, like
         // KillerPDF's Continuous mode); ViewToPage clamps into the page so dragging
@@ -1454,7 +1540,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        g.vDrag = g.hDrag = g.drag = false;
+        g.vDrag = g.hDrag = false;
         ReleaseCapture();
         return 0;
     case WM_LBUTTONDBLCLK: {
@@ -1481,14 +1567,15 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (g.vDrag || g.hDrag || g.vHot || g.hHot) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             if (g.sideOn && p.x < (int)(5 * g.dpi)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
-            // I-beam over selectable text (KillerPDF's SelectableTextCursor): the cursor
-            // also says which gesture a press will start - select here, pan elsewhere
+            // I-beam over selectable text (KillerPDF's SelectableTextCursor), peeked
+            // without building: the cursor advertises text only once the page's OCR
+            // pass has landed, and the arrow elsewhere says a press does nothing
             int pg; float fx, fy;
-            if (!g.drag && ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
-                TxtPage* pt = TtFor(pg);
+            if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+                TxtPage* pt = TtPeek(pg);
                 if (pt && TtOverText(*pt, fx, fy)) { SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE; }
             }
-            SetCursor(LoadCursorW(nullptr, g.drag ? IDC_SIZEALL : IDC_HAND)); return TRUE;
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE;
         }
         break;
     case WM_DROPFILES: HandleDrop((HDROP)wp); return 0;
@@ -1553,14 +1640,14 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {   // the custom caption row; the children paint their own areas
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
-        DrawCaptionBar(dc, r.right);
+        PaintCaptionInto(dc, r.right);
         EndPaint(h, &ps);
         return 0;
     }
     case WM_PRINTCLIENT: {   // DWM re-materializes the surface (peek, taskbar thumbnails,
         HDC dc = (HDC)wp;    // occlusion, snap previews) WITHOUT invalidating first, which
         RECT r; GetClientRect(h, &r);   // blanked the band until the next re-hover
-        DrawCaptionBar(dc, r.right);
+        PaintCaptionInto(dc, r.right);
         return 0;
     }
     case WM_NCACTIVATE: {    // activation flips are when DWM re-evaluates the frame; a
@@ -1611,12 +1698,12 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_NCMOUSEMOVE: {                     // hover lives in the non-client zone too
-        SetCapHot(h, wp == HTMAXBUTTON ? 1 : -1);
-        if (wp == HTMAXBUTTON) {
-            TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE | TME_NONCLIENT, h, 0 };
-            TrackMouseEvent(&t);
-            InvalidateCap(h);                  // repaint on every hover move: a dropped
-        }                                      // surface heals without leaving and re-entering
+        bool wasHot = g.capHot == 1;
+        SetCapHot(h, wp == HTMAXBUTTON ? 1 : -1);   // repaints only on a hover flip
+        if (wp == HTMAXBUTTON && !wasHot) {    // arm the leave tracker once per hover
+            TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE | TME_NONCLIENT, h, 0 };   // session:
+            TrackMouseEvent(&t);               // re-arming it on every move makes the
+        }                                      // leave/enter churn that strobes the button
         break;
     }
     case WM_NCMOUSELEAVE:
@@ -1642,8 +1729,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RECT r; GetClientRect(h, &r);
         int which;
         int hot = CapHit(c, r.right, which) ? which : -1;
-        if (hot >= 0) { TrackLeave(h); InvalidateCap(h); }   // repaint on every hover move
-        SetCapHot(h, hot);
+        bool wasHot = g.capHot >= 0;
+        SetCapHot(h, hot);                     // repaints only on a hover flip
+        if (hot >= 0 && !wasHot) TrackLeave(h);   // arm leave-tracking once per hover
         break;
     }
     case WM_MOUSELEAVE:
@@ -1727,7 +1815,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_TIMER:
         if (wp == 3) { InvalidateCap(h); return 0; }   // hovered-button keepalive repaint
-        break;
+        break;                                 // (buffered, so an unchanged band reblits
+                                               // identically and cannot strobe)
     case WM_DROPFILES: HandleDrop((HDROP)wp); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
@@ -1824,8 +1913,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
 
     if (shot) {
         if (lstrcmpW(argv[3], L"-") && !Open(argv[3])) return 2;
-        // CI preview seed: a committed selection over one page's cells (sel=page:c0:c1),
-        // so the release screenshot shows the selection quads
+        // CI preview seed: a committed selection over one page's per-character carets
+        // (sel=page:c0:c1), so the release screenshot shows the selection quads
         if (argc >= 5 && !wcsncmp(argv[4], L"sel=", 4)) {
             const wchar_t* q = argv[4] + 4;
             const wchar_t* c1p = wcschr(q, L':');
