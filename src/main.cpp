@@ -65,19 +65,21 @@ static int Gap() { return max(4, (int)(10 * g.dpi)); }
 // ---- film-grain margins (port of KillerPDF's procedural GrainTexture) ----
 // One seamless 256x256 tile of gray specks: Gaussian around 128, softened with wrapping
 // neighbours so the tile repeats without a seam, then contrast-boosted to keep dark and
-// bright specks distinct. KillerPDF paints this tile at alpha 70/255 over the surface;
-// we pre-blend the same alpha over the margin grey once, so a pattern brush reproduces
-// the identical texture with no per-pixel blend cost. The docsy margin grey is neutral,
-// so the theme-tinted "lean" specks of the original never apply. The seed is fixed so
-// every build shows the identical pattern, and the tile stays fixed to the window while
-// pages scroll, matching KillerPDF's viewport-fixed grain overlay.
+// bright specks distinct. KillerPDF paints this tile at alpha 70/255 and then scales the
+// whole overlay down by its theme resource GrainOpacity - 0.24 on the dark themes - so
+// the effective blend is (70/255) * 0.24 ~= 0.066. Baking that product in reproduces the
+// rendered frost exactly; painting at the raw alpha 70 reads as harsh TV static. The
+// docsy margin grey is neutral, so the theme-tinted "lean" specks of the original never
+// apply. The seed is fixed so every build shows the identical pattern, and the tile stays
+// fixed to the window while pages scroll, matching KillerPDF's viewport-fixed overlay.
 static HBRUSH g_grainBrush = nullptr;
 static HBITMAP g_grainBmp = nullptr;
 
 static HBRUSH GrainBrush() {
     if (g_grainBrush) return g_grainBrush;
     const int S = 256;
-    const double Spread = 150.0, Soften = 0.10, Contrast = 1.35, Alpha = 70.0 / 255.0;
+    const double Spread = 150.0, Soften = 0.10, Contrast = 1.35;
+    const double Alpha = 70.0 / 255.0 * 0.24;   // tile alpha 70 times the dark-theme GrainOpacity
     const BYTE back[3] = { 60, 63, 65 };
     auto cl = [](double v) { return v < 0 ? 0.0 : v > 255 ? 255.0 : v; };
     unsigned long long st = 1337;  // splitmix64: deterministic stream, same fixed-seed intent
