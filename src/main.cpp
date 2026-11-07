@@ -8,9 +8,9 @@
 // drag-pan and keys, and the only bar on screen is a slim KillerPDF-style
 // overlay thumb (4px wide, 8px under the cursor) owning an invisible 12px gutter.
 // Text selection is KillerPDF's flowing model too: a press on text drags a caret
-// pair along the page's reading order (column-aware, line-banded cells from
-// Windows.Data.Pdf) and paints one 60/255 accent quad per selected line; select
-// or double-click copies at once; empty page areas still pan.
+// pair along the page's reading order (column-aware, line-banded cells from the
+// built-in OCR pass over the page) and paints one 60/255 accent quad per
+// selected line; select or double-click copies at once; empty page areas still pan.
 // The frame is KillerPDF's too: the real OS side borders stay, but the window
 // is created without WS_CAPTION (and WM_NCCALCSIZE gives the top row to the
 // client), so the native caption can never appear - not even on the first
@@ -41,6 +41,7 @@ using std::min; using std::max;
 #include <winrt/Windows.Graphics.Imaging.h>
 #include <winrt/Windows.Data.Pdf.h>
 #include <winrt/Windows.UI.h>
+#include <winrt/Windows.Media.Ocr.h>
 
 #pragma comment(lib, "windowsapp")
 #pragma comment(lib, "shcore")
@@ -59,14 +60,15 @@ using winrt::Windows::Storage::Streams::InMemoryRandomAccessStream;
 struct Ent { HBITMAP b; int w, h; unsigned long long t; };
 
 // ---- flowing text selection (port of KillerPDF's TextRunService + #127) ----
-// A page's selectable units - here the Windows.Data.Pdf text-range boxes, in KillerPDF
+// A page's selectable units - here the OS OCR's per-word boxes over a fresh page
+// render (Windows.Data.Pdf exposes no text layer to read directly), in KillerPDF
 // the engine's word letters - are grouped into visual lines by vertical band overlap,
 // read in column-aware order, and a drag tracks the run of units between two carets
 // (page, index) in that reading order. Geometry lives in page-DIP space with the
-// top-left origin Windows.Data.Pdf reports, so painting is the same scale the page
+// top-left origin the OCR boxes report, so painting is the same scale the page
 // bitmap already uses. Empty page areas stay with the pan gesture, exactly like
 // KillerPDF keeps its marquee for empty space.
-struct TxtCell {                      // one selectable unit: a text-range box
+struct TxtCell {                      // one selectable unit: an OCR word box
     std::wstring text;
     float l = 0, r = 0, t = 0, b = 0; // page DIPs, top-left origin, y down
     int word = 0, line = 0;           // ordinals assigned when the page flattens
@@ -387,6 +389,24 @@ static HBITMAP GetBmp(int i, int w, int h) {
     return b;
 }
 
+// The same render as Render(), decoded as a SoftwareBitmap - the input format the
+// OS OCR engine consumes for the text-selection pass.
+static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(int i, int w, int h) {
+    try {
+        auto page = g.doc.GetPage((uint32_t)i);
+        PdfPageRenderOptions o;
+        o.DestinationWidth((uint32_t)w);
+        o.DestinationHeight((uint32_t)h);
+        o.BackgroundColor(winrt::Windows::UI::Color{ 255, 255, 255, 255 });
+        o.BitmapEncoderId(winrt::Windows::Graphics::Imaging::BitmapEncoder::BmpEncoderId());
+        InMemoryRandomAccessStream st;
+        page.RenderToStreamAsync(st, o).get();
+        st.Seek(0);
+        auto dec = winrt::Windows::Graphics::Imaging::BitmapDecoder::CreateAsync(st).get();
+        return dec.GetSoftwareBitmapAsync().get();
+    } catch (...) { return nullptr; }
+}
+
 static void Evict(int lo, int hi) {
     while (g.cache.size() > 24) {
         int k = -1; unsigned long long best = ~0ULL;
@@ -633,31 +653,38 @@ static TxtPage* TtFor(int i) {
     if (it != g.txt.end()) { it->second.tick = ++g.tick; return &it->second; }
     TxtPage pt; pt.w = g.pw[i]; pt.h = g.ph[i];
     try {
-        auto doc = g.doc.GetPage((uint32_t)i).GetTextAsync().get();
-        for (winrt::Windows::Data::Pdf::PdfTextRange rng : doc.TextRanges()) {
-            auto text = rng.Text();
-            auto boxes = rng.BoundingBoxes();
-            int nb = (int)boxes.Size();
-            int len = (int)text.size();
-            if (!nb || !len) continue;
-            int off = 0;
-            for (int k = 0; k < nb; k++) {
-                auto bb = boxes.GetAt(k);
-                if (bb.Width <= 0 || bb.Height <= 0) continue;
-                TxtCell c;
-                // a range spanning several lines reports one box per line without the
-                // split point, so the characters are divided across the boxes
-                // proportionally (ranges are line-sized in practice)
-                int take = k == nb - 1 ? len - off : (int)((long long)len * (k + 1) / nb) - off;
-                if (take < 0) take = 0;
-                c.text = std::wstring(text.begin() + off, text.begin() + off + take);
-                off += take;
-                c.l = bb.X; c.t = bb.Y;
-                c.r = c.l + bb.Width; c.b = c.t + bb.Height;
-                pt.cells.push_back(std::move(c));
+        // Windows.Data.Pdf exposes no text layer, so the selectable cells come from the
+        // built-in OCR pass (Windows.Media.Ocr) over a fresh 2x render: one box per
+        // recognized word, scaled back to page DIPs, feeding KillerPDF's exact cell
+        // pipeline below. Built lazily on first touch and LRU-capped, so a 2,000-page
+        // book never OCRs what you never touch; no OCR language pack means selection
+        // is quietly off and the page keeps its pan gesture.
+        static winrt::Windows::Media::Ocr::OcrEngine s_ocr = nullptr;
+        static bool s_tried = false;
+        if (!s_tried) {
+            s_tried = true;
+            s_ocr = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages();
+        }
+        if (s_ocr) {
+            int ow = std::clamp((int)std::lround(g.pw[i] * 2), 800, 1600);
+            int oh = max(1, (int)std::lround(ow * g.ph[i] / max(1.f, g.pw[i])));
+            auto soft = RenderSoft(i, ow, oh);
+            if (soft) {
+                auto res = s_ocr.RecognizeAsync(soft).get();
+                float kx = pt.w / ow, ky = pt.h / oh;
+                for (winrt::Windows::Media::Ocr::OcrLine line : res.Lines())
+                    for (winrt::Windows::Media::Ocr::OcrWord wd : line.Words()) {
+                        auto r = wd.BoundingRect();
+                        if (r.Width <= 0 || r.Height <= 0 || wd.Text().empty()) continue;
+                        TxtCell c;
+                        c.text = std::wstring(wd.Text());
+                        c.l = r.X * kx; c.t = r.Y * ky;
+                        c.r = c.l + r.Width * kx; c.b = c.t + r.Height * ky;
+                        pt.cells.push_back(std::move(c));
+                    }
             }
         }
-    } catch (...) { /* no text layer / encrypted: selection is just not offered here */ }
+    } catch (...) { /* no OCR pack / render failure: selection is just not offered here */ }
     TtLines(pt);
     pt.tick = ++g.tick;
     g.txt[i] = std::move(pt);
