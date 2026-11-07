@@ -1302,7 +1302,6 @@ static HFONT SideFont() {   // the page label: BrandSansFont ("Killer Sans") at 
 
 static HBRUSH ThumbEdgeBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x33, 0x33, 0x33)); return b; }  // SurfaceBrush
 static HBRUSH RowHoverBrush()    { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }  // RowHoverBrush
-static HBRUSH CardEdgeBrush()    { static HBRUSH b = CreateSolidBrush(RGB(0x55, 0x55, 0x55)); return b; }  // PaneBorderBrush
 
 static void TrackLeave(HWND h) { TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE, h, 0 }; TrackMouseEvent(&t); }
 
@@ -1481,7 +1480,59 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // sitting on the footer below. The field is painted by every pane from one
 // tile, so the margins, the rail and the footer read as one container that no
 // single component owns.
+//
+// The corners are WPF arcs there and GDI regions here could only stair-step
+// them - the "small cuts" the reference never shows. So the canvas fill and
+// the 1px ring are GDI+ paths, anti-aliased exactly like the Border renders
+// them: one rounded shape (RadCard 6, the same tucked -1 bounds the old region
+// had), filled with the canvas grain through a texture brush and framed by a
+// 1px pen whose band covers the fill's outermost pixel - KillerPDF's border
+// over its background. The pages keep the cheap 1px-inset region clip.
 static int CardW() { return max(0, g.cw - (int)(8 * g.dpi)); }
+
+static Gdiplus::GraphicsPath* CardPath(float x, float y, float w, float h, float rad, float inset) {
+    Gdiplus::GraphicsPath* p = new Gdiplus::GraphicsPath();
+    float r = max(0.5f, rad - inset);
+    p->AddArc(x + inset, y + inset, 2 * r, 2 * r, 180, 90);
+    p->AddArc(x + w - inset - 2 * r, y + inset, 2 * r, 2 * r, 270, 90);
+    p->AddArc(x + w - inset - 2 * r, y + h - inset - 2 * r, 2 * r, 2 * r, 0, 90);
+    p->AddArc(x + inset, y + h - inset - 2 * r, 2 * r, 2 * r, 90, 90);
+    p->CloseFigure();
+    return p;
+}
+
+static Gdiplus::Brush* CanvasGrain() {   // the canvas tile, as a GDI+ texture brush
+    static Gdiplus::Bitmap* bm = nullptr;
+    static Gdiplus::TextureBrush* tb = nullptr;
+    if (!tb) {
+        GrainBrush(0);                   // make sure the DIB tile exists
+        BITMAP gb{};
+        if (!g_grainBmp[0] || !GetObject(g_grainBmp[0], sizeof gb, &gb) || !gb.bmBits) return nullptr;
+        BITMAPINFO bi{};
+        bi.bmiHeader = { sizeof(BITMAPINFOHEADER), gb.bmWidth, gb.bmHeight, 1, (WORD)gb.bmBitsPixel, BI_RGB };
+        bm = Gdiplus::Bitmap::FromBITMAPINFO(&bi, gb.bmBits);   // copies the tile once
+        if (bm) tb = new Gdiplus::TextureBrush(bm, Gdiplus::WrapModeTile);
+    }
+    return tb;
+}
+
+static void CardFill(HDC dc, int x, int y, int w, int h, int rad) {
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::GraphicsPath* p = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0);
+    if (Gdiplus::Brush* tex = CanvasGrain()) gs.FillPath(tex, p);
+    else { Gdiplus::SolidBrush b(Gdiplus::Color(255, 58, 58, 58)); gs.FillPath(&b, p); }
+    delete p;
+}
+
+static void CardFrame(HDC dc, int x, int y, int w, int h, int rad) {
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::GraphicsPath* p = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0.5f);
+    Gdiplus::Pen pen(Gdiplus::Color(255, 0x55, 0x55, 0x55), 1.0f);
+    gs.DrawPath(&pen, p);
+    delete p;
+}
 
 static void Draw(HDC dc, int w, int h, int xoff) {
     RECT r{ xoff, 0, xoff + w, h };
@@ -1489,16 +1540,10 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     int cw = min(w, CardW());
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
+    if (card) CardFill(dc, xoff, -1, cw, h + 1, rad);   // the canvas, WPF-smooth corners
+    else { RECT cr{ xoff, 0, xoff + cw, h }; FillRect(dc, &cr, GrainBrush(0)); }
     HRGN clip = card ? CreateRoundRectRgn(xoff + 1, -1, xoff + cw - 1, h - 1, 2 * rad, 2 * rad) : nullptr;
     if (clip) SelectClipRgn(dc, clip);   // ContentClip: the card's inside, 1px inside its border
-    HRGN canvas = card ? CreateRoundRectRgn(xoff, -1, xoff + cw + 1, h + 1, 2 * rad, 2 * rad) : nullptr;
-    if (canvas) SelectClipRgn(dc, canvas);   // CanvasClip: the fill and the frame share ONE
-    RECT cr{ xoff, 0, xoff + cw, h };        // region, so no bare field ring can open between
-    FillRect(dc, &cr, GrainBrush(0));        // the card's canvas and its edge at any DPI.
-                                             // GDI's rounded regions give up their last row
-                                             // and column, so the rect runs one past the
-                                             // card and the canvas still reaches the edge
-    if (canvas) SelectClipRgn(dc, clip);     // the pages stay 1px inside the frame
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
@@ -1509,7 +1554,7 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-        if (canvas) { FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1); DeleteObject(canvas); }
+        if (card) CardFrame(dc, xoff, -1, cw, h + 1, rad);
         return;
     }
     HDC m = CreateCompatibleDC(dc);
@@ -1572,10 +1617,8 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         DrawTextW(dc, g.hint.c_str(), -1, &hn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-    if (canvas) {   // the 1px card edge, KillerPDF's PaneBorderBrush #555555: GDI-exact
-        FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1);   // FrameRgn over the same region the
-        DeleteObject(canvas);                          // canvas filled - the ring lands on the
-    }                                                  // fill, never on a bare field line
+    if (card) CardFrame(dc, xoff, -1, cw, h + 1, rad);   // the 1px card edge, drawn last so no
+                                                         // page can ever cut into its ring
     g.lastVis = last;
     Evict(first, last);
 }
