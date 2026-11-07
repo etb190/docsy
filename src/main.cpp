@@ -14,6 +14,20 @@
 // paints one 60/255 accent quad per selected line; select or double-click copies
 // at once. The page never pans under the mouse - the wheel and the keys own
 // scrolling, so a grab always means text selection, never a scroll.
+// Find Text is KillerPDF's search bar too (Shell/Search.cs + SearchController +
+// SearchService): Ctrl+F floats one rounded grain bar over the page area (top
+// right, KillerPDF's fallback spot) with KillerPDF's DropShadow melted onto the
+// live view pixels; the row is the magnifier glyph (E721), the query edit, the
+// Aa / ab option toggles (accent fill when on), the "12 / 73" counter cell and
+// ChevronUp / ChevronDown / Cancel buttons with the red close hover. 250ms
+// debounce, a two-character minimum, Enter / Shift+Enter / F3 / Shift+F3 step,
+// Escape closes. The scan walks the document page by page on a pump timer (the
+// OCR text layer is built page-wise, so a 2,000-page book streams its matches
+// instead of blocking), matches fold case unless Match Case, Whole Word rejects
+// letter/digit/underscore neighbours, and every match paints one rounded box per
+// touched word - dim orange for the field, bright with the accent ring for the
+// cursor match - and navigation lands on the first match at or after the page
+// you are on.
 // The frame is KillerPDF's too: the real OS side borders stay, but the window
 // is created without WS_CAPTION (and WM_NCCALCSIZE gives the top row to the
 // client), so the native caption can never appear - not even on the first
@@ -46,6 +60,7 @@
 #include <vector>
 #include <unordered_map>
 #include <string>
+#include <cwctype>
 #include <cmath>
 #include <climits>
 #include <cfloat>
@@ -176,6 +191,28 @@ struct Side {
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
 };
 static Side sd;
+
+// Find Text state (KillerPDF's SearchController fields, flat): the bar's query
+// and option toggles, the reading-ordered match list (one rect per touched
+// word), the cursor match, and the pump's progress. The pump scans page by
+// page on a timer so a 2,000-page book streams matches without holding the
+// UI; every edit bumps gen, and a stale pump's results are dropped on sight.
+struct FHit { int page; FRect r; };   // one matched word's rect, page DIPs
+struct Find {
+    bool open = false;                // the bar is on screen
+    std::wstring query;               // the box's text
+    bool matchCase = false, wholeWord = false;
+    std::vector<FHit> hits;           // page asc, then reading order per page
+    int cur = -1;                     // the emphasized match (cursor)
+    int scan = 0;                     // next page the pump reads
+    unsigned gen = 0;                 // bumped on every cancel; a stale pump quits
+    bool done = true;                 // the whole document has been scanned
+    int hot = -1;                     // hovered bar button
+};
+static Find fd;
+static HWND g_find = nullptr, g_fedit = nullptr;
+static WNDPROC g_feditDef = nullptr;               // the edit's stock proc (subclassed for keys)
+
 static HFONT g_uifont = nullptr, g_sidefont = nullptr;
 static HFONT g_glyphfont = nullptr, g_wordfont = nullptr;
 
@@ -283,7 +320,7 @@ static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
 static void DrawCaptionBar(HDC dc, int w) {
     if (g.full || w <= 0) return;
     RECT bar{ 0, 0, w, CAP() };
-    FillRect(dc, &bar, GrainBrush(2));
+    FillRect(dc, &bar, GrainBrush(1));   // the title bar stays the dark chrome tile
     SetBkMode(dc, TRANSPARENT);
 
     // icon + wordmark
@@ -376,19 +413,20 @@ static void PaintCaptionInto(HDC dst, int w) {
 //    #3a3a3a). docsy now bakes the same neutrals: slot 0 is the document
 //    canvas, slot 1 the shared dark chrome (sidebar + footer + title bar all
 //    return it), so the two frame the page area on two sides seamlessly.
-static HBRUSH g_grainBrush[2] = { nullptr, nullptr };
-static HBITMAP g_grainBmp[2] = { nullptr, nullptr };
+static HBRUSH g_grainBrush[3] = { nullptr, nullptr, nullptr };
+static HBITMAP g_grainBmp[3] = { nullptr, nullptr, nullptr };
 
 static HBRUSH GrainBrush(int which) {
-    if (which > 1) which = 1;               // title bar shares the dark chrome tile
+    if (which > 2) which = 2;
     if (g_grainBrush[which]) return g_grainBrush[which];
     const int S = 256;
     const double Spread = 150.0, Soften = 0.10, Contrast = 1.35;
     const double LeanShare = 0.40, LeanMix = 0.80;
     const double Alpha = 70.0 / 255.0 * 0.24;   // tile alpha 70 times the dark-theme GrainOpacity
-    const BYTE back[2][3] = {
+    const BYTE back[3][3] = {
         { 58, 58, 58 },   // document canvas  - KillerPDF's BgCanvas/PaneBrush #3a3a3a
         { 28, 28, 28 },   // dark chrome      - BackgroundBrush/TitleBarBrush/FooterBackgroundBrush #1c1c1c
+        { 20, 20, 20 },   // floating surface - MenuBackgroundBrush #141414 (the Find bar)
     };                                    // stored B,G,R; all neutral greys, exactly as the theme states them
     const double leanC[3] = { 217.0, 98.0, 187.0 };   // the purple lean, B,G,R
     auto cl = [](double v) { return v < 0 ? 0.0 : v > 255 ? 255.0 : v; };
@@ -795,6 +833,69 @@ static std::wstring TtText(const TxtPage& pt, int start, int end, int* words) {
     return out;
 }
 
+// ---------------- Find Text core (pure std:: - scripts/find_check.cpp) ----------------
+
+// KillerPDF's PdfSearchText.Fold, reduced to what our OCR cells need: 1:1
+// lower-case folding (a length-changing fold would break the char->cell map).
+static std::wstring FdLower(const std::wstring& s) {
+    std::wstring t(s);
+    for (wchar_t& c : t) c = (wchar_t)towlower(c);
+    return t;
+}
+
+// SearchService over the cell stream: the page flattens to a string (cells of
+// one word join with no separator, a word gap or a line break one space), every
+// occurrence is folded to lower case unless Match Case, Whole Word rejects
+// letter/digit/underscore neighbours (KillerPDF's \p{L}\p{Nd}_ lookarounds), and
+// each match lands as ONE RECT PER TOUCHED WORD - the union of that word's
+// matched cell boxes, FindExactMatchesOnPage's word split. Occurrences scan
+// forward without overlap, like the engine's. Returns the match count; the
+// per-word rects come back through out.
+static int FdMatch(const TxtPage& pt, const std::wstring& query, bool matchCase,
+                   bool wholeWord, std::vector<FRect>& out) {
+    out.clear();
+    if (pt.cells.empty() || query.empty()) return 0;
+    std::wstring text; text.reserve(pt.cells.size() * 3);
+    std::vector<int> cellOf; cellOf.reserve(pt.cells.size() * 3);
+    int lastWord = -1, lastLine = -1;
+    for (int i = 0; i < (int)pt.cells.size(); i++) {
+        const TxtCell& c = pt.cells[i];
+        if (lastLine >= 0 && c.line != lastLine) { text += L' '; cellOf.push_back(-1); }
+        else if (lastWord >= 0 && c.word != lastWord) { text += L' '; cellOf.push_back(-1); }
+        for (wchar_t ch : c.text) { text += ch; cellOf.push_back(i); }
+        lastWord = c.word; lastLine = c.line;
+    }
+    std::wstring hay = matchCase ? text : FdLower(text);
+    std::wstring needle = matchCase ? query : FdLower(query);
+    int n = (int)needle.length(), N = (int)hay.length();
+    if (n == 0 || n > N) return 0;
+    auto wordy = [](wchar_t c) { return iswalnum(c) || c == L'_'; };
+    int matches = 0;
+    for (int p = 0; p + n <= N; p++) {
+        if (hay.compare(p, n, needle) != 0) continue;
+        if (wholeWord && ((p > 0 && wordy(hay[p - 1])) || (p + n < N && wordy(hay[p + n])))) continue;
+        int s = p, e = p + n;
+        while (s < e && cellOf[s] < 0) s++;          // a query never starts or ends on a
+        while (e > s && cellOf[e - 1] < 0) e--;      // separator; trim the join spaces
+        if (s >= e) continue;
+        int i = s;
+        while (i < e) {                              // one rect per touched word
+            if (cellOf[i] < 0) { i++; continue; }    // the join space between words
+            int w = pt.cells[cellOf[i]].word;
+            float l = FLT_MAX, r = -FLT_MAX, t = FLT_MAX, b = -FLT_MAX;
+            while (i < e && pt.cells[cellOf[i]].word == w) {
+                const TxtCell& c = pt.cells[cellOf[i]];
+                l = min(l, c.l); r = max(r, c.r); t = min(t, c.t); b = max(b, c.b);
+                i++;
+            }
+            out.push_back({ l, t, r - l, b - t });
+        }
+        matches++;
+        p += n - 1;
+    }
+    return matches;
+}
+
 // ---------------- text selection app glue ----------------
 
 // Per-page text geometry, built lazily on first touch (cursor, press or a selection
@@ -1131,6 +1232,8 @@ static bool Open(const std::wstring& p) {
         sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0; sd.cw = 0; sd.ch = 0;
         g.txt.clear();               // the new document's text geometry starts fresh
         SelClear();
+        if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); ShowWindow(g_find, SW_HIDE); }
+        fd = Find{};                 // the Find bar's results die with the old document
         g.sideOn = true;
         if (g.side) ShowWindow(g.side, SW_SHOWNOACTIVATE);
         LayoutMain();
@@ -1506,10 +1609,10 @@ static Gdiplus::GraphicsPath* CardPath(float x, float y, float w, float h, float
 static int g_grainPX = 0, g_grainPY = 0;   // GDI's brush-org phase, stashed by the paint
 
 static Gdiplus::TextureBrush* GrainTex(int which) {   // a grain tile as a GDI+ brush,
-    static Gdiplus::TextureBrush* tb[2] = { nullptr, nullptr };   // phased like GDI's own
+    static Gdiplus::TextureBrush* tb[3] = { nullptr, nullptr, nullptr };   // phased like GDI's own
     static float ox = -1, oy = -1;
     if (ox != (float)g_grainPX || oy != (float)g_grainPY) {   // the phase moves with the
-        for (int i = 0; i < 2; i++) { delete tb[i]; tb[i] = nullptr; }   // pane layout
+        for (int i = 0; i < 3; i++) { delete tb[i]; tb[i] = nullptr; }   // pane layout
         ox = (float)g_grainPX; oy = (float)g_grainPY;
     }
     if (!tb[which]) {
@@ -1566,6 +1669,48 @@ static void CardCorners(HDC dc, int x, int y, int w, int h, int rad) {
     }
     delete outer;
     delete inner;
+}
+
+// Find highlights on one visible page (KillerPDF's AddSearchHighlight): a rounded
+// box around every matched word of the page - dim orange fill, faint stroke - and
+// the cursor match bright with the 3.5px accent ring; the box pads 30% of the
+// shorter side and rounds at 60% of the pad, so the wrap breathes like the
+// original's and stays consistent across font sizes.
+static void FindPaintPage(HDC dc, int page, int px, int py) {
+    if (!fd.open || fd.hits.empty()) return;
+    auto it = std::lower_bound(fd.hits.begin(), fd.hits.end(), page,
+                               [](const FHit& h, int p) { return h.page < p; });
+    if (it == fd.hits.end() || it->page != page) return;
+    float k = (float)(g.zoom * g.dpi);
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush dim(Gdiplus::Color(70, 255, 165, 0));
+    Gdiplus::SolidBrush hot(Gdiplus::Color(150, 255, 190, 0));
+    Gdiplus::Pen dimPen(Gdiplus::Color(140, 255, 165, 0), 1.0f * (float)g.dpi);
+    Gdiplus::Pen hotPen(Gdiplus::Color(255, 0x22, 0xbb, 0x56), (float)(3.5 * g.dpi));
+    for (; it != fd.hits.end() && it->page == page; ++it) {
+        bool cur = (int)(it - fd.hits.begin()) == fd.cur;
+        const FRect& r = it->r;
+        float pad = min(r.w, r.h) * 0.30f;
+        float x = px + (r.x - pad) * k, y = py + (r.y - pad) * k;
+        float w = max((r.w + 2 * pad) * k, 4.0f), h = max((r.h + 2 * pad) * k, 4.0f);
+        float rr = min(pad * 0.6f * k, h * 0.5f);
+        if (rr < 0.5f) {
+            Gdiplus::RectF rf(x, y, w, h);
+            gs.FillRectangle(cur ? (Gdiplus::Brush*)&hot : (Gdiplus::Brush*)&dim, rf);
+            if (cur) gs.DrawRectangle(&hotPen, rf);
+            continue;
+        }
+        Gdiplus::GraphicsPath p;
+        p.AddArc(x, y, 2 * rr, 2 * rr, 180, 90);
+        p.AddArc(x + w - 2 * rr, y, 2 * rr, 2 * rr, 270, 90);
+        p.AddArc(x + w - 2 * rr, y + h - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+        p.AddArc(x, y + h - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+        p.CloseFigure();
+        gs.FillPath(cur ? (Gdiplus::Brush*)&hot : (Gdiplus::Brush*)&dim, &p);
+        if (cur) gs.DrawPath(&hotPen, &p);
+        else gs.DrawPath(&dimPen, &p);
+    }
 }
 
 static void Draw(HDC dc, int w, int h, int xoff) {
@@ -1644,6 +1789,7 @@ static void Draw(HDC dc, int w, int h, int xoff) {
                     }
                 }
             }
+            if (fd.open) FindPaintPage(dc, i, x, y);
         }
     }
     DeleteDC(m);
@@ -1746,7 +1892,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             Draw(g.bdc, g.cw, g.ch, 0);                             // card floats on never shows a
             PaintViewBars(g.bdc, g.cw, g.ch, 0);                    // seam at a pane boundary
             BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);
-            SetTimer(h, 1, 5, nullptr);
+            if (g_find && fd.open) InvalidateRect(g_find, nullptr, FALSE);   // the bar's backdrop
+            SetTimer(h, 1, 5, nullptr);                              // rides the view's own pixels
         }
         EndPaint(h, &ps);
         return 0;
@@ -2626,6 +2773,527 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
+// ---------------- Find Text bar (KillerPDF's Shell/Search.cs) ----------------
+// One floating child of the page view, KillerPDF's fallback spot: the bar's top
+// edge 6px under the view's top, its right edge 16px in from the view's right.
+// The visual is the original Border: CornerRadius 6, a 1px PaneBorderBrush
+// #555555 frame, MenuBackgroundBrush #141414 + grain inside, and the DropShadow
+// (black, blur 16, depth 3, down, opacity 0.55) - built as an ARGB tile and
+// melted onto the view's own pixels: the bar's window copies the view's back
+// buffer behind itself first, so the shadow lands on the live page content and
+// the margins disappear into it. The row is KillerPDF's find row minus the
+// replace gear (Windows.Data.Pdf cannot edit text): magnifier glyph E721, the
+// query edit (26px tall in a radius-3 CardBorderBrush #404040 box on
+// BackgroundBrush #1c1c1c, UiFont 13), the Aa / ab toggles (accent fill when
+// on, SelectionFg text), the 96px counter cell (FontSize 11, MutedTextBrush,
+// "12 / 73" or "No matches"), and ChevronUp / ChevronDown / Cancel 26x24 MDL2
+// buttons with RowHoverBrush hovers and the danger red on close.
+// Logic is SearchController's: 250ms debounce, a two-character minimum,
+// Enter/Shift+Enter and F3/Shift+F3 step the cursor with wrap, Escape closes,
+// a toggle re-runs at once, results start at the first match on or after the
+// page you are on, and the scan pumps page by page on a timer so the window
+// never blocks on a long book.
+
+static int FdD(int v) { return (int)std::lround(v * g.dpi); }
+
+static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
+static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
+static void FindPlace();
+
+static HFONT g_fntEdit = nullptr, g_fntOpt = nullptr, g_fntAb = nullptr,
+              g_fntStat = nullptr, g_fntGlyph = nullptr;
+
+static HFONT FdFontEdit()  { return CaptionFont(g_fntEdit,  13, false, L"Killer Sans UI"); }
+static HFONT FdFontOpt()   { return CaptionFont(g_fntOpt,   12, false, L"Killer Sans UI"); }
+static HFONT FdFontAb()    {            // "ab": KillerPDF's underlined Whole Word glyph
+    if (!g_fntAb)
+        g_fntAb = CreateFontW(-FdD(12), 0, 0, 0, FW_NORMAL, 0, TRUE, 0,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans UI");
+    return g_fntAb;
+}
+static HFONT FdFontStat()  { return CaptionFont(g_fntStat,  11, false, L"Killer Sans UI"); }
+static HFONT FdFontGlyph() { return CaptionFont(g_fntGlyph, 12, false, L"Segoe MDL2 Assets"); }
+
+// Metrics (dpi units): shadow margins around the visual bar, then the row.
+// Bar width = the fixed cells + the edit; the edit shrinks (60..200) so the
+// whole bar always fits the card, FitSearchBox-style.
+static const int FdPadX = 24, FdPadT = 14, FdPadB = 28;   // window margins for the shadow
+static const int FdBarH = 36, FdEditH = 26, FdBtnW = 26, FdBtnH = 24, FdStatW = 96;
+// left border+pad 1+4 | icon 12+6 | Aa | ab | status 2+96+2 | prev | next | close | pad+border 4+1
+static const int FdBarFix = 1 + 4 + 12 + 6 + FdBtnW * 2 + 2 + FdStatW + 2 + FdBtnW * 3 + 4 + 1;
+
+enum { FB_AA, FB_AB, FB_PREV, FB_NEXT, FB_CLOSE, FB_COUNT };
+
+static int FdEditW(int vw) {
+    return std::clamp(vw - FdD(FdBarFix) - FdD(16) - 2 * FdD(FdPadX), FdD(60), FdD(200));
+}
+
+struct FdRects {
+    RECT bar, icon, edit, status, btn[FB_COUNT];
+};
+
+static void FdLayout(int editW, FdRects& R) {
+    int bw = FdD(FdBarFix) + editW;
+    R.bar = { FdD(FdPadX), FdD(FdPadT), FdD(FdPadX) + bw, FdD(FdPadT) + FdD(FdBarH) };
+    int top = R.bar.top + FdD(1) + FdD(4);                    // inside border + padding
+    int x = R.bar.left + FdD(1) + FdD(4);
+    R.icon = { x, top, x + FdD(12), top + FdD(FdEditH) };
+    x += FdD(12) + FdD(6);
+    R.edit = { x, top, x + editW, top + FdD(FdEditH) };
+    x += editW;
+    for (int i = 0; i < FB_COUNT; i++) {
+        if (i == FB_PREV) {                                   // the status cell sits before prev
+            R.status = { x + FdD(2), R.bar.top + 1, x + FdD(2) + FdD(FdStatW), R.bar.bottom - 1 };
+            x += FdD(2) + FdD(FdStatW) + FdD(2);
+        }
+        R.btn[i] = { x, top + FdD(1), x + FdD(FdBtnW), top + FdD(1) + FdD(FdBtnH) };
+        x += FdD(FdBtnW);
+    }
+}
+
+static int FdHit(POINT p) {
+    FdRects R; FdLayout(FdEditW(CardW()), R);
+    for (int i = 0; i < FB_COUNT; i++)
+        if (p.x >= R.btn[i].left && p.x < R.btn[i].right && p.y >= R.btn[i].top && p.y < R.btn[i].bottom)
+            return i;
+    return -1;
+}
+
+static void FindStatusRepaint() { if (g_find && fd.open) InvalidateRect(g_find, nullptr, FALSE); }
+
+// Lands the cursor match: the counter, the repaint, and - when stepping - the
+// scroll onto the match (Single mode flips pages first, the other modes scroll
+// the match's line to the view's middle, horizontally centring the page too).
+static void FindGoto(int idx, bool jump) {
+    if (idx < 0 || idx >= (int)fd.hits.size()) return;
+    fd.cur = idx;
+    const FHit& hit = fd.hits[idx];
+    if (jump) {
+        if (g.vm == 1 && hit.page != g.cur) SetPage(hit.page);
+        int row = std::clamp(hit.page / PerRow(), 0, max(0, (int)g.rh.size() - 1));
+        int yDoc = PageTop(hit.page) + (g.rh[row] - PH(hit.page)) / 2
+                 + (int)((hit.r.y + hit.r.h * 0.5f) * g.zoom * g.dpi);
+        int xDoc = g.sx;
+        if (g.docW > CardW() && hit.page < (int)g.px.size())
+            xDoc = g.px[hit.page] + (int)((hit.r.x + hit.r.w * 0.5f) * g.zoom * g.dpi) - CardW() / 2;
+        ScrollTo(xDoc, yDoc - g.ch / 2);
+    }
+    InvalidateRect(g.view, nullptr, FALSE);
+    FindStatusRepaint();
+}
+
+// The scan just completed: KillerPDF's start rule - sit on the first match at or
+// after the page you are on, else wrap to the first one - and the final counter.
+static void FindFinish() {
+    if (fd.hits.empty()) { fd.cur = -1; FindStatusRepaint(); return; }
+    int start = max(0, g.cur);
+    fd.cur = -1;
+    for (int i = 0; i < (int)fd.hits.size(); i++)
+        if (fd.hits[i].page >= start) { fd.cur = i; break; }
+    if (fd.cur < 0) fd.cur = 0;
+    FindGoto(fd.cur, true);
+}
+
+static void FindStep(int dir) {
+    if (fd.hits.empty()) return;
+    int n = (int)fd.hits.size();
+    FindGoto(((fd.cur < 0 ? 0 : fd.cur) + dir + n) % n, true);
+}
+
+// A toggle flips and re-runs at once when there is a live query (KillerPDF's
+// ToggleSearchOption); below two characters there is nothing to re-run.
+static void FindOption(bool matchCase) {
+    if (matchCase) fd.matchCase = !fd.matchCase;
+    else fd.wholeWord = !fd.wholeWord;
+    FindStatusRepaint();
+    if (fd.query.size() >= 2 && fd.query.find_first_not_of(L" \t\n\r") != std::wstring::npos) {
+        if (g_find) KillTimer(g_find, 1);
+        fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = false;
+        if (g_find) SetTimer(g_find, 2, 30, nullptr);
+    }
+}
+
+static void FindRun() {
+    if (fd.query.size() < 2 || fd.query.find_first_not_of(L" \t\n\r") == std::wstring::npos) return;
+    fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = false;
+    if (g_find) SetTimer(g_find, 2, 30, nullptr);
+}
+
+// The pump: scan pages until a small time budget is spent, then hand control
+// back - a fresh OCR page costs tens of milliseconds, so the budget only trims
+// the cheap pages; the heavy ones land one per tick and the window keeps its
+// pulse. Every edit bumps gen, and a stale pump (this gen is no longer the
+// state's) drops everything it has gathered.
+static void FindPump() {
+    if (!g_find || fd.done) { if (g_find) KillTimer(g_find, 2); return; }
+    unsigned my = fd.gen;
+    unsigned long long t0 = GetTickCount64();
+    std::vector<FRect> rs;
+    int before = (int)fd.hits.size();
+    while (fd.scan < g.n && GetTickCount64() - t0 < 12) {
+        TxtPage* pt = TtFor(fd.scan);
+        if (pt && !pt->cells.empty() && FdMatch(*pt, fd.query, fd.matchCase, fd.wholeWord, rs) > 0)
+            for (const FRect& r : rs) fd.hits.push_back({ fd.scan, r });
+        fd.scan++;
+    }
+    if (fd.gen != my) return;                     // cancelled mid-tick: drop it all
+    if ((int)fd.hits.size() != before) InvalidateRect(g.view, nullptr, FALSE);   // progressive
+    if (fd.scan >= g.n) {
+        fd.done = true;
+        KillTimer(g_find, 2);
+        FindFinish();
+    }
+}
+
+// EN_CHANGE: a new generation cancels the pump and the debounce, then the
+// 250ms pause in typing starts the run - KillerPDF's SearchBox_TextChanged.
+static void FindChanged() {
+    if (!g_fedit) return;
+    int len = GetWindowTextLengthW(g_fedit);
+    std::wstring q(len, L'\0');
+    if (len) GetWindowTextW(g_fedit, q.data(), len + 1);
+    fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = true;
+    fd.query = q;
+    if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); }
+    if (q.size() < 2) {
+        InvalidateRect(g.view, nullptr, FALSE);
+        FindStatusRepaint();
+        return;
+    }
+    if (g_find) SetTimer(g_find, 1, 250, nullptr);
+}
+
+static void FindOpen(bool create = true) {
+    fd.open = true;
+    if (create && g.view) {
+        if (!g_find) {
+            WNDCLASSEXW fc{ sizeof fc };
+            fc.lpfnWndProc = FindProc; fc.hInstance = g.hinst;
+            fc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            fc.lpszClassName = L"DocsyFind";
+            RegisterClassExW(&fc);
+            g_find = CreateWindowExW(0, L"DocsyFind", nullptr, WS_CHILD | WS_CLIPCHILDREN,
+                                     0, 0, 0, 0, g.view, nullptr, g.hinst, nullptr);
+            if (!g_find) { fd.open = false; return; }
+            g_fedit = CreateWindowExW(0, L"EDIT", nullptr,
+                                      WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+                                      0, 0, 0, 0, g_find, nullptr, g.hinst, nullptr);
+            SendMessageW(g_fedit, WM_SETFONT, (WPARAM)FdFontEdit(), TRUE);
+            SendMessageW(g_fedit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                         MAKELPARAM(FdD(6), FdD(6)));
+            g_feditDef = (WNDPROC)SetWindowLongPtrW(g_fedit, GWLP_WNDPROC, (LONG_PTR)FindEditProc);
+        }
+        FindPlace();
+        ShowWindow(g_find, SW_SHOWNOACTIVATE);
+    }
+    fd.query.clear(); fd.hits.clear(); fd.cur = -1; fd.scan = 0; fd.gen++; fd.done = true; fd.hot = -1;
+    if (g_fedit) { SetWindowTextW(g_fedit, L""); SetFocus(g_fedit); }   // open empty, focus ready
+}
+
+static void FindClose() {
+    if (!fd.open) return;
+    fd.open = false;
+    fd.gen++; fd.done = true; fd.scan = 0;
+    fd.hits.clear(); fd.cur = -1; fd.query.clear(); fd.hot = -1;
+    if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); ShowWindow(g_find, SW_HIDE); }
+    if (g.main) SetFocus(g.main);                 // the keys go home (they live on the main window)
+    InvalidateRect(g.view, nullptr, FALSE);       // the highlights leave with the bar
+}
+
+static void FindToggle() { fd.open ? FindClose() : FindOpen(); }
+
+// The bar's paint, shared with the CI shot: (ox,oy) is the window's client
+// origin in the destination DC - (0,0) on the window itself, the window's view
+// offset in the shot. Assumes the view's pixels are already behind it.
+static void FindDraw(HDC dc, int ox, int oy) {
+    int editW = FdEditW(CardW());
+    int bw = FdD(FdBarFix) + editW, bh = FdD(FdBarH);
+    int w = bw + 2 * FdD(FdPadX), h = bh + FdD(FdPadT) + FdD(FdPadB);
+    // the DropShadow: black, blur 16 (sigma 8), depth 3 down, opacity 0.55 - the
+    // bar's blurred silhouette as an ARGB tile, cached per size/dpi
+    static HBITMAP shb = nullptr; static HDC shdc = nullptr;
+    static int shw = 0, shh = 0; static double shdpi = 0, shed = 0;
+    if (!shb || shw != w || shh != h || shdpi != g.dpi || shed != editW) {
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
+        BYTE* px = nullptr;
+        HBITMAP nb = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
+        if (px && nb) {
+            const double sig = 8.0 * g.dpi, depth = 3.0 * g.dpi;
+            double top = FdD(FdPadT) + depth, bottom = FdD(FdPadT) + bh + depth;
+            double left = FdD(FdPadX), right = FdD(FdPadX) + bw;
+            for (int y = 0; y < h; y++) {
+                double ay = Phi((y - top) / sig) - Phi((y - bottom) / sig);
+                BYTE* row = px + (size_t)y * w * 4;
+                for (int x = 0; x < w; x++) {
+                    double a = 0.55 * ay * (Phi((x - left) / sig) - Phi((x - right) / sig));
+                    BYTE* p = row + (size_t)x * 4;
+                    p[0] = p[1] = p[2] = 0;
+                    p[3] = (BYTE)std::lround(a * 255.0);
+                }
+            }
+            if (!shdc) shdc = CreateCompatibleDC(dc);
+            if (shb) DeleteObject(shb);
+            shb = nb;
+            SelectObject(shdc, shb);
+            shw = w; shh = h; shdpi = g.dpi; shed = editW;
+        }
+    }
+    if (shb) {
+        BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        AlphaBlend(dc, ox, oy, w, h, shdc, 0, 0, w, h, bf);
+    }
+    // the panel: GDI+ radius-6 band (PaneBorderBrush #555555) over the
+    // MenuBackgroundBrush #141414 + grain fill, corners anti-aliased - the
+    // grain tile phases with the view's own so the texture reads continuous
+    int spx = g_grainPX, spy = g_grainPY;
+    g_grainPX += ox; g_grainPY += oy;
+    {
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath* outer = CardPath((float)ox + FdD(FdPadX), (float)oy + FdD(FdPadT),
+                                                (float)bw, (float)bh, (float)FdD(6), 0);
+        Gdiplus::GraphicsPath* inner = CardPath((float)ox + FdD(FdPadX), (float)oy + FdD(FdPadT),
+                                                (float)bw, (float)bh, (float)FdD(6), 1);
+        if (Gdiplus::TextureBrush* t = GrainTex(2)) gs.FillPath(t, inner);
+        else { Gdiplus::SolidBrush mb(Gdiplus::Color(255, 0x14, 0x14, 0x14)); gs.FillPath(&mb, inner); }
+        Gdiplus::GraphicsPath band;
+        band.AddPath(outer, FALSE);
+        band.AddPath(inner, FALSE);
+        band.SetFillMode(Gdiplus::FillModeAlternate);
+        Gdiplus::SolidBrush edge(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+        gs.FillPath(&edge, &band);
+        delete outer;
+        delete inner;
+    }
+    g_grainPX = spx; g_grainPY = spy;
+
+    FdRects R; FdLayout(editW, R);
+    SetBkMode(dc, TRANSPARENT);
+    // the query edit: a radius-3 box on BackgroundBrush #1c1c1c with the
+    // CardBorderBrush #404040 ring; the real edit control covers the interior,
+    // and with no control (the CI shot) the query text is drawn in its place
+    {
+        int x = R.edit.left - 1, y = R.edit.top - 1;
+        int ew = R.edit.right - R.edit.left + 2, eh = R.edit.bottom - R.edit.top + 2;
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath* outer = CardPath((float)x, (float)y, (float)ew, (float)eh, (float)FdD(3), 0);
+        Gdiplus::GraphicsPath* inner = CardPath((float)x, (float)y, (float)ew, (float)eh, (float)FdD(3), 1);
+        Gdiplus::SolidBrush bg(Gdiplus::Color(255, 0x1c, 0x1c, 0x1c));
+        gs.FillPath(&bg, inner);
+        Gdiplus::GraphicsPath band;
+        band.AddPath(outer, FALSE);
+        band.AddPath(inner, FALSE);
+        band.SetFillMode(Gdiplus::FillModeAlternate);
+        Gdiplus::SolidBrush ring(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+        gs.FillPath(&ring, &band);
+        delete outer;
+        delete inner;
+        if (!g_fedit && !fd.query.empty()) {
+            RECT tr{ R.edit.left + FdD(6), R.edit.top, R.edit.right - FdD(6), R.edit.bottom };
+            SelectObject(dc, FdFontEdit());
+            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+            DrawTextW(dc, fd.query.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    }
+    // the magnifier glyph
+    SelectObject(dc, FdFontGlyph());
+    SetTextColor(dc, RGB(0x8a, 0x8a, 0x8a));
+    DrawTextW(dc, L"\uE721", -1, &R.icon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // the option toggles: accent fill + dark text when on, RowHover on hover
+    for (int b = 0; b <= 1; b++) {
+        bool on = b == FB_AA ? fd.matchCase : fd.wholeWord;
+        bool hot = fd.hot == b;
+        if (on || hot) {
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            RECT r = R.btn[b];
+            Gdiplus::GraphicsPath p;
+            float rr = (float)FdD(3);
+            float fx = (float)r.left, fy = (float)r.top, fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
+            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            Gdiplus::SolidBrush f(on ? Gdiplus::Color(255, 0x22, 0xbb, 0x56)
+                                     : Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            gs.FillPath(&f, &p);
+        }
+        RECT r = R.btn[b];
+        SelectObject(dc, b == FB_AA ? FdFontOpt() : FdFontAb());
+        SetTextColor(dc, on ? RGB(0x0d, 0x0d, 0x0d) : RGB(0xc8, 0xc8, 0xc8));
+        DrawTextW(dc, b == FB_AA ? L"Aa" : L"ab", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    // the counter cell: KillerPDF's compact "12 / 73" (current / total), or
+    // "No matches" once the scan came back empty
+    std::wstring st;
+    if (!fd.query.empty() && fd.query.size() >= 2) {
+        if (fd.done) st = fd.hits.empty() ? L"No matches"
+                                          : std::to_wstring(fd.cur + 1) + L" / " + std::to_wstring(fd.hits.size());
+    }
+    if (!st.empty()) {
+        RECT r = R.status;
+        SelectObject(dc, FdFontStat());
+        SetTextColor(dc, RGB(0x8a, 0x8a, 0x8a));
+        DrawTextW(dc, st.c_str(), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    // the nav buttons: ChevronUp / ChevronDown / Cancel, red close hover
+    const wchar_t* glyph[3] = { L"\uE70E", L"\uE70D", L"\uE711" };
+    for (int b = FB_PREV; b <= FB_CLOSE; b++) {
+        bool hot = fd.hot == b;
+        if (hot) {
+            RECT r = R.btn[b];
+            if (b == FB_CLOSE) {
+                Gdiplus::Graphics gs(dc);
+                gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                Gdiplus::GraphicsPath p;
+                float rr = (float)FdD(3);
+                float fx = (float)r.left, fy = (float)r.top, fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
+                p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+                p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+                p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+                p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+                p.CloseFigure();
+                Gdiplus::SolidBrush f(Gdiplus::Color(255, 0xE0, 0x44, 0x44));
+                gs.FillPath(&f, &p);
+            } else {
+                Gdiplus::Graphics gs(dc);
+                gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                Gdiplus::GraphicsPath p;
+                float rr = (float)FdD(3);
+                float fx = (float)r.left, fy = (float)r.top, fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
+                p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+                p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+                p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+                p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+                p.CloseFigure();
+                Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+                gs.FillPath(&f, &p);
+            }
+        }
+        SelectObject(dc, FdFontGlyph());
+        SetTextColor(dc, hot ? RGB(255, 255, 255) : RGB(0xc8, 0xc8, 0xc8));
+        DrawTextW(dc, glyph[b - FB_PREV], -1, &R.btn[b], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+// The bar's back buffer (one blit: a direct paint showed every intermediate
+// step - backdrop copy, shadow, panel - which is exactly the strobing the
+// caption buttons once did under the cursor).
+static HDC g_fdc = nullptr; static HBITMAP g_fbm = nullptr, g_fold = nullptr;
+static int g_fw = 0, g_fh = 0;
+static void EnsureFindBack(HDC ref, int w, int h) {
+    if (g_fbm && g_fw == w && g_fh == h) return;
+    if (g_fbm) { SelectObject(g_fdc, g_fold); DeleteObject(g_fbm); }
+    else g_fdc = CreateCompatibleDC(ref);
+    g_fbm = CreateCompatibleBitmap(ref, w, h);
+    g_fold = (HBITMAP)SelectObject(g_fdc, g_fbm);
+    g_fw = w; g_fh = h;
+}
+
+static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureFindBack(dc, r.right, r.bottom);
+            // the view's live pixels behind us: the shadow melts onto the pages,
+            // the margins disappear into the view - the bar floats, WPF-style
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.view, &po, 1);
+            RECT vr{ po.x, po.y, po.x + r.right, po.y + r.bottom };
+            FillRect(g_fdc, &r, GrainBrush(1));
+            RECT ix{ max(0, (int)vr.left), max(0, (int)vr.top),
+                     min(g.bw, (int)vr.right), min(g.bh, (int)vr.bottom) };
+            if (g.bdc && ix.right > ix.left && ix.bottom > ix.top)
+                BitBlt(g_fdc, ix.left - vr.left, ix.top - vr.top, ix.right - ix.left, ix.bottom - ix.top,
+                       g.bdc, ix.left, ix.top, SRCCOPY);
+            POINT pm{ 0, 0 }; MapWindowPoints(h, g.main, &pm, 1);   // the shared grain phase
+            SetBrushOrgEx(g_fdc, -pm.x, -pm.y, nullptr);
+            FindDraw(g_fdc, 0, 0);
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_fdc, 0, 0, SRCCOPY);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == 1) { KillTimer(h, 1); FindRun(); return 0; }    // the debounce fired
+        if (wp == 2) { FindPump(); return 0; }
+        return 0;
+    case WM_COMMAND:
+        if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g_fedit) FindChanged();
+        return 0;
+    case WM_CTLCOLOREDIT: {                            // the dark edit: light text on chrome
+        HDC dc = (HDC)wp;
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        SetBkColor(dc, RGB(0x1c, 0x1c, 0x1c));
+        static HBRUSH b = CreateSolidBrush(RGB(0x1c, 0x1c, 0x1c));
+        return (LRESULT)b;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int ht = FdHit(p);
+        if (ht != fd.hot) {                            // repaints only on a hover flip
+            fd.hot = ht;
+            if (ht >= 0) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (fd.hot != -1) { fd.hot = -1; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        int ht = FdHit(POINT{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) });
+        if (ht == FB_CLOSE) FindClose();
+        else if (ht == FB_PREV) FindStep(-1);
+        else if (ht == FB_NEXT) FindStep(1);
+        else if (ht == FB_AA) FindOption(true);
+        else if (ht == FB_AB) FindOption(false);
+        return 0;
+    }
+    case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;   // the bar floats; the wheel still scrolls
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {                  // the bar is buttons and a text box: arrow
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+
+// The edit's keys: Enter steps, Shift+Enter steps back, Escape closes, Ctrl+F
+// closes (the toggle), everything else edits - KillerPDF's SearchBox_KeyDown.
+static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_KEYDOWN) {
+        bool shift = GetKeyState(VK_SHIFT) < 0, ctrl = GetKeyState(VK_CONTROL) < 0;
+        if (wp == VK_RETURN) { FindStep(shift ? -1 : 1); return 0; }
+        if (wp == VK_ESCAPE) { FindClose(); return 0; }
+        if (wp == VK_F3) { FindStep(shift ? -1 : 1); return 0; }   // F3 steps from the box too
+        if (wp == 'F' && ctrl) { FindClose(); return 0; }
+    }
+    return CallWindowProcW(g_feditDef, h, m, wp, lp);
+}
+
+// Size and spot the bar: the edit shrinks to fit (60..200), the bar's right
+// edge rides 16px in from the view's right, top 6px under the view's top.
+static void FindPlace() {
+    if (!g_find || !g_fedit || !g.view) return;
+    int vw = CardW();
+    if (vw <= 0) return;
+    int editW = FdEditW(vw);
+    int bw = FdD(FdBarFix) + editW, bh = FdD(FdBarH);
+    MoveWindow(g_find, vw - FdD(16) + FdD(FdPadX) - bw, FdD(6) - FdD(FdPadT),
+               bw + 2 * FdD(FdPadX), bh + FdD(FdPadT) + FdD(FdPadB), TRUE);
+    FdRects R; FdLayout(editW, R);
+    MoveWindow(g_fedit, R.edit.left, R.edit.top,
+               R.edit.right - R.edit.left, R.edit.bottom - R.edit.top, FALSE);
+}
+
 // ---------------- main window ----------------
 
 static void LayoutMain() {
@@ -2646,6 +3314,7 @@ static void LayoutMain() {
     }
     MoveWindow(g.view, sw, cap, w - sw, ch, TRUE);
     if (g.status) MoveWindow(g.status, 0, cap + ch, w, sh, TRUE);
+    if (g_find && fd.open) FindPlace();          // the bar tracks the card's top-right corner
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
     g.sx = std::clamp(g.sx, 0, max(0, g.docW - CardW()));
@@ -2823,6 +3492,12 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_stcombo) { DeleteObject(g_stcombo); g_stcombo = nullptr; }
         if (g_stglyph) { DeleteObject(g_stglyph); g_stglyph = nullptr; }
         if (g_stchev) { DeleteObject(g_stchev); g_stchev = nullptr; }
+        if (g_fntEdit) { DeleteObject(g_fntEdit); g_fntEdit = nullptr; }
+        if (g_fntOpt) { DeleteObject(g_fntOpt); g_fntOpt = nullptr; }
+        if (g_fntAb) { DeleteObject(g_fntAb); g_fntAb = nullptr; }
+        if (g_fntStat) { DeleteObject(g_fntStat); g_fntStat = nullptr; }
+        if (g_fntGlyph) { DeleteObject(g_fntGlyph); g_fntGlyph = nullptr; }
+        if (g_fedit) SendMessageW(g_fedit, WM_SETFONT, (WPARAM)FdFontEdit(), TRUE);
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.tw = 0;
         SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2875,11 +3550,16 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case '0': if (ctrl) ApplyFit(); break;
         case '1': if (ctrl) SetZoom(1.0, g.cw / 2, g.ch / 2); break;
         case '2': if (ctrl) ApplyFit(true); break;
-        case 'F': ApplyFit(); break;
+        case 'F': if (ctrl) FindToggle(); else ApplyFit(); break;   // Ctrl+F find, plain F fit
         case 'C': if (ctrl && !g.selText.empty()) CopyClipboard(g.selText); break;
         case 'A': if (ctrl) SelAll(); break;
+        case VK_F3:                                // Find next / previous; closed, F3 opens
+            if (!fd.open) FindOpen();
+            else if (!fd.hits.empty()) FindStep(shift ? -1 : 1);
+            break;
         case VK_ESCAPE:
-            if (g.full) ToggleFull(h);           // full screen leaves first
+            if (fd.open) FindClose();              // the bar leaves first
+            else if (g.full) ToggleFull(h);        // full screen leaves next
             else SelClear();
             break;
         case VK_F5: SetViewMode(0); break;       // KillerPDF's mode keys
@@ -2927,8 +3607,14 @@ static int Shot(const wchar_t* out, int w, int h) {
         HBITMAP b2 = CreateCompatibleBitmap(dc, max(1, w - sw), ch);
         HGDIOBJ o2 = SelectObject(m2, b2);
         SetBrushOrgEx(m2, -sw, -cap, nullptr);
+        g_grainPX = -sw; g_grainPY = -cap;              // the view's grain phase, as on screen
         Draw(m2, w - sw, ch, 0);
         PaintViewBars(m2, w - sw, ch, 0);
+        if (fd.open) {                                  // the floating Find bar, over its pixels
+            int editW = FdEditW(w - sw);
+            int bw = FdD(FdBarFix) + editW;
+            FindDraw(m2, (w - sw) - FdD(16) + FdD(FdPadX) - bw, FdD(6) - FdD(FdPadT));
+        }
         BitBlt(dc, sw, cap, w - sw, ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
     }
@@ -3046,6 +3732,26 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                     g.selFCaret = std::clamp(c1, 0, n);
                     if (g.selACaret != g.selFCaret) g.selRange = true;
                 }
+            }
+        }
+        // CI preview seed 2: find=<query> opens the Find bar with the query and
+        // scans synchronously (no windows here - the bar paints through Shot), so
+        // the release screenshot shows the bar, the counter and the highlights
+        if (argc >= 6 && !wcsncmp(argv[5], L"find=", 5)) {
+            FindOpen(false);
+            fd.query = argv[5] + 5;
+            if (fd.query.size() >= 2) {
+                fd.done = false;
+                std::vector<FRect> rs;
+                while (fd.scan < g.n) {
+                    TxtPage* pt = TtFor(fd.scan);
+                    if (pt && !pt->cells.empty() &&
+                        FdMatch(*pt, fd.query, fd.matchCase, fd.wholeWord, rs) > 0)
+                        for (const FRect& r : rs) fd.hits.push_back({ fd.scan, r });
+                    fd.scan++;
+                }
+                fd.done = true;
+                FindFinish();
             }
         }
         // Size the window so the client is exactly 880x680: WM_NCCALCSIZE gives
