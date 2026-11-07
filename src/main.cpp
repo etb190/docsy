@@ -22,15 +22,18 @@
 // button and DWM rounded corners) owns the top row; nothing read from the
 // document (no file name) is drawn anywhere on it.
 // The bottom row is KillerPDF's footer status bar, one full-width child painted
-// in the sidebar's grain tone so the two read as ONE container wrapping the
-// document pane on two sides. Its cells port the original's logic: the status
-// line "Page N of M, Fit Page (Z%)" with the click-for-file-size flash (held
-// messages beat routine updates, SetStatusHeld-style), the green PORTABLE
-// outline badge, the paper-size label from KillerPDF's PageSizeFormatter (known
-// A/US sizes matched at +/-3pt, mm for A-series, inches for US), the F5-F8
-// view-mode radios (continuous / single / two-page / 3-column grid), the full
-// screen and doc-invert (moon) toggles, the zoom out / fit dropdown / zoom in
-// cluster over a real dropdown popup, and the version cell.
+// in the same #1c1c1c + shared grain tone as the sidebar and title bar (the
+// original paints all three BackgroundBrush under one tile), so they read as
+// ONE container wrapping the document pane on two sides. Its cells port the
+// original's logic: the status line "Page N of M, Fit Page (Z%)" with the
+// click-for-file-size flash (held messages beat routine updates,
+// SetStatusHeld-style), the paper-size label from KillerPDF's PageSizeFormatter
+// (known A/US sizes matched at +/-3pt, mm for A-series, inches for US), the
+// F5-F8 view-mode radios (continuous / single / two-page / 3-column grid), the
+// full screen and doc-invert (moon) toggles, the zoom out / fit dropdown /
+// zoom in cluster over a real dropdown popup, and the version cell. The text
+// is the original's bundled Killer Sans (OFL; subset, embedded in the exe,
+// process-private via AddFontMemResourceEx) at its FontSize 16, on a 24px bar.
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
@@ -344,27 +347,47 @@ static void PaintCaptionInto(HDC dst, int w) {
 }
 
 // ---- film-grain margins (port of KillerPDF's procedural GrainTexture) ----
-// One seamless 256x256 tile of gray specks: Gaussian around 128, softened with wrapping
-// neighbours so the tile repeats without a seam, then contrast-boosted to keep dark and
-// bright specks distinct. KillerPDF paints this tile at alpha 70/255 and then scales the
-// whole overlay down by its theme resource GrainOpacity - 0.24 on the dark themes - so
-// the effective blend is (70/255) * 0.24 ~= 0.066. Baking that product in reproduces the
-// rendered frost exactly; painting at the raw alpha 70 reads as harsh TV static. The
-// docsy greys are neutral, so the theme-tinted "lean" specks of the original never
-// apply. The seed is fixed so every build shows the identical pattern, and the tile stays
-// fixed to the window while pages scroll, matching KillerPDF's viewport-fixed overlay.
-// Two page-side surfaces share the tile - the page margins (lighter grey) and
-// the sidebar (darker) - plus the third, darkest one for the custom title bar
-// (KillerPDF's TitleBarBrush #1c1c1c, which carries the same grain overlay).
-static HBRUSH g_grainBrush[3] = { nullptr, nullptr, nullptr };
-static HBITMAP g_grainBmp[3] = { nullptr, nullptr, nullptr };
+// One seamless 256x256 tile of gray specks: Gaussian around 128 (sigma 150),
+// softened with wrapping neighbours so the tile repeats without a seam, then
+// contrast-boosted to keep dark and bright specks distinct. KillerPDF paints
+// this tile at alpha 70/255 and then scales the whole overlay down by its
+// theme resource GrainOpacity - 0.24 on the dark themes - so the effective
+// blend is (70/255) * 0.24 ~= 0.066. Baking that product in reproduces the
+// rendered frost exactly; painting at the raw alpha 70 reads as harsh TV
+// static. The seed is fixed so every build shows the identical pattern, and
+// the tile stays fixed to the window while pages scroll, matching KillerPDF's
+// viewport-fixed overlay.
+//
+// Two KillerPDF details this port now keeps exactly:
+//  * the lean specks. 40% of the specks lean toward the theme's secondary
+//    color - the complement of the accent hue (LeanFor/Generate in
+//    Controls/GrainTexture.cs). The green #22bb56 accent sits at hue 132, the
+//    complement 312 lands on pink, and the family rule leans greens to purple
+//    (285) instead: FromHsv(285, 0.55, 0.85) = RGB(187, 98, 217). A leaning
+//    speck keeps its own lightness (k = 0.35 + 1.1*shade/255) and mixes 80% of
+//    the way over, so the tint reads as a cool grey, never a color wash.
+//  * the surfaces. The dark theme paints the title bar, the sidebar and the
+//    footer the SAME BackgroundBrush #1c1c1c under one shared tile
+//    (GrainBrushShared), which is why KillerPDF's frame reads as one
+//    continuous container; only the document card is lighter (PaneBrush
+//    #3a3a3a). docsy now bakes the same neutrals: slot 0 is the document
+//    canvas, slot 1 the shared dark chrome (sidebar + footer + title bar all
+//    return it), so the two frame the page area on two sides seamlessly.
+static HBRUSH g_grainBrush[2] = { nullptr, nullptr };
+static HBITMAP g_grainBmp[2] = { nullptr, nullptr };
 
 static HBRUSH GrainBrush(int which) {
+    if (which > 1) which = 1;               // title bar shares the dark chrome tile
     if (g_grainBrush[which]) return g_grainBrush[which];
     const int S = 256;
     const double Spread = 150.0, Soften = 0.10, Contrast = 1.35;
+    const double LeanShare = 0.40, LeanMix = 0.80;
     const double Alpha = 70.0 / 255.0 * 0.24;   // tile alpha 70 times the dark-theme GrainOpacity
-    const BYTE back[3][3] = { { 60, 63, 65 }, { 38, 40, 43 }, { 28, 28, 28 } };  // margins, sidebar, title bar
+    const BYTE back[2][3] = {
+        { 58, 58, 58 },   // document canvas  - KillerPDF's BgCanvas/PaneBrush #3a3a3a
+        { 28, 28, 28 },   // dark chrome      - BackgroundBrush/TitleBarBrush/FooterBackgroundBrush #1c1c1c
+    };                                    // stored B,G,R; all neutral greys, exactly as the theme states them
+    const double leanC[3] = { 217.0, 98.0, 187.0 };   // the purple lean, B,G,R
     auto cl = [](double v) { return v < 0 ? 0.0 : v > 255 ? 255.0 : v; };
     unsigned long long st = 1337;  // splitmix64: deterministic stream, same fixed-seed intent
     auto rnd = [&st]() {
@@ -375,9 +398,11 @@ static HBRUSH GrainBrush(int which) {
         return ((z ^ (z >> 31)) >> 11) * (1.0 / 9007199254740992.0);  // [0,1)
     };
     std::vector<double> raw((size_t)S * S);
-    for (double& v : raw) {
+    std::vector<BYTE> lean((size_t)S * S);
+    for (size_t i = 0; i < raw.size(); i++) {
         double u1 = 1.0 - rnd(), u2 = rnd();
-        v = cl(128.0 + Spread * std::sqrt(-2.0 * std::log(u1)) * std::cos(2 * 3.14159265358979323846 * u2));
+        raw[i] = cl(128.0 + Spread * std::sqrt(-2.0 * std::log(u1)) * std::cos(2 * 3.14159265358979323846 * u2));
+        lean[i] = rnd() < LeanShare;
     }
     BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), S, S, 1, 32, BI_RGB };
     BYTE* px = nullptr;
@@ -385,12 +410,19 @@ static HBRUSH GrainBrush(int which) {
     if (!px || !g_grainBmp[which]) return (HBRUSH)GetStockObject(GRAY_BRUSH);
     for (int y = 0; y < S; y++) {
         for (int x = 0; x < S; x++) {
+            size_t i = (size_t)y * S + x;
             double around = (raw[((y + S - 1) % S) * S + x] + raw[((y + 1) % S) * S + x]
                            + raw[y * S + (x + S - 1) % S] + raw[y * S + (x + 1) % S]) / 4.0;
-            double soft = raw[y * S + x] * (1.0 - Soften) + around * Soften;
+            double soft = raw[i] * (1.0 - Soften) + around * Soften;
             double shade = cl(128.0 + (soft - 128.0) * Contrast);
-            BYTE* p = px + ((size_t)y * S + x) * 4;
-            for (int c = 0; c < 3; c++) p[c] = (BYTE)std::lround(back[which][c] * (1.0 - Alpha) + shade * Alpha);
+            double speck[3] = { shade, shade, shade };
+            if (lean[i]) {
+                double k = 0.35 + 1.1 * shade / 255.0;      // keeps the speck's own lightness
+                for (int c = 0; c < 3; c++)
+                    speck[c] = shade * (1.0 - LeanMix) + cl(leanC[c] * k) * LeanMix;
+            }
+            BYTE* p = px + i * 4;
+            for (int c = 0; c < 3; c++) p[c] = (BYTE)std::lround(back[which][c] * (1.0 - Alpha) + speck[c] * Alpha);
             p[3] = 255;
         }
     }
@@ -1251,11 +1283,11 @@ static void RoundRectFill(HDC dc, int x, int y, int w, int h, int r, bool hot) {
     gs.FillPath(&br, &p);
 }
 
-static HFONT SideFont() {   // KillerPDF's page labels: 14px
+static HFONT SideFont() {   // KillerPDF's page list: UiFont ("Killer Sans UI") at FontSize 13
     if (!g_sidefont)
-        g_sidefont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        g_sidefont = CreateFontW(-(int)(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans UI");
     return g_sidefont;
 }
 
@@ -1746,32 +1778,51 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 // ---------------- footer status bar (KillerPDF's status bar) ----------------
-// One full-width child under the document pane, painted in the sidebar's grain
-// tone so the rail + footer read as one container wrapping the page area on two
-// sides. Cells right-to-left, KillerPDF's own arrangement: version | zoom out /
-// fit dropdown / zoom in | fullscreen + doc-invert | the F5-F8 view-mode radios |
-// paper size | the green PORTABLE outline badge | the status line. Every control
-// ports the original's behaviour, not just its look.
+// One full-width child under the document pane, painted in the same #1c1c1c +
+// grain tone as the sidebar and title bar (KillerPDF paints the footer
+// BackgroundBrush under the shared tile), so the rail + footer read as one
+// container wrapping the page area on two sides. Cells right-to-left,
+// KillerPDF's own arrangement: version | zoom out / fit dropdown / zoom in |
+// fullscreen + doc-invert | the F5-F8 view-mode radios | paper size | the
+// status line. Every metric below is the original's: FooterBorder MinHeight
+// 24, 24x20 nav buttons, 25x20 mode radios, a fixed 78x20 zoom box, dividers
+// 1x14 with their stated margins, the 16px FooterStatusInset on the status
+// line, 20px of trailing margin on the copyright, and text in the bundled
+// Killer Sans at FontSize 16 (the combo uses Killer Sans UI at 10).
 
 #define APP_VER L"1.0"
 
-static int SBH() { return (int)(28 * g.dpi); }        // the footer row height
+static int SBH() { return (int)(24 * g.dpi); }        // FooterBorder MinHeight=24
 
-static HFONT g_stfont = nullptr, g_stfontL = nullptr, g_stbadge = nullptr,
+static HFONT g_stfont = nullptr, g_stfontL = nullptr, g_stfontF = nullptr,
               g_stcombo = nullptr, g_stglyph = nullptr, g_stchev = nullptr;
-static HFONT StFont()    { return CaptionFont(g_stfont, 13, true, L"Segoe UI"); }
-static HFONT StFontL()   { return CaptionFont(g_stfontL, 13, false, L"Segoe UI"); }
-static HFONT StBadge()   { return CaptionFont(g_stbadge, 9, false, L"Segoe UI"); }
-static HFONT StCombo()   { return CaptionFont(g_stcombo, 10, false, L"Segoe UI"); }
+static HFONT StFont()    { return CaptionFont(g_stfont, 16, false, L"Killer Sans"); }        // BrandSansFont 16
+static HFONT StFontL()   { return CaptionFont(g_stfontL, 16, false, L"Killer Sans"); }       // version cell 16
+static HFONT StFontF()   { return CaptionFont(g_stfontF, 16, false, L"Segoe UI"); }          // non-latin status fallback
+static HFONT StCombo()   { return CaptionFont(g_stcombo, 10, false, L"Killer Sans UI"); }    // UiFont 10
 static HFONT StGlyph()   { return CaptionFont(g_stglyph, 13, false, L"Segoe MDL2 Assets"); }
 static HFONT StChevron() { return CaptionFont(g_stchev, 7, false, L"Segoe MDL2 Assets"); }
+
+// The embedded Killer Sans subsets cover latin-1 plus the dashes/quotes/dots
+// (see src/fonts): the routine UI strings all live there. A held status can
+// echo a file NAME with any script in it, so such strings draw in Segoe UI
+// instead of showing .notdef boxes for the glyphs the subset drops.
+static bool LatinText(const wchar_t* s) {
+    for (const wchar_t* p = s; *p; p++) {
+        if (*p < 0x0100) continue;
+        if (*p >= 0x2013 && *p <= 0x2026) continue;
+        return false;
+    }
+    return true;
+}
 
 static HBRUSH DividerBrush()     { static HBRUSH b = CreateSolidBrush(RGB(0x4a, 0x4a, 0x4a)); return b; }
 static HBRUSH EdgeBrush()        { static HBRUSH b = CreateSolidBrush(RGB(0x17, 0x17, 0x17)); return b; }
 static HBRUSH AccentBrush()      { static HBRUSH b = CreateSolidBrush(RGB(0x22, 0xbb, 0x56)); return b; }
-static HBRUSH ComboFillBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x20, 0x20, 0x20)); return b; }
-static HBRUSH ComboBorderBrush() { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }
-static HBRUSH PopBrush()         { static HBRUSH b = CreateSolidBrush(RGB(0x2b, 0x2b, 0x2b)); return b; }
+static HBRUSH ComboFillBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x14, 0x14, 0x14)); return b; }  // MenuBackgroundBrush
+static HBRUSH ComboBorderBrush() { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }  // MenuBorderBrush
+static HBRUSH PopBrush()         { static HBRUSH b = CreateSolidBrush(RGB(0x14, 0x14, 0x14)); return b; }
+static HBRUSH PopHoverBrush()    { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }  // RowHoverBrush
 
 static HDC s_measdc = nullptr;
 static int TextW(HFONT f, const wchar_t* s) {          // extent at the current font
@@ -1950,9 +2001,15 @@ static int ZoomCurrent() {                       // which item the closed box sh
 }
 static void ZoomCycle(int dir) { ZoomApply(std::clamp(ZoomCurrent() + dir, 0, 7)); }
 
-// ---- footer geometry ----
+// ---- footer geometry: KillerPDF's FooterToolsPanel, measured right-to-left ----
+// The version cell ends 20px short of the right edge (copyright margin); the
+// tools cell stacks against it with no extra padding (FooterCellPadding = 0 on
+// the dark theme): zoom in | combo 78 wide with 1px margins | zoom out |
+// divider (1x14, m 5,0) | invert + fullscreen, butted together | divider |
+// four 25px mode radios, butted | divider (m 2,0,5,0) | paper size, MinWidth
+// 90, margins 4,0,5,0. The status line takes the rest, its text inset 16px.
 
-enum { ST_STATUS, ST_BADGE, ST_SIZE, ST_MCONT, ST_MSINGLE, ST_MTWO, ST_MGRID,
+enum { ST_STATUS, ST_SIZE, ST_MCONT, ST_MSINGLE, ST_MTWO, ST_MGRID,
        ST_FULL, ST_INV, ST_ZOUT, ST_COMBO, ST_ZIN, ST_VER, ST_COUNT };
 static RECT g_stR[ST_COUNT];
 
@@ -1960,41 +2017,35 @@ static void StatusRects(int w) {
     int dpi = g.dpi;
     int btnH = (int)(20 * dpi), by = (SBH() - btnH) / 2;
     for (auto& r : g_stR) r = { 0, 0, 0, 0 };
-    int x = w - (int)(10 * dpi);
-    int vw = 1 + (int)(8 * dpi) + TextW(StFontL(), L"v" APP_VER) +
-             (int)(12 * dpi) + TextW(StFontL(), L"\u00A9 2026 Docsy");
+    int x = w;
+    int wC = TextW(StFontL(), L"\u00A9 2026 Docsy"), wV = TextW(StFontL(), L"v" APP_VER);
+    int vw = (int)(20 * dpi) + wC + (int)(12 * dpi) + wV + (int)(8 * dpi) + 1 + (int)(5 * dpi);
     g_stR[ST_VER] = { x - vw, 0, x, SBH() };
-    x -= vw + (int)(8 * dpi);
+    x -= vw;
     int bw24 = (int)(24 * dpi);
-    g_stR[ST_ZIN] = { x - bw24, by, x, by + btnH };          // rightmost of the zoom cluster
-    x -= bw24;
-    int cw = std::clamp(TextW(StCombo(), L"Fit Page") + (int)(28 * dpi), (int)(70 * dpi), (int)(220 * dpi));
-    g_stR[ST_COMBO] = { x - cw, by, x, by + btnH };
-    x -= cw;
-    g_stR[ST_ZOUT] = { x - bw24, by, x, by + btnH };
-    x -= bw24 + (int)(5 * dpi);
-    g_stR[ST_INV] = { x - bw24, by, x, by + btnH };          // [full, inv] group
-    x -= bw24;
-    g_stR[ST_FULL] = { x - bw24, by, x, by + btnH };
-    x -= bw24 + (int)(5 * dpi);
-    int mw = (int)(25 * dpi);
-    g_stR[ST_MGRID] = { x - mw, by, x, by + btnH };          // the four mode radios
-    x -= mw;
-    g_stR[ST_MTWO] = { x - mw, by, x, by + btnH };
-    x -= mw;
-    g_stR[ST_MSINGLE] = { x - mw, by, x, by + btnH };
-    x -= mw;
-    g_stR[ST_MCONT] = { x - mw, by, x, by + btnH };
-    x -= mw + (int)(5 * dpi);
+    x -= bw24;  g_stR[ST_ZIN] = { x, by, x + bw24, by + btnH };
+    x -= (int)(1 * dpi);                                     // ZoomBox Margin="1,0"
+    int cw = (int)(78 * dpi);                                // ZoomBox Width=78
+    x -= cw;    g_stR[ST_COMBO] = { x, by, x + cw, by + btnH };
+    x -= (int)(1 * dpi);
+    x -= bw24;  g_stR[ST_ZOUT] = { x, by, x + bw24, by + btnH };
+    x -= (int)(5 * dpi) + 1 + (int)(5 * dpi);                // divider Margin="5,0"
+    x -= bw24;  g_stR[ST_INV] = { x, by, x + bw24, by + btnH };
+    x -= bw24;  g_stR[ST_FULL] = { x, by, x + bw24, by + btnH };
+    x -= (int)(5 * dpi) + 1 + (int)(5 * dpi);                // divider Margin="5,0"
+    int mw = (int)(25 * dpi);                                // FooterModeButton 25x20
+    x -= mw;    g_stR[ST_MGRID] = { x, by, x + mw, by + btnH };
+    x -= mw;    g_stR[ST_MTWO] = { x, by, x + mw, by + btnH };
+    x -= mw;    g_stR[ST_MSINGLE] = { x, by, x + mw, by + btnH };
+    x -= mw;    g_stR[ST_MCONT] = { x, by, x + mw, by + btnH };
     std::wstring lbl, det; PaperLabel(lbl, det);
     if (!lbl.empty()) {
-        int sw2 = TextW(StFont(), lbl.c_str()) + (int)(6 * dpi);
+        x -= (int)(5 * dpi) + 1 + (int)(2 * dpi);            // first divider Margin="2,0,5,0"
+        int sw2 = max((int)(90 * dpi), TextW(StFont(), lbl.c_str()) + (int)(6 * dpi));
+        x -= (int)(5 * dpi);                                 // PageSizeLabel right margin
         g_stR[ST_SIZE] = { x - sw2, 0, x, SBH() };
-        x -= sw2 + (int)(5 * dpi);
+        x -= sw2 + (int)(4 * dpi);                           // PageSizeLabel left margin
     }
-    int bwid = TextW(StBadge(), L"PORTABLE") + (int)(16 * dpi), bh2 = (int)(16 * dpi);
-    g_stR[ST_BADGE] = { x - bwid, (SBH() - bh2) / 2, x, (SBH() + bh2) / 2 };
-    x -= bwid + (int)(10 * dpi);
     g_stR[ST_STATUS] = { 0, 0, max(x, (int)(40 * dpi)), SBH() };
 }
 
@@ -2003,7 +2054,6 @@ static int StatusHit(POINT p) {
     if (!g.status || !GetClientRect(g.status, &r) || r.right <= 0) return -1;
     StatusRects(r.right);
     for (int i = 0; i < ST_COUNT; i++) {
-        if (i == ST_BADGE) continue;                 // static badge: not interactive
         if (p.x >= g_stR[i].left && p.x < g_stR[i].right && p.y >= g_stR[i].top && p.y < g_stR[i].bottom)
             return (!g.n && i != ST_STATUS && i != ST_VER) ? -1 : i;
     }
@@ -2098,16 +2148,20 @@ static void DrawGlyph(HDC dc, int id, const wchar_t* glyph, bool on) {
 }
 
 static void DrawVersion(HDC dc) {
+    // The version cell: divider (1x14, Margin="5,0,8,0") | "v1.0" (Margin="0,0,12,0")
+    // | "(c) 2026 Docsy" (Margin="0,0,20,0"). KillerPDF draws the cell at
+    // Opacity 0.75 - TextFooter #858585 over the #1c1c1c footer bakes to #6b6b6b.
     int dpi = g.dpi;
     RECT vr = g_stR[ST_VER];
-    RECT d{ vr.left + 1, (SBH() - (int)(14 * dpi)) / 2, vr.left + 2, (SBH() + (int)(14 * dpi)) / 2 };
+    RECT d{ vr.left + (int)(5 * dpi), (SBH() - (int)(14 * dpi)) / 2,
+            vr.left + (int)(5 * dpi) + 1, (SBH() + (int)(14 * dpi)) / 2 };
     FillRect(dc, &d, DividerBrush());
     SelectObject(dc, StFontL());
-    SetTextColor(dc, g.stHot == ST_VER ? RGB(0xb6, 0xb6, 0xb6) : RGB(0x85, 0x85, 0x85));   // TextFooter
-    RECT t1 = vr; t1.left += 1 + (int)(8 * dpi);
+    SetTextColor(dc, g.stHot == ST_VER ? RGB(0x90, 0x90, 0x90) : RGB(0x6b, 0x6b, 0x6b));
+    RECT t1 = vr; t1.left = d.right + (int)(8 * dpi); t1.right = t1.left + TextW(StFontL(), L"v" APP_VER);
     DrawTextW(dc, L"v" APP_VER, -1, &t1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    RECT t2 = vr;
-    t2.left = vr.right - TextW(StFontL(), L"\u00A9 2026 Docsy");
+    RECT t2 = vr; t2.right -= (int)(20 * dpi);
+    t2.left = t2.right - TextW(StFontL(), L"\u00A9 2026 Docsy");
     DrawTextW(dc, L"\u00A9 2026 Docsy", -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
@@ -2124,26 +2178,21 @@ static void EnsureStatusBack(HDC ref, int w, int h) {
 
 static void StatusDraw(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
-    FillRect(dc, &bar, GrainBrush(1));   // the sidebar's tone: rail + footer = one container
+    FillRect(dc, &bar, GrainBrush(1));   // the dark chrome: sidebar + footer + title = one container
     RECT edge{ 0, 0, w, 1 };
     FillRect(dc, &edge, EdgeBrush());    // separation from the pane above
     if (w < (int)(200 * g.dpi)) return;
     StatusRects(w);
     SetBkMode(dc, TRANSPARENT);
     int dpi = g.dpi;
-    RECT tr = g_stR[ST_STATUS];          // the status line, ellipsized before the badge
-    tr.left = (int)(8 * dpi); tr.right -= (int)(4 * dpi);
+    RECT tr = g_stR[ST_STATUS];          // the status line, ellipsized before the tools cell
+    tr.left = (int)(16 * dpi); tr.right -= (int)(4 * dpi);   // FooterStatusInset 16
     std::wstring t = StatusTextNow();
-    SelectObject(dc, StFont());
+    SelectObject(dc, LatinText(t.c_str()) ? StFont() : StFontF());
     SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
     DrawTextW(dc, t.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     DrawVersion(dc);
     if (!g.n) return;                    // no document: status + version cells only
-    FrameRect(dc, &g_stR[ST_BADGE], AccentBrush());
-    RECT bt = g_stR[ST_BADGE];
-    SelectObject(dc, StBadge());
-    SetTextColor(dc, RGB(0x22, 0xbb, 0x56));
-    DrawTextW(dc, L"PORTABLE", -1, &bt, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     std::wstring lbl, det; PaperLabel(lbl, det);
     if (!lbl.empty()) {
         RECT sr = g_stR[ST_SIZE];
@@ -2246,10 +2295,7 @@ static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         int cur = ZoomCurrent();
         for (int i = 0; i < 8; i++) {
             RECT it{ 1, 1 + i * g_zoomItemH, r.right - 1, 1 + (i + 1) * g_zoomItemH };
-            if (i == g.zoomHot) {
-                HBRUSH hb = CreateSolidBrush(RGB(0x3a, 0x3a, 0x3a));
-                FillRect(dc, &it, hb); DeleteObject(hb);
-            }
+            if (i == g.zoomHot) FillRect(dc, &it, PopHoverBrush());
             SetTextColor(dc, i == cur ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
             RECT tx = it; tx.left += (int)(8 * g.dpi);
             DrawTextW(dc, ZoomLabel(i), -1, &tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -2547,7 +2593,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_wordfont) { DeleteObject(g_wordfont); g_wordfont = nullptr; }
         if (g_stfont) { DeleteObject(g_stfont); g_stfont = nullptr; }
         if (g_stfontL) { DeleteObject(g_stfontL); g_stfontL = nullptr; }
-        if (g_stbadge) { DeleteObject(g_stbadge); g_stbadge = nullptr; }
+        if (g_stfontF) { DeleteObject(g_stfontF); g_stfontF = nullptr; }
         if (g_stcombo) { DeleteObject(g_stcombo); g_stcombo = nullptr; }
         if (g_stglyph) { DeleteObject(g_stglyph); g_stglyph = nullptr; }
         if (g_stchev) { DeleteObject(g_stchev); g_stchev = nullptr; }
@@ -2690,6 +2736,20 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool shot = argc >= 4 && !lstrcmpW(argv[1], L"--shot");
     g.quiet = shot; g.hinst = hi;
+
+    // The bundled Killer Sans faces (KillerPDF's BrandSansFont / UiFont, OFL,
+    // subset to latin-1 + dashes in src/fonts). Loading them from memory keeps
+    // them process-private: no install, no file next to the exe.
+    for (int id : { 201, 202 }) {
+        HRSRC hs = FindResourceW(hi, MAKEINTRESOURCEW(id), (LPCWSTR)RT_RCDATA);
+        HGLOBAL hg = hs ? LoadResource(hi, hs) : nullptr;
+        const void* data = hg ? LockResource(hg) : nullptr;
+        DWORD len = hs ? SizeofResource(hi, hs) : 0;
+        if (data && len) {
+            DWORD n = 0;
+            AddFontMemResourceEx(const_cast<void*>(data), len, nullptr, &n);
+        }
+    }
 
     WNDCLASSEXW wc{ sizeof wc };
     wc.lpfnWndProc = Proc; wc.hInstance = hi;

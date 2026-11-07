@@ -1,1 +1,5 @@
 1 ICON "docsy.ico"
+// KillerPDF's bundled faces (SIL OFL 1.1 - see fonts/KillerSans-OFL.txt),
+// subset to latin-1 + dashes/quotes and embedded as process-private fonts.
+201 RCDATA "fonts/KillerSans-sub.ttf"
+202 RCDATA "fonts/KillerSansUI-sub.ttf"
