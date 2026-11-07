@@ -1,4 +1,4 @@
-// Tiny PDF - minimal, fast, native Win32 PDF reader.
+// Docsy - minimal, fast, native Win32 PDF reader.
 // Uses the PDF engine built into Windows (Windows.Data.Pdf): no bundled renderer.
 #define NOMINMAX
 #include <windows.h>
@@ -41,6 +41,8 @@ struct Ent { HBITMAP b; int w, h; unsigned long long t; };
 
 struct App {
     HWND hwnd = nullptr;
+    HINSTANCE hinst = nullptr;
+    HICON logo = nullptr;
     PdfDocument doc{ nullptr };
     std::wstring name;
     int n = 0;
@@ -117,8 +119,8 @@ static int PageAt(int y) {
 static void UpdateTitle() {
     static wchar_t last[600];
     wchar_t t[600];
-    if (!g.n) lstrcpyW(t, L"Tiny PDF");
-    else swprintf_s(t, L"%s  -  %d / %d  -  %d%%  -  Tiny PDF", g.name.c_str(),
+    if (!g.n) lstrcpyW(t, L"Docsy");
+    else swprintf_s(t, L"%s  -  %d / %d  -  %d%%  -  Docsy", g.name.c_str(),
                     PageAt(g.sy + g.ch / 3) + 1, g.n, (int)std::lround(g.zoom * 100));
     if (lstrcmpW(t, last)) { lstrcpyW(last, t); SetWindowTextW(g.hwnd, t); }
 }
@@ -212,7 +214,7 @@ static bool Open(const std::wstring& p) {
         InvalidateRect(g.hwnd, nullptr, FALSE);
         return true;
     } catch (...) {
-        if (!g.quiet) MessageBoxW(g.hwnd, L"Could not open this file (invalid, encrypted or unsupported PDF).", L"Tiny PDF", MB_ICONWARNING);
+        if (!g.quiet) MessageBoxW(g.hwnd, L"Could not open this file (invalid, encrypted or unsupported PDF).", L"Docsy", MB_ICONWARNING);
         return false;
     }
 }
@@ -231,9 +233,14 @@ static void Draw(HDC dc, int w, int h) {
     RECT r{ 0, 0, w, h };
     FillRect(dc, &r, br); DeleteObject(br);
     if (!g.n) {
-        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(190, 190, 190));
+        int sz = (int)(128 * g.dpi);
+        if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
+        int cy = h / 2;
+        if (g.logo) DrawIconEx(dc, (w - sz) / 2, cy - sz - (int)(6 * g.dpi), g.logo, sz, sz, 0, nullptr, DI_NORMAL);
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(200, 200, 205));
         SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
-        DrawTextW(dc, L"Ctrl+O or drop a PDF here", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT tr{ 0, cy + (int)(8 * g.dpi), w, h };
+        DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         return;
     }
     HDC m = CreateCompatibleDC(dc);
@@ -404,7 +411,12 @@ static int Shot(const wchar_t* out, int w, int h) {
     wchar_t full[MAX_PATH * 2];
     GetFullPathNameW(out, (DWORD)_countof(full), full, nullptr);
     Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromHBITMAP(b, nullptr);
-    CLSID png = { 0x557cf406, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x00, 0x00, 0xf8, 0x7a, 0x5e, 0xbc } };
+    CLSID png{}; UINT cnt = 0, bytes = 0;
+    Gdiplus::GetImageEncodersSize(&cnt, &bytes);
+    std::vector<BYTE> buf(bytes);
+    auto* enc = (Gdiplus::ImageCodecInfo*)buf.data();
+    Gdiplus::GetImageEncoders(cnt, bytes, enc);
+    for (UINT i = 0; i < cnt; i++) if (!lstrcmpW(enc[i].MimeType, L"image/png")) png = enc[i].Clsid;
     Gdiplus::Status st = bm->Save(full, &png, nullptr);
     delete bm;
     return st == Gdiplus::Ok ? 0 : 10 + (int)st;
@@ -416,21 +428,22 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     Gdiplus::GdiplusStartup(&tok, &gi, nullptr);
     int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool shot = argc >= 4 && !lstrcmpW(argv[1], L"--shot");
-    g.quiet = shot;
+    g.quiet = shot; g.hinst = hi;
 
     WNDCLASSEXW wc{ sizeof wc };
     wc.lpfnWndProc = Proc; wc.hInstance = hi;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.lpszClassName = L"TinyPdf";
+    wc.hIcon = LoadIconW(hi, MAKEINTRESOURCEW(1));
+    wc.hIconSm = wc.hIcon;
+    wc.lpszClassName = L"Docsy";
     RegisterClassExW(&wc);
     DWORD style = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_HSCROLL;
-    CreateWindowExW(0, L"TinyPdf", L"Tiny PDF", style, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+    CreateWindowExW(0, L"Docsy", L"Docsy", style, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                     nullptr, nullptr, hi, nullptr);
     if (!g.hwnd) return 1;
 
     if (shot) {
-        if (!Open(argv[3])) return 2;
+        if (lstrcmpW(argv[3], L"-") && !Open(argv[3])) return 2;
         RECT r{ 0, 0, 880, 680 };
         AdjustWindowRectEx(&r, style, FALSE, 0);
         SetWindowPos(g.hwnd, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);

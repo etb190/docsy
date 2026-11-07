@@ -13,7 +13,7 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Build
         shell: cmd
-        run: cl /nologo /std:c++20 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /Fe:tinypdf.exe src\main.cpp /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest > build.log 2>&1
+        run: rc /nologo /fo src\docsy.res src\docsy.rc && cl /nologo /std:c++20 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /Fe:docsy.exe src\main.cpp src\docsy.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest > build.log 2>&1
       - name: Show build log
         if: always()
         shell: bash
@@ -24,8 +24,10 @@ jobs:
         shell: pwsh
         run: |
           python ci/make_sample.py sample.pdf
-          $p = Start-Process .\tinypdf.exe -ArgumentList '--shot',"$PWD\preview.png","$PWD\sample.pdf" -Wait -PassThru
+          $p = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview.png","$PWD\sample.pdf" -Wait -PassThru
           "exit code: $($p.ExitCode)" | Tee-Object shot.log
+          $q = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-empty.png",'-' -Wait -PassThru
+          "empty exit code: $($q.ExitCode)" | Tee-Object -Append shot.log
           if (!(Test-Path preview.png)) { exit 1 }
       - name: Publish
         if: always()
@@ -34,9 +36,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in tinypdf.exe preview.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-empty.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
-          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Tiny PDF build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
+          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log
           mkdir dist && cp $files release.log dist/ && cd dist
           git init -q -b dist && git config user.name ci && git config user.email ci@users.noreply.github.com
