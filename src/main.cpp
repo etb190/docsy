@@ -21,6 +21,16 @@
 // buttons with the green/red hovers, the Win11 snap flyout on the maximize
 // button and DWM rounded corners) owns the top row; nothing read from the
 // document (no file name) is drawn anywhere on it.
+// The bottom row is KillerPDF's footer status bar, one full-width child painted
+// in the sidebar's grain tone so the two read as ONE container wrapping the
+// document pane on two sides. Its cells port the original's logic: the status
+// line "Page N of M, Fit Page (Z%)" with the click-for-file-size flash (held
+// messages beat routine updates, SetStatusHeld-style), the green PORTABLE
+// outline badge, the paper-size label from KillerPDF's PageSizeFormatter (known
+// A/US sizes matched at +/-3pt, mm for A-series, inches for US), the F5-F8
+// view-mode radios (continuous / single / two-page / 3-column grid), the full
+// screen and doc-invert (moon) toggles, the zoom out / fit dropdown / zoom in
+// cluster over a real dropdown popup, and the version cell.
 #define NOMINMAX
 #include <windows.h>
 #include <windowsx.h>
@@ -91,16 +101,27 @@ struct TxtPage {
 struct FRect { float x, y, w, h; };   // selection quad in page DIPs
 
 struct App {
-    HWND main = nullptr, view = nullptr, side = nullptr;
+    HWND main = nullptr, view = nullptr, side = nullptr, status = nullptr, zoomPop = nullptr;
     HINSTANCE hinst = nullptr;
     HICON logo = nullptr;
     PdfDocument doc{ nullptr };
     std::wstring name;
+    std::wstring path;                  // full path of the open file (the status click's size flash)
     int n = 0;
-    std::vector<float> pw, ph;          // page size in DIPs
-    std::vector<int> top;               // pixel top of each page
+    std::vector<float> pw, ph;          // page size in DIPs (PDF points)
+    std::vector<int> top;               // pixel top of each ROW (a row holds 1-3 pages)
+    std::vector<int> px;                // pixel x of each page inside its row
+    std::vector<int> rh;                // pixel height of each row (the tallest page in it)
     double zoom = 1.0, dpi = 1.0;       // zoom: pixels per DIP (x dpi scale)
-    bool fit = true, quiet = false, busy = false, sideOn = false;
+    int vm = 0;                         // KillerPDF's view modes: 0 continuous, 1 single, 2 two-page, 3 grid
+    int fitMode = 0;                    // KillerPDF's FitMode: 0 FitWidth, 1 FitPage, 2 none (free zoom)
+    bool inv = false;                   // DocInvert (the footer moon): page bitmaps blitted inverted
+    bool full = false;                  // F11 full screen: chrome gone, window over the monitor
+    WINDOWPLACEMENT fsPlace{};          // pre-fullscreen placement
+    LONG fsStyle = 0;
+    std::wstring hint;                  // transient on-page hint (full screen entry)
+    unsigned long long hintUntil = 0;
+    bool quiet = false, busy = false, sideOn = false;
     int sx = 0, sy = 0, cw = 0, ch = 0, docW = 0, docH = 0, gap = 10, maxw = 0, lastVis = 0;
     int cur = -1;                       // current page (view centre), drives the sidebar highlight
     unsigned long long scrollTick = 0;  // last scroll stamp: defers the text pre-warm until settling
@@ -126,6 +147,13 @@ struct App {
     int selFPage = -1, selFCaret = 0;   // focus caret
     POINT selDownPos{};                 // press point, view pixels
     std::wstring selText;               // committed selection text
+    // the footer (KillerPDF's status bar): a held message briefly wins over the
+    // routine page/zoom line, exactly like SetStatusHeld in MainWindow.xaml.cs
+    std::wstring statusHoldText;
+    unsigned long long statusHoldUntil = 0;
+    int stHot = -1;                     // hovered footer control, -1 none
+    bool zoomOpen = false;              // the footer zoom dropdown is on screen
+    int zoomHot = -1;                   // highlighted item inside the open dropdown
 };
 static App g;
 
@@ -164,7 +192,7 @@ static HBRUSH GrainBrush(int which);   // defined with the grain tile below
 // own bar. KillerPDF's tokens: TitleBarHeight 32, buttons 44x32 with a
 // transparent face, green #22bb56 hover on min/max and #E04444 on close with
 // white glyphs, MDL2 E921/E922/E923/E8BB at 10px.
-static int CAP() { return (int)(32 * g.dpi); }
+static int CAP() { return g.full ? 0 : (int)(32 * g.dpi); }   // full screen gives the row to the page
 
 static void CapRects(RECT r[3], int w) {              // 0 min, 1 max, 2 close - right-aligned
     int bw = (int)(44 * g.dpi), bh = CAP();
@@ -217,7 +245,7 @@ static void DwmApply(HWND h) {
     }
     if (!pfn) return;
     static int s_round = -1;
-    int roundc = IsZoomed(h) ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
+    int roundc = (IsZoomed(h) || g.full) ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
     if (roundc != s_round) {
         s_round = roundc;
         pfn(h, 33, &roundc, sizeof roundc);           // DWMWA_WINDOW_CORNER_PREFERENCE
@@ -247,6 +275,7 @@ static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
 // a direct paint showed every intermediate step (grain fill, wordmark, button
 // gradient) on each repaint, which read as the buttons flashing under the cursor.
 static void DrawCaptionBar(HDC dc, int w) {
+    if (g.full || w <= 0) return;
     RECT bar{ 0, 0, w, CAP() };
     FillRect(dc, &bar, GrainBrush(2));
     SetBkMode(dc, TRANSPARENT);
@@ -308,7 +337,7 @@ static void EnsureCapBack(HDC ref, int w) {
 
 // Draw the caption band into dst with a single atomic blit.
 static void PaintCaptionInto(HDC dst, int w) {
-    if (!dst || w <= 0) return;
+    if (!dst || w <= 0 || CAP() <= 0) return;
     EnsureCapBack(dst, w);
     DrawCaptionBar(g.capdc, w);
     BitBlt(dst, 0, 0, w, CAP(), g.capdc, 0, 0, SRCCOPY);
@@ -450,7 +479,32 @@ static int PageIn(const std::vector<int>& top, int n, int y) {
     auto it = std::upper_bound(top.begin(), top.begin() + n, y);
     return std::clamp((int)(it - top.begin()) - 1, 0, n - 1);
 }
-static int PageAt(int y) { return PageIn(g.top, g.n, y); }
+
+// ---- view modes (KillerPDF's F5-F8) over a row-based layout ----
+// Continuous keeps the classic single column; Single lays out ONE page (the
+// current one) and flips pages at the wheel's edges; TwoPage pairs pages into
+// spreads ((0,1), (2,3) ... - KillerPDF's default pairing, book mode is its
+// opt-in setting); Grid flows 3 columns (KillerPDF's default _gridColumns).
+// top[] becomes the ROW tops, px[] each page's x inside its row, rh[] the row
+// heights - the single column is just the 1-page-per-row case.
+static int PerRow() { return g.vm == 2 ? 2 : g.vm == 3 ? 3 : 1; }
+static int RowCount() {
+    if (!g.n) return 0;
+    if (g.vm == 1) return 1;                          // single: one row holding the current page
+    return (g.n + PerRow() - 1) / PerRow();
+}
+static int RowPage(int r, int k) { return g.vm == 1 ? g.cur : r * PerRow() + k; }
+static int RowAt(int y) { return PageIn(g.top, RowCount(), y); }
+static int PageTop(int i) {                          // page's row top (pixel)
+    if (!g.n || g.top.empty()) return 0;
+    int r = std::clamp(i / PerRow(), 0, (int)g.top.size() - 2);
+    return g.top[r];
+}
+static int PageAt(int y) {                           // primary page at a viewport y
+    if (!g.n) return 0;
+    int r = RowAt(y);
+    return g.vm == 1 ? g.cur : min(g.n - 1, r * PerRow());
+}
 
 // ---------------- text selection core (verbatim-portable geometry) ----------------
 // Everything in this block is pure std:: - the same functions are compiled by
@@ -860,25 +914,38 @@ static void SelAll() {
 // view point falls on and where it sits inside that page, in DIPs. The point is
 // clamped into the page, so dragging past an edge parks the caret at the start or
 // end of the nearest line instead of losing the selection (KillerPDF clamps the
-// drag point into the page canvas the same way).
+// drag point into the page canvas the same way). Multi-column rows resolve the
+// page by x (a point in the gap clamps to the nearest page, so a drag across a
+// spread flows through both pages like KillerPDF's Continuous does).
 static bool ViewToPage(POINT v, int w, int h, int& page, float& dx, float& dy) {
     if (!g.n) return false;
     int gut = g.docH > h ? SBar() : 0;
     int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -g.sx;
-    int i = PageAt(v.y + g.sy);
-    if (i < 0 || i >= g.n) return false;
+    int r = RowAt(v.y + g.sy);
+    if (r < 0 || r >= RowCount()) return false;
+    int cnt = g.vm == 1 ? 1 : min(PerRow(), g.n - r * PerRow());
+    int best = -1; float bestD = FLT_MAX;
+    for (int k = 0; k < cnt; k++) {
+        int i = RowPage(r, k);
+        int x0 = offx + g.px[i], x1 = x0 + PW(i);
+        float d = v.x < x0 ? (float)(x0 - v.x) : v.x > x1 ? (float)(v.x - x1) : 0;
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) return false;
     float k = (float)(g.zoom * g.dpi);
     if (k <= 0) return false;
-    page = i;
-    dx = (v.x - (offx + g.gap + (g.maxw - PW(i)) / 2)) / k;
-    dy = (v.y - (g.top[i] - g.sy)) / k;
-    dx = std::clamp(dx, 0.0f, (float)PW(i) / k);
-    dy = std::clamp(dy, 0.0f, (float)PH(i) / k);
+    page = best;
+    int py = g.top[r] - g.sy + (g.rh[r] - PH(best)) / 2;
+    dx = (v.x - (offx + g.px[best])) / k;
+    dy = (v.y - py) / k;
+    dx = std::clamp(dx, 0.0f, (float)PW(best) / k);
+    dy = std::clamp(dy, 0.0f, (float)PH(best) / k);
     return true;
 }
 
 static void SideSync();
 static void LayoutMain();
+static void StatusRepaint();
 
 static void UpdateTitle() {   // sidebar highlight follows the page under the upper
     int c = g.n ? PageAt(g.sy + g.ch / 3) : -1;   // third. The window text stays "Docsy"
@@ -886,6 +953,7 @@ static void UpdateTitle() {   // sidebar highlight follows the page under the up
         g.cur = c;
         if (g.view) SetTimer(g.view, 4, 160, nullptr);   // pre-warm the page's text once
         SideSync();                           // the scroll settles (never mid-gesture)
+        StatusRepaint();                      // "Page N of M" moved
     }
 }
 
@@ -899,40 +967,84 @@ static void UpdateScroll() {
 
 static void Layout() {
     g.gap = Gap();
-    g.top.assign((size_t)g.n + 1, 0);
+    int per = PerRow();
+    int rows = RowCount();
+    g.top.assign((size_t)rows + 1, 0);
+    g.px.assign((size_t)max(g.n, 1), 0);
+    g.rh.assign((size_t)max(rows, 1), 0);
     int y = g.gap; g.maxw = 0;
-    for (int i = 0; i < g.n; i++) { g.top[i] = y; y += PH(i) + g.gap; g.maxw = max(g.maxw, PW(i)); }
-    g.top[g.n] = y;
-    g.docH = g.n ? y : 0;
-    g.docW = g.n ? g.maxw + 2 * g.gap : 0;
+    for (int r = 0; r < rows; r++) {                 // pass 1: row heights and the widest row
+        int i0 = g.vm == 1 ? g.cur : r * per;
+        int cnt = g.vm == 1 ? 1 : min(per, g.n - r * per);
+        int wsum = 0, hmax = 0;
+        for (int k = 0; k < cnt; k++) { wsum += PW(i0 + k); hmax = max(hmax, PH(i0 + k)); }
+        g.maxw = max(g.maxw, wsum + (cnt - 1) * g.gap);
+        g.top[r] = y; g.rh[r] = hmax;
+        y += hmax + g.gap;
+    }
+    g.top[rows] = y;
+    g.docH = rows ? y : 0;
+    g.docW = rows ? g.maxw + 2 * g.gap : 0;
+    for (int r = 0; r < rows; r++) {                 // pass 2: each row centred on the widest one
+        int i0 = g.vm == 1 ? g.cur : r * per;
+        int cnt = g.vm == 1 ? 1 : min(per, g.n - r * per);
+        int wsum = 0;
+        for (int k = 0; k < cnt; k++) wsum += PW(i0 + k);
+        int x = g.gap + (g.maxw - (wsum + (cnt - 1) * g.gap)) / 2;
+        for (int k = 0; k < cnt; k++) { g.px[i0 + k] = x; x += PW(i0 + k) + g.gap; }
+    }
     UpdateScroll();
     InvalidateRect(g.view, nullptr, FALSE);
+    StatusRepaint();
     UpdateTitle();
 }
 
-static void SetZoom(double z, bool fit, int ax, int ay) {
+static void SetZoom(double z, int ax, int ay) {
     z = std::clamp(z, 0.1, 4.0);
     double ry = g.docH ? (double)(g.sy + ay) / g.docH : 0, rx = g.docW ? (double)(g.sx + ax) / g.docW : 0;
     if (z != g.zoom) ClearCache();
-    g.zoom = z; g.fit = fit;
+    g.zoom = z; g.fitMode = 2;              // an explicit zoom leaves the fit modes
     Layout();
     g.sy = (int)(ry * g.docH) - ay;
     if (g.docW > g.cw) g.sx = (int)(rx * g.docW) - ax;
     UpdateScroll();
     InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
+    StatusRepaint();
 }
 
+// KillerPDF's FitToWidth / FitToPage, mode-aware: the fit target is the widest
+// ROW (a spread in TwoPage, 3 columns in Grid), and Page additionally height-
+// limits the current row. The zoom% the status line and the combo show derives
+// from the resulting scale.
 static void ApplyFit(bool pageFit = false) {
     if (!g.n || g.cw <= 0) return;
-    float mw = 0; for (float w : g.pw) mw = max(mw, w);
     int W = g.cw - SBar();   // the reserved overlay-bar column, as the old scrollbar subtracted itself
-    double z = (W - 2.0 * Gap()) / (mw * g.dpi);
-    if (pageFit) {
-        int c = PageAt(g.sy + g.ch / 3);
-        z = min(z, (g.ch - 2.0 * Gap()) / (g.ph[c] * g.dpi));
+    int per = PerRow();
+    int c = PageAt(g.sy + g.ch / 3);
+    int r = g.vm == 1 ? 0 : c / per;
+    double z;
+    if (g.vm == 2) {                         // the current spread's two pages share the row
+        int a = c - c % 2, b = min(g.n - 1, a + 1);
+        z = (W - 3.0 * Gap()) / (max(1.f, g.pw[a] + g.pw[b]) * g.dpi);
+    } else if (g.vm == 3) {
+        float mw = 0; for (float w : g.pw) mw = max(mw, w);
+        z = (W - 4.0 * Gap()) / (per * mw * g.dpi);
+    } else {
+        int i = g.vm == 1 ? g.cur : 0;
+        float mw = g.vm == 1 ? g.pw[i] : 0;
+        if (g.vm == 0) for (float w : g.pw) mw = max(mw, w);
+        z = (W - 2.0 * Gap()) / (max(1.f, mw) * g.dpi);
     }
-    SetZoom(z, !pageFit, 0, 0);
+    if (pageFit) {                           // the current row must also fit vertically
+        int i0 = g.vm == 1 ? g.cur : r * per;
+        int cnt = g.vm == 1 ? 1 : min(per, g.n - i0);
+        float rh = 0; for (int k = 0; k < cnt; k++) rh = max(rh, g.ph[i0 + k]);
+        z = min(z, (g.ch - 2.0 * Gap()) / (max(1.f, rh) * g.dpi));
+    }
+    SetZoom(z, 0, 0);
+    g.fitMode = pageFit ? 1 : 0;
+    StatusRepaint();
 }
 
 static void ScrollTo(int x, int y) {
@@ -943,6 +1055,21 @@ static void ScrollTo(int x, int y) {
     g.scrollTick = GetTickCount64();
     InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
+}
+
+// Single mode's page flip (KillerPDF's F6 view): the document IS one page, so
+// navigation replaces it and parks at the top. The sidebar's current-page ring
+// and the footer's "Page N of M" follow.
+static void SetPage(int i) {
+    if (!g.n) return;
+    i = std::clamp(i, 0, g.n - 1);
+    g.cur = i;
+    if (g.fitMode != 2) ApplyFit(g.fitMode == 1); else Layout();
+    g.sx = 0; g.sy = 0;
+    UpdateScroll();
+    if (g.view) SetTimer(g.view, 4, 160, nullptr);   // pre-warm the new page's text
+    SideSync();
+    StatusRepaint();
 }
 
 static bool Open(const std::wstring& p) {
@@ -961,8 +1088,8 @@ static bool Open(const std::wstring& p) {
         size_t sl = nm.find_last_of(L"\\/");
         if (sl != std::wstring::npos) nm = nm.substr(sl + 1);
         ClearCache();
-        g.doc = d; g.n = (int)n; g.pw = w; g.ph = h; g.name = nm;
-        g.sx = g.sy = 0; g.fit = true;
+        g.doc = d; g.n = (int)n; g.pw = w; g.ph = h; g.name = nm; g.path = full;
+        g.sx = g.sy = 0; g.fitMode = 0; g.cur = 0;
         // fresh sidebar for the new document
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0; sd.cw = 0; sd.ch = 0;
@@ -1264,7 +1391,8 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (GetCapture() == h) ReleaseCapture();
         if (!bar && sd.moved <= (int)(4 * g.dpi) && sd.hit >= 0 && sd.hit < g.n) {
             sd.hold = GetTickCount64() + 600;   // the jump must not scroll the sidebar back
-            ScrollTo(g.sx, max(0, g.top[sd.hit] - Gap() / 2));
+            if (g.vm == 1) SetPage(sd.hit);     // single mode: a thumb click flips to that page
+            else ScrollTo(g.sx, max(0, PageTop(sd.hit) - Gap() / 2));
         }
         sd.moved = 0; sd.hit = -1; sd.pend = 0;
         return 0;
@@ -1299,43 +1427,64 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         return;
     }
     HDC m = CreateCompatibleDC(dc);
-    int first = PageAt(g.sy), last = first;
     int gut = g.docH > h ? SBar() : 0;   // the reserved bar column, like KillerPDF's Grid layout
     int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -g.sx;
     bool selOn = g.selRange || (g.selArm && g.selDrag);   // quads paint live during the drag
-    for (int i = first; i < g.n && g.top[i] < g.sy + h; i++) {
-        last = i;
-        int pw = PW(i), ph = PH(i);
-        int x = xoff + offx + g.gap + (g.maxw - pw) / 2, y = g.top[i] - g.sy;
-        if (y + ph < 0) continue;
-        HBITMAP b = GetBmp(i, pw, ph);
-        if (b) {
-            HGDIOBJ o = SelectObject(m, b);
-            BitBlt(dc, x, y, pw, ph, m, 0, 0, SRCCOPY);
-            SelectObject(m, o);
-        } else {
-            RECT pr{ x, y, x + pw, y + ph };
-            FillRect(dc, &pr, (HBRUSH)GetStockObject(WHITE_BRUSH));
-        }
-        // flowing selection quads: KillerPDF paints one rect per selected line on an
-        // overlay above the page - 60/255 of the dark theme's SelectionAccent #22bb56
-        if (selOn) {
-            int s, e; SelSliceForPage(i, s, e);
-            if (s < e) {
-                TxtPage* pt = TtFor(i);
-                if (pt) {
-                    std::vector<FRect> rs; TtRects(*pt, s, e, rs);
-                    float k = (float)(g.zoom * g.dpi);
-                    Gdiplus::Graphics gs(dc);
-                    Gdiplus::SolidBrush br(Gdiplus::Color(60, 0x22, 0xbb, 0x56));
-                    for (const FRect& q : rs)
-                        gs.FillRectangle(&br, Gdiplus::RectF(x + q.x * k, y + q.y * k,
-                                                             max(q.w * k, 2.0f), max(q.h * k, 2.0f)));
+    int r0 = RowAt(g.sy), r1 = RowAt(g.sy + h - 1);
+    int first = RowPage(r0, 0), last = first;
+    int per = PerRow();
+    for (int row = r0; row <= r1; row++) {
+        int cnt = g.vm == 1 ? 1 : min(per, g.n - row * per);
+        for (int k = 0; k < cnt; k++) {
+            int i = RowPage(row, k);
+            if (i < 0 || i >= g.n) continue;
+            last = i;
+            int pw = PW(i), ph = PH(i);
+            int x = xoff + offx + g.px[i];
+            int y = g.top[row] - g.sy + (g.rh[row] - ph) / 2;   // pages ride centred in their row
+            if (y + ph < 0) continue;
+            HBITMAP b = GetBmp(i, pw, ph);
+            if (b) {
+                HGDIOBJ o = SelectObject(m, b);
+                // DocInvert (the footer moon): KillerPDF flips the document images to
+                // their negative - the page rect is opaque, so NOTSRCCOPY inverts it
+                // during the blit and the grain margins keep their tone.
+                BitBlt(dc, x, y, pw, ph, m, 0, 0, g.inv ? NOTSRCCOPY : SRCCOPY);
+                SelectObject(m, o);
+            } else {
+                RECT pr{ x, y, x + pw, y + ph };
+                FillRect(dc, &pr, (HBRUSH)GetStockObject(WHITE_BRUSH));
+            }
+            // flowing selection quads: KillerPDF paints one rect per selected line on an
+            // overlay above the page - 60/255 of the dark theme's SelectionAccent #22bb56
+            if (selOn) {
+                int s, e; SelSliceForPage(i, s, e);
+                if (s < e) {
+                    TxtPage* pt = TtFor(i);
+                    if (pt) {
+                        std::vector<FRect> rs; TtRects(*pt, s, e, rs);
+                        float k = (float)(g.zoom * g.dpi);
+                        Gdiplus::Graphics gs(dc);
+                        Gdiplus::SolidBrush br(Gdiplus::Color(60, 0x22, 0xbb, 0x56));
+                        for (const FRect& q : rs)
+                            gs.FillRectangle(&br, Gdiplus::RectF(x + q.x * k, y + q.y * k,
+                                                                 max(q.w * k, 2.0f), max(q.h * k, 2.0f)));
+                    }
                 }
             }
         }
     }
     DeleteDC(m);
+    if (!g.hint.empty() && GetTickCount64() < g.hintUntil) {   // the full-screen hint
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, UiFont());
+        RECT hs{ xoff + 1, h - (int)(34 * g.dpi) + 1, xoff + w + 1, h - (int)(12 * g.dpi) + 1 };
+        SetTextColor(dc, RGB(10, 10, 10));
+        DrawTextW(dc, g.hint.c_str(), -1, &hs, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT hn{ xoff, h - (int)(34 * g.dpi), xoff + w, h - (int)(12 * g.dpi) };
+        SetTextColor(dc, RGB(0xe8, 0xe8, 0xe8));
+        DrawTextW(dc, g.hint.c_str(), -1, &hn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
     g.lastVis = last;
     Evict(first, last);
 }
@@ -1386,9 +1535,17 @@ static void ViewWheel(WPARAM wp, LPARAM lp) {
     int d = GET_WHEEL_DELTA_WPARAM(wp);
     if (LOWORD(wp) & MK_CONTROL) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; ScreenToClient(g.view, &p);
-        SetZoom(g.zoom * std::pow(1.12, d / 120.0), false, p.x, p.y);
+        SetZoom(g.zoom * std::pow(1.12, d / 120.0), p.x, p.y);
     } else if (LOWORD(wp) & MK_SHIFT) ScrollTo(g.sx - d * (int)(g.dpi * 80) / 120, g.sy);
-    else ScrollTo(g.sx, g.sy - d * (int)(g.dpi * 80) / 120);
+    else {
+        // Single mode flips at the edges: scrolling past a page's end brings the
+        // next one (KillerPDF's Single keeps one page up and navigates by flip).
+        if (g.vm == 1) {
+            if (d < 0 && g.sy >= max(0, g.docH - g.ch)) { SetPage(g.cur + 1); return; }
+            if (d > 0 && g.sy <= 0) { SetPage(g.cur - 1); return; }
+        }
+        ScrollTo(g.sx, g.sy - d * (int)(g.dpi * 80) / 120);
+    }
 }
 
 static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
@@ -1412,6 +1569,11 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
+        if (wp == 6) {                         // the full-screen hint's expiry repaint
+            KillTimer(h, 6);
+            if (GetTickCount64() >= g.hintUntil) InvalidateRect(h, nullptr, FALSE);
+            return 0;
+        }
         if (wp == 4) {                         // deferred text pre-warm: OCR the settled
             KillTimer(h, 4);                   // page once it exists and scrolling has been
             if (g.n && !g.selArm) {            // quiet for a moment - off the click path
@@ -1583,14 +1745,624 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
+// ---------------- footer status bar (KillerPDF's status bar) ----------------
+// One full-width child under the document pane, painted in the sidebar's grain
+// tone so the rail + footer read as one container wrapping the page area on two
+// sides. Cells right-to-left, KillerPDF's own arrangement: version | zoom out /
+// fit dropdown / zoom in | fullscreen + doc-invert | the F5-F8 view-mode radios |
+// paper size | the green PORTABLE outline badge | the status line. Every control
+// ports the original's behaviour, not just its look.
+
+#define APP_VER L"1.0"
+
+static int SBH() { return (int)(28 * g.dpi); }        // the footer row height
+
+static HFONT g_stfont = nullptr, g_stfontL = nullptr, g_stbadge = nullptr,
+              g_stcombo = nullptr, g_stglyph = nullptr, g_stchev = nullptr;
+static HFONT StFont()    { return CaptionFont(g_stfont, 13, true, L"Segoe UI"); }
+static HFONT StFontL()   { return CaptionFont(g_stfontL, 13, false, L"Segoe UI"); }
+static HFONT StBadge()   { return CaptionFont(g_stbadge, 9, false, L"Segoe UI"); }
+static HFONT StCombo()   { return CaptionFont(g_stcombo, 10, false, L"Segoe UI"); }
+static HFONT StGlyph()   { return CaptionFont(g_stglyph, 13, false, L"Segoe MDL2 Assets"); }
+static HFONT StChevron() { return CaptionFont(g_stchev, 7, false, L"Segoe MDL2 Assets"); }
+
+static HBRUSH DividerBrush()     { static HBRUSH b = CreateSolidBrush(RGB(0x4a, 0x4a, 0x4a)); return b; }
+static HBRUSH EdgeBrush()        { static HBRUSH b = CreateSolidBrush(RGB(0x17, 0x17, 0x17)); return b; }
+static HBRUSH AccentBrush()      { static HBRUSH b = CreateSolidBrush(RGB(0x22, 0xbb, 0x56)); return b; }
+static HBRUSH ComboFillBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x20, 0x20, 0x20)); return b; }
+static HBRUSH ComboBorderBrush() { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }
+static HBRUSH PopBrush()         { static HBRUSH b = CreateSolidBrush(RGB(0x2b, 0x2b, 0x2b)); return b; }
+
+static HDC s_measdc = nullptr;
+static int TextW(HFONT f, const wchar_t* s) {          // extent at the current font
+    if (!s_measdc) s_measdc = GetDC(nullptr);
+    HGDIOBJ o = SelectObject(s_measdc, f);
+    SIZE sz{}; GetTextExtentPoint32W(s_measdc, s, (int)wcslen(s), &sz);
+    SelectObject(s_measdc, o);
+    return sz.cx;
+}
+
+// ---- the status line, SetStatusHeld semantics ----
+// A held message (file size flash, about) briefly wins over the routine
+// page/zoom line and expires on its own; routine updates cannot stomp it
+// (MainWindow.xaml.cs's _statusHoldUntil, timed here instead ofDispatcher).
+
+static const wchar_t* FitName() {
+    return g.fitMode == 1 ? L"Fit Page" : g.fitMode == 0 ? L"Fit Width" : L"Custom";
+}
+
+static std::wstring StatusRoutine() {
+    if (!g.n) return L"Docsy  -  Ctrl+O or drop a PDF here";
+    int c = g.cur >= 0 ? g.cur : 0;
+    wchar_t b[160];
+    swprintf_s(b, L"Page %d of %d, %s (%d%%)", c + 1, g.n, FitName(), (int)std::lround(g.zoom * 100));
+    return b;
+}
+
+static void StatusRepaint() { if (g.status) InvalidateRect(g.status, nullptr, FALSE); }
+
+static void SetStatusHold(const std::wstring& t, unsigned ms = 2500) {
+    g.statusHoldText = t;
+    g.statusHoldUntil = GetTickCount64() + ms;
+    if (g.status) SetTimer(g.status, 1, 250, nullptr);
+    StatusRepaint();
+}
+
+static std::wstring StatusTextNow() {
+    return GetTickCount64() < g.statusHoldUntil ? g.statusHoldText : StatusRoutine();
+}
+
+// ---- KillerPDF's PageSizeFormatter ----
+// Known sizes live in PDF points and match on (short, long) sides at +/-3pt so
+// orientation never hides the name; Tabloid landscape reports as Ledger. The
+// primary unit is millimetres for the A series, inches for the US sizes, and
+// inches for anything unknown (useMetric = known?.Metric ?? false).
+struct KnownSize { const wchar_t* name; double w, h; bool metric; };
+static const KnownSize KSizes[] = {
+    { L"A0", 2384, 3370, true },  { L"A1", 1684, 2384, true },  { L"A2", 1191, 1684, true },
+    { L"A3", 842, 1191, true },   { L"A4", 595, 842, true },    { L"A5", 420, 595, true },
+    { L"A6", 298, 420, true },    { L"Letter", 612, 792, false }, { L"Legal", 612, 1008, false },
+    { L"Tabloid", 792, 1224, false }, { L"ANSI C", 1224, 1584, false },
+    { L"ANSI D", 1584, 2448, false }, { L"ANSI E", 2448, 3168, false },
+};
+
+// .NET's "0.#" / "0.##": round to the decimals, then trim a bare ".0"/".00".
+static void FmtNum(wchar_t* out, size_t n, double v, int dec) {
+    swprintf_s(out, n, dec == 1 ? L"%.1f" : L"%.2f", v);
+    std::wstring s = out;
+    size_t dot = s.find(L'.');
+    if (dot != std::wstring::npos) {
+        size_t last = s.find_last_not_of(L'0');
+        if (last == dot) last = dot - 1;               // all decimals were zeros
+        s.erase(last + 1);
+    }
+    wcscpy_s(out, n, s.c_str());
+}
+
+// The current page's size: the footer label ("A4  210 x 297 mm") and the full
+// px | in | mm | pt breakdown (the original shows it in the crop dialog; docsy
+// flashes it as a held status on click).
+static void PaperLabel(std::wstring& label, std::wstring& details) {
+    label.clear(); details.clear();
+    if (!g.n || g.cur < 0) return;
+    int i = g.cur;
+    double wpt = g.pw[i], hpt = g.ph[i];
+    double inW = wpt / 72.0, inH = hpt / 72.0;
+    double mmW = inW * 25.4, mmH = inH * 25.4;
+    double sh = min(wpt, hpt), lo = max(wpt, hpt);
+    const KnownSize* known = nullptr;
+    for (const KnownSize& s : KSizes)
+        if (fabs(sh - s.w) <= 3 && fabs(lo - s.h) <= 3) { known = &s; break; }
+    wchar_t name[24] = L"";
+    if (known) {
+        wcscpy_s(name, known->name);
+        if (!wcscmp(name, L"Tabloid") && wpt > hpt) wcscpy_s(name, L"Ledger");
+    }
+    bool metric = known && known->metric;
+    wchar_t a[32], b[32], prim[80];
+    FmtNum(a, 32, metric ? mmW : inW, metric ? 1 : 2);
+    FmtNum(b, 32, metric ? mmH : inH, metric ? 1 : 2);
+    swprintf_s(prim, L"%s x %s %s", a, b, metric ? L"mm" : L"in");
+    label = name[0] ? std::wstring(name) + L"  " + prim : prim;
+    wchar_t pxw[32], pxh[32], c[32], d[32], e[32], f[32], dt[192];
+    swprintf_s(pxw, L"%d", (int)std::lround(inW * 150));
+    swprintf_s(pxh, L"%d", (int)std::lround(inH * 150));
+    FmtNum(c, 32, inW, 2); FmtNum(d, 32, inH, 2);
+    FmtNum(e, 32, mmW, 1); FmtNum(f, 32, mmH, 1);
+    swprintf_s(dt, L"%s x %s px at 150 DPI | %s x %s in | %s x %s mm | %.1f x %.1f pt",
+               pxw, pxh, c, d, e, f, wpt, hpt);
+    details = dt;
+}
+
+// ---- footer actions ----
+
+static void SetViewMode(int m) {
+    if (!g.n || m == g.vm || m < 0 || m > 3) return;
+    int c = PageAt(g.sy + g.ch / 3);
+    g.vm = m;
+    if (g.fitMode != 2) ApplyFit(g.fitMode == 1); else Layout();
+    ScrollTo(g.sx, max(0, PageTop(c) - Gap() / 2));   // the current page's row stays in sight
+    InvalidateRect(g.view, nullptr, FALSE);
+    StatusRepaint();
+}
+
+// KillerPDF's F11 (Shell/FullScreen.cs): the chrome collapses and the window
+// covers the monitor; F11 or Esc brings it back. A short hint on the page
+// stands in for the original's ShowFullScreenHint overlay.
+static void ToggleFull(HWND h) {
+    g.full = !g.full;
+    if (g.full) {
+        g.fsStyle = GetWindowLongW(h, GWL_STYLE);
+        WINDOWPLACEMENT wp{ sizeof wp };
+        GetWindowPlacement(h, &wp);
+        g.fsPlace = wp;
+        MONITORINFO mi{ sizeof mi };
+        GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
+        SetWindowLongW(h, GWL_STYLE, (g.fsStyle & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+        SetWindowPos(h, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+        g.hint = L"Esc or F11 exits full screen";
+        g.hintUntil = GetTickCount64() + 2200;
+        if (g.view) SetTimer(g.view, 6, 250, nullptr);
+    } else {
+        SetWindowLongW(h, GWL_STYLE, g.fsStyle);
+        SetWindowPlacement(h, &g.fsPlace);
+        SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    LayoutMain();
+    DwmApply(h);
+    InvalidateRect(h, nullptr, FALSE);
+}
+
+// The moon button: KillerPDF's DocInvert flips the document images to their
+// negative (dark reading for light documents). docsy inverts during the blit.
+static void ToggleInv() {
+    g.inv = !g.inv;
+    InvalidateRect(g.view, nullptr, FALSE);
+    StatusRepaint();
+}
+
+// ---- the zoom dropdown ----
+// The combo's items are KillerPDF's exactly: Fit Page, Fit Width, then the
+// fixed presets. Wheel over the closed box cycles them (the original's
+// PreviewMouseWheel), the popup is a borderless owner-drawn menu.
+static const double ZoomPcts[6] = { 0.5, 0.75, 1.0, 1.25, 1.5, 2.0 };
+static const wchar_t* ZoomLabel(int i) {
+    static const wchar_t* ls[8] = { L"Fit Page", L"Fit Width", L"50%", L"75%", L"100%", L"125%", L"150%", L"200%" };
+    return ls[i];
+}
+static void ZoomApply(int i) {
+    if (i == 0) ApplyFit(true);
+    else if (i == 1) ApplyFit();
+    else if (i >= 2 && i <= 7) SetZoom(ZoomPcts[i - 2], g.cw / 2, g.ch / 2);
+}
+static int ZoomCurrent() {                       // which item the closed box shows
+    if (g.fitMode == 1) return 0;
+    if (g.fitMode == 0) return 1;
+    double pct = g.zoom * 100;
+    int best = 4; double bd = 1e9;
+    for (int i = 0; i < 6; i++) {
+        double d = fabs(ZoomPcts[i] * 100 - pct);
+        if (d < bd) { bd = d; best = i + 2; }
+    }
+    return best;
+}
+static void ZoomCycle(int dir) { ZoomApply(std::clamp(ZoomCurrent() + dir, 0, 7)); }
+
+// ---- footer geometry ----
+
+enum { ST_STATUS, ST_BADGE, ST_SIZE, ST_MCONT, ST_MSINGLE, ST_MTWO, ST_MGRID,
+       ST_FULL, ST_INV, ST_ZOUT, ST_COMBO, ST_ZIN, ST_VER, ST_COUNT };
+static RECT g_stR[ST_COUNT];
+
+static void StatusRects(int w) {
+    int dpi = g.dpi;
+    int btnH = (int)(20 * dpi), by = (SBH() - btnH) / 2;
+    for (auto& r : g_stR) r = { 0, 0, 0, 0 };
+    int x = w - (int)(10 * dpi);
+    int vw = 1 + (int)(8 * dpi) + TextW(StFontL(), L"v" APP_VER) +
+             (int)(12 * dpi) + TextW(StFontL(), L"\u00A9 2026 Docsy");
+    g_stR[ST_VER] = { x - vw, 0, x, SBH() };
+    x -= vw + (int)(8 * dpi);
+    int bw24 = (int)(24 * dpi);
+    g_stR[ST_ZIN] = { x - bw24, by, x, by + btnH };          // rightmost of the zoom cluster
+    x -= bw24;
+    int cw = std::clamp(TextW(StCombo(), L"Fit Page") + (int)(28 * dpi), (int)(70 * dpi), (int)(220 * dpi));
+    g_stR[ST_COMBO] = { x - cw, by, x, by + btnH };
+    x -= cw;
+    g_stR[ST_ZOUT] = { x - bw24, by, x, by + btnH };
+    x -= bw24 + (int)(5 * dpi);
+    g_stR[ST_INV] = { x - bw24, by, x, by + btnH };          // [full, inv] group
+    x -= bw24;
+    g_stR[ST_FULL] = { x - bw24, by, x, by + btnH };
+    x -= bw24 + (int)(5 * dpi);
+    int mw = (int)(25 * dpi);
+    g_stR[ST_MGRID] = { x - mw, by, x, by + btnH };          // the four mode radios
+    x -= mw;
+    g_stR[ST_MTWO] = { x - mw, by, x, by + btnH };
+    x -= mw;
+    g_stR[ST_MSINGLE] = { x - mw, by, x, by + btnH };
+    x -= mw;
+    g_stR[ST_MCONT] = { x - mw, by, x, by + btnH };
+    x -= mw + (int)(5 * dpi);
+    std::wstring lbl, det; PaperLabel(lbl, det);
+    if (!lbl.empty()) {
+        int sw2 = TextW(StFont(), lbl.c_str()) + (int)(6 * dpi);
+        g_stR[ST_SIZE] = { x - sw2, 0, x, SBH() };
+        x -= sw2 + (int)(5 * dpi);
+    }
+    int bwid = TextW(StBadge(), L"PORTABLE") + (int)(16 * dpi), bh2 = (int)(16 * dpi);
+    g_stR[ST_BADGE] = { x - bwid, (SBH() - bh2) / 2, x, (SBH() + bh2) / 2 };
+    x -= bwid + (int)(10 * dpi);
+    g_stR[ST_STATUS] = { 0, 0, max(x, (int)(40 * dpi)), SBH() };
+}
+
+static int StatusHit(POINT p) {
+    RECT r;
+    if (!g.status || !GetClientRect(g.status, &r) || r.right <= 0) return -1;
+    StatusRects(r.right);
+    for (int i = 0; i < ST_COUNT; i++) {
+        if (i == ST_BADGE) continue;                 // static badge: not interactive
+        if (p.x >= g_stR[i].left && p.x < g_stR[i].right && p.y >= g_stR[i].top && p.y < g_stR[i].bottom)
+            return (!g.n && i != ST_STATUS && i != ST_VER) ? -1 : i;
+    }
+    return -1;
+}
+
+static void ZoomPopupOpen();
+static void ZoomPopupClose();
+
+static void StatusAction(int id) {
+    switch (id) {
+    case ST_STATUS: {   // StatusText_Click: the open file's size, held while read
+        if (g.path.empty()) break;
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (GetFileAttributesExW(g.path.c_str(), GetFileExInfoStandard, &fa)) {
+            long long bytes = ((long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+            wchar_t sz[40];
+            if (bytes >= 1LL << 20) FmtNum(sz, 40, bytes / 1048576.0, 2), wcscat_s(sz, L" MB");
+            else if (bytes >= 1LL << 10) FmtNum(sz, 40, bytes / 1024.0, 1), wcscat_s(sz, L" KB");
+            else swprintf_s(sz, L"%lld B", bytes);
+            SetStatusHold(g.name + L" - " + sz);
+        }
+        break;
+    }
+    case ST_SIZE: {     // the crop-size button: docsy flashes the full breakdown
+        std::wstring lbl, det; PaperLabel(lbl, det);
+        if (!det.empty()) SetStatusHold(det);
+        break;
+    }
+    case ST_MCONT: SetViewMode(0); break;
+    case ST_MSINGLE: SetViewMode(1); break;
+    case ST_MTWO: SetViewMode(2); break;
+    case ST_MGRID: SetViewMode(3); break;
+    case ST_FULL: ToggleFull(g.main); break;
+    case ST_INV: ToggleInv(); break;
+    case ST_ZOUT: ZoomBy(0.8); break;
+    case ST_ZIN: ZoomBy(1.25); break;
+    case ST_COMBO: if (g.zoomOpen) ZoomPopupClose(); else ZoomPopupOpen(); break;
+    case ST_VER: SetStatusHold(L"Docsy " APP_VER L"  -  tiny native Win32 PDF reader"); break;
+    }
+}
+
+// ---- footer painting ----
+
+static void DrawModeIcon(HDC dc, int id, bool checked) {
+    // KillerPDF's FooterModeButton glyphs, drawn with the same vector prims the
+    // XAML uses: bars / rectangles, accent on hover, accent + 2px underline
+    // while the mode is the checked one.
+    bool hot = g.stHot == id;
+    HBRUSH b = CreateSolidBrush((hot || checked) ? RGB(0x22, 0xbb, 0x56) : RGB(0xd6, 0xd6, 0xd6));
+    RECT r = g_stR[id];
+    int cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    if (checked) cy -= (int)(1 * g.dpi);               // the underline lifts the glyph a hair
+    if (id == ST_MCONT) {                              // three bars, 13x3 at 5px pitch
+        int lw = (int)(13 * g.dpi), lh = max(1, (int)(3 * g.dpi)), pitch = (int)(5 * g.dpi);
+        for (int k = -1; k <= 1; k++) {
+            RECT l{ cx - lw / 2, cy + k * pitch - lh / 2, cx + lw / 2, cy + k * pitch - lh / 2 + lh };
+            FillRect(dc, &l, b);
+        }
+    } else if (id == ST_MSINGLE) {                     // one 10x13 outline
+        RECT o{ cx - (int)(5 * g.dpi), cy - (int)(6 * g.dpi), cx + (int)(5 * g.dpi), cy + (int)(7 * g.dpi) };
+        FrameRect(dc, &o, b);
+    } else if (id == ST_MTWO) {                        // two 7x13 outlines, 2px apart
+        int w7 = (int)(7 * g.dpi);
+        RECT a{ cx - w7 - (int)(1 * g.dpi), cy - (int)(6 * g.dpi), cx - (int)(1 * g.dpi), cy + (int)(7 * g.dpi) };
+        RECT c2{ cx + (int)(1 * g.dpi), cy - (int)(6 * g.dpi), cx + (int)(1 * g.dpi) + w7, cy + (int)(7 * g.dpi) };
+        FrameRect(dc, &a, b); FrameRect(dc, &c2, b);
+    } else {                                           // grid: four 6x6 outlines, 1px apart
+        int s6 = (int)(6 * g.dpi), s7 = (int)(7 * g.dpi);
+        RECT q[4] = {
+            { cx - s7, cy - s7, cx - s7 + s6, cy - s7 + s6 },
+            { cx + 1,  cy - s7, cx + 1 + s6,  cy - s7 + s6 },
+            { cx - s7, cy + 1,  cx - s7 + s6, cy + 1 + s6 },
+            { cx + 1,  cy + 1,  cx + 1 + s6,  cy + 1 + s6 },
+        };
+        for (const RECT& q4 : q) FrameRect(dc, &q4, b);
+    }
+    if (checked) {
+        RECT u{ r.left, r.bottom - max(2, (int)(2 * g.dpi)), r.right, r.bottom };
+        FillRect(dc, &u, b);
+    }
+    DeleteObject(b);
+}
+
+static void DrawGlyph(HDC dc, int id, const wchar_t* glyph, bool on) {
+    bool hot = g.stHot == id;
+    SelectObject(dc, StGlyph());
+    SetTextColor(dc, (hot || on) ? RGB(0x22, 0xbb, 0x56) : RGB(0xd6, 0xd6, 0xd6));
+    RECT r = g_stR[id];
+    DrawTextW(dc, glyph, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static void DrawVersion(HDC dc) {
+    int dpi = g.dpi;
+    RECT vr = g_stR[ST_VER];
+    RECT d{ vr.left + 1, (SBH() - (int)(14 * dpi)) / 2, vr.left + 2, (SBH() + (int)(14 * dpi)) / 2 };
+    FillRect(dc, &d, DividerBrush());
+    SelectObject(dc, StFontL());
+    SetTextColor(dc, g.stHot == ST_VER ? RGB(0xb6, 0xb6, 0xb6) : RGB(0x85, 0x85, 0x85));   // TextFooter
+    RECT t1 = vr; t1.left += 1 + (int)(8 * dpi);
+    DrawTextW(dc, L"v" APP_VER, -1, &t1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    RECT t2 = vr;
+    t2.left = vr.right - TextW(StFontL(), L"\u00A9 2026 Docsy");
+    DrawTextW(dc, L"\u00A9 2026 Docsy", -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
+static HDC g_stbdc = nullptr; static HBITMAP g_stbm = nullptr, g_stbold = nullptr;
+static int g_stbw = 0, g_stbh = 0;
+static void EnsureStatusBack(HDC ref, int w, int h) {
+    if (g_stbm && g_stbw == w && g_stbh == h) return;
+    if (g_stbm) { SelectObject(g_stbdc, g_stbold); DeleteObject(g_stbm); }
+    else g_stbdc = CreateCompatibleDC(ref);
+    g_stbm = CreateCompatibleBitmap(ref, w, h);
+    g_stbold = (HBITMAP)SelectObject(g_stbdc, g_stbm);
+    g_stbw = w; g_stbh = h;
+}
+
+static void StatusDraw(HDC dc, int w, int h) {
+    RECT bar{ 0, 0, w, h };
+    FillRect(dc, &bar, GrainBrush(1));   // the sidebar's tone: rail + footer = one container
+    RECT edge{ 0, 0, w, 1 };
+    FillRect(dc, &edge, EdgeBrush());    // separation from the pane above
+    if (w < (int)(200 * g.dpi)) return;
+    StatusRects(w);
+    SetBkMode(dc, TRANSPARENT);
+    int dpi = g.dpi;
+    RECT tr = g_stR[ST_STATUS];          // the status line, ellipsized before the badge
+    tr.left = (int)(8 * dpi); tr.right -= (int)(4 * dpi);
+    std::wstring t = StatusTextNow();
+    SelectObject(dc, StFont());
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, t.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawVersion(dc);
+    if (!g.n) return;                    // no document: status + version cells only
+    FrameRect(dc, &g_stR[ST_BADGE], AccentBrush());
+    RECT bt = g_stR[ST_BADGE];
+    SelectObject(dc, StBadge());
+    SetTextColor(dc, RGB(0x22, 0xbb, 0x56));
+    DrawTextW(dc, L"PORTABLE", -1, &bt, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    std::wstring lbl, det; PaperLabel(lbl, det);
+    if (!lbl.empty()) {
+        RECT sr = g_stR[ST_SIZE];
+        SelectObject(dc, StFont());
+        SetTextColor(dc, g.stHot == ST_SIZE ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
+        DrawTextW(dc, lbl.c_str(), -1, &sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    auto div = [&](int ax, int bx) {     // a card-border line centred in the gap
+        int mx = (ax + bx) / 2;
+        RECT d{ mx, (SBH() - (int)(14 * dpi)) / 2, mx + 1, (SBH() + (int)(14 * dpi)) / 2 };
+        FillRect(dc, &d, DividerBrush());
+    };
+    if (g_stR[ST_SIZE].right) div(g_stR[ST_MCONT].left, g_stR[ST_SIZE].right);
+    div(g_stR[ST_MGRID].right, g_stR[ST_FULL].left);
+    div(g_stR[ST_ZOUT].left, g_stR[ST_INV].right);
+    DrawModeIcon(dc, ST_MCONT, g.vm == 0);
+    DrawModeIcon(dc, ST_MSINGLE, g.vm == 1);
+    DrawModeIcon(dc, ST_MTWO, g.vm == 2);
+    DrawModeIcon(dc, ST_MGRID, g.vm == 3);
+    DrawGlyph(dc, ST_FULL, L"\uE740", false);
+    DrawGlyph(dc, ST_INV, L"\uE708", g.inv);
+    DrawGlyph(dc, ST_ZOUT, L"\uECC9", false);
+    DrawGlyph(dc, ST_ZIN, L"\uECC8", false);
+    RECT cb = g_stR[ST_COMBO];           // the closed combo
+    FillRect(dc, &cb, ComboFillBrush());
+    FrameRect(dc, &cb, ComboBorderBrush());
+    wchar_t zl[32];
+    if (g.fitMode == 1) wcscpy_s(zl, L"Fit Page");
+    else if (g.fitMode == 0) wcscpy_s(zl, L"Fit Width");
+    else swprintf_s(zl, L"%d%%", (int)std::lround(g.zoom * 100));
+    RECT ct = cb; ct.left += (int)(6 * dpi); ct.right -= (int)(16 * dpi);
+    SelectObject(dc, StCombo());
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, zl, -1, &ct, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    RECT chv{ cb.right - (int)(14 * dpi), cb.top, cb.right, cb.bottom };
+    SelectObject(dc, StChevron());
+    SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+    DrawTextW(dc, L"\uE70D", -1, &chv, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+// ---- the zoom dropdown popup ----
+// A borderless popup that keeps mouse capture for its whole life, the way menus
+// do: moves update the highlight, a press on an item applies it, a press
+// anywhere else dismisses, and a stolen capture dismisses via a poll timer.
+
+static RECT g_zoomComboScr{};            // the closed combo, screen coords, while open
+static int g_zoomItemH = 0, g_zoomPopW = 0;
+
+static void ZoomPopupClose() {
+    if (!g.zoomOpen) return;
+    g.zoomOpen = false; g.zoomHot = -1;
+    if (g.zoomPop) {
+        KillTimer(g.zoomPop, 1);
+        if (GetCapture() == g.zoomPop) ReleaseCapture();
+        ShowWindow(g.zoomPop, SW_HIDE);
+    }
+    StatusRepaint();
+}
+
+static void ZoomPopupOpen() {
+    if (!g.status || !g.n) return;
+    RECT cr; GetClientRect(g.status, &cr);
+    StatusRects(cr.right);
+    RECT cb = g_stR[ST_COMBO];
+    POINT tl{ cb.left, cb.bottom }, br{ cb.right, cb.bottom };
+    ClientToScreen(g.status, &tl); ClientToScreen(g.status, &br);
+    g_zoomComboScr = { tl.x, tl.y, br.x, br.y };
+    g_zoomItemH = (int)(22 * g.dpi);
+    g_zoomPopW = max(cb.right - cb.left, (int)(96 * g.dpi));
+    int popH = 8 * g_zoomItemH + 2;
+    if (!g.zoomPop) {
+        g.zoomPop = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DocsyZoomPop", nullptr,
+                                    WS_POPUP, tl.x, tl.y, g_zoomPopW, popH,
+                                    g.main, nullptr, g.hinst, nullptr);
+        if (!g.zoomPop) return;
+    }
+    MONITORINFO mi{ sizeof mi };
+    GetMonitorInfoW(MonitorFromWindow(g.status, MONITOR_DEFAULTTONEAREST), &mi);
+    int y = tl.y;
+    if (y + popH > mi.rcWork.bottom) y = tl.y - SBH() - popH;   // flip above when it spills
+    SetWindowPos(g.zoomPop, HWND_TOPMOST, tl.x, y, g_zoomPopW, popH, SWP_NOACTIVATE);
+    ShowWindow(g.zoomPop, SW_SHOWNOACTIVATE);
+    InvalidateRect(g.zoomPop, nullptr, FALSE);
+    SetTimer(g.zoomPop, 1, 250, nullptr);
+    SetCapture(g.zoomPop);
+    g.zoomOpen = true; g.zoomHot = ZoomCurrent();
+    StatusRepaint();
+}
+
+static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        FillRect(dc, &r, PopBrush());
+        FrameRect(dc, &r, ComboBorderBrush());
+        SelectObject(dc, StCombo());
+        SetBkMode(dc, TRANSPARENT);
+        int cur = ZoomCurrent();
+        for (int i = 0; i < 8; i++) {
+            RECT it{ 1, 1 + i * g_zoomItemH, r.right - 1, 1 + (i + 1) * g_zoomItemH };
+            if (i == g.zoomHot) {
+                HBRUSH hb = CreateSolidBrush(RGB(0x3a, 0x3a, 0x3a));
+                FillRect(dc, &it, hb); DeleteObject(hb);
+            }
+            SetTextColor(dc, i == cur ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
+            RECT tx = it; tx.left += (int)(8 * g.dpi);
+            DrawTextW(dc, ZoomLabel(i), -1, &tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int it = (p.y - 1) / max(1, g_zoomItemH);
+        if (it < 0 || it > 7 || p.x < 0 || p.x >= g_zoomPopW) it = -1;
+        if (it != g.zoomHot) { g.zoomHot = it; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int it = (p.y - 1) / max(1, g_zoomItemH);
+        if (p.x >= 0 && p.x < g_zoomPopW && it >= 0 && it <= 7) {
+            int pick = it;
+            ZoomPopupClose();
+            ZoomApply(pick);
+        } else {
+            ZoomPopupClose();            // a press on the combo toggles; elsewhere dismisses
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: return 0;         // the opening click's release lands here
+    case WM_MOUSEWHEEL: {
+        int d = GET_WHEEL_DELTA_WPARAM(wp);
+        if (g.zoomHot < 0) g.zoomHot = ZoomCurrent();
+        g.zoomHot = std::clamp(g.zoomHot - (d > 0 ? 1 : -1), 0, 7);
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == 1 && GetCapture() != h) ZoomPopupClose();   // capture was stolen: dismiss
+        return 0;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+
+// ---- the footer window ----
+
+static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureStatusBack(dc, r.right, r.bottom);
+            StatusDraw(g_stbdc, r.right, r.bottom);
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_stbdc, 0, 0, SRCCOPY);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT: {               // mirrors/hover heals, like the caption band
+        RECT r; GetClientRect(h, &r);
+        StatusDraw((HDC)wp, r.right, r.bottom);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == 1) {                   // a held status expired: restore the routine line
+            if (GetTickCount64() >= g.statusHoldUntil) { KillTimer(h, 1); StatusRepaint(); }
+            return 0;
+        }
+        break;
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int hot = StatusHit(p);
+        if (hot != g.stHot) {            // repaints only on a hover flip
+            g.stHot = hot;
+            if (hot >= 0) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g.stHot != -1) { g.stHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        StatusAction(StatusHit(p));
+        return 0;
+    }
+    case WM_MOUSEWHEEL: {
+        if (g.n) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            if (StatusHit(p) == ST_COMBO) { ZoomCycle(GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1); return 0; }
+        }
+        return SendMessageW(g.main, m, wp, lp);   // route like the main window does
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            SetCursor(LoadCursorW(nullptr, StatusHit(p) >= 0 ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+
 // ---------------- main window ----------------
 
 static void LayoutMain() {
     if (!g.main || !g.view) return;
     RECT r; GetClientRect(g.main, &r);
     int w = r.right, h = r.bottom;
-    int sw = (g.sideOn && g.n) ? SW() : 0;
-    int cap = CAP(), ch = max(0, h - cap);      // both children sit below the custom caption row
+    int sw = (g.sideOn && g.n && !g.full) ? SW() : 0;
+    int cap = CAP();
+    int sh = g.full ? 0 : SBH();                // full screen hides the footer too
+    int ch = max(0, h - cap - sh);              // the children sit below the caption row
     sd.w = sw;
     if (g.side) {
         MoveWindow(g.side, 0, cap, sw, ch, TRUE);
@@ -1600,12 +2372,13 @@ static void LayoutMain() {
         }
     }
     MoveWindow(g.view, sw, cap, w - sw, ch, TRUE);
+    if (g.status) MoveWindow(g.status, 0, cap + ch, w, sh, TRUE);
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
     g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
     g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
     if (!g.resizing && !g.busy && g.cw > 0 && g.ch > 0) {
-        if (g.fit) ApplyFit(); else Layout();
+        if (g.fitMode != 2) ApplyFit(g.fitMode == 1); else Layout();   // fit modes re-run on resize
         UpdateTitle();
     }
 }
@@ -1617,7 +2390,7 @@ static void ToggleSide() {
     LayoutMain();
 }
 
-static void ZoomBy(double f) { SetZoom(g.zoom * f, false, g.cw / 2, g.ch / 2); }
+static void ZoomBy(double f) { SetZoom(g.zoom * f, g.cw / 2, g.ch / 2); }
 
 static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
@@ -1629,6 +2402,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.side = CreateWindowExW(0, L"DocsySide", nullptr,
                                  WS_CHILD,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
+        g.status = CreateWindowExW(0, L"DocsyStatus", nullptr,
+                                   WS_CHILD | WS_VISIBLE,
+                                   0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
         DwmApply(h);   // rounded corners + themed 1px border (Windows 11; no-op before)
         return 0;
@@ -1768,10 +2544,22 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_sidefont) { DeleteObject(g_sidefont); g_sidefont = nullptr; }
         if (g_glyphfont) { DeleteObject(g_glyphfont); g_glyphfont = nullptr; }
         if (g_wordfont) { DeleteObject(g_wordfont); g_wordfont = nullptr; }
+        if (g_stfont) { DeleteObject(g_stfont); g_stfont = nullptr; }
+        if (g_stfontL) { DeleteObject(g_stfontL); g_stfontL = nullptr; }
+        if (g_stbadge) { DeleteObject(g_stbadge); g_stbadge = nullptr; }
+        if (g_stcombo) { DeleteObject(g_stcombo); g_stcombo = nullptr; }
+        if (g_stglyph) { DeleteObject(g_stglyph); g_stglyph = nullptr; }
+        if (g_stchev) { DeleteObject(g_stchev); g_stchev = nullptr; }
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.tw = 0;
         SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
         LayoutMain();
+        return 0;
+    }
+    case WM_GETMINMAXINFO: {   // the footer cluster needs its width; the rail needs some height
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = (LONG)(780 * g.dpi);
+        mmi->ptMinTrackSize.y = (LONG)(380 * g.dpi);
         return 0;
     }
     case WM_ERASEBKGND: return 1;
@@ -1795,20 +2583,37 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case VK_UP: ScrollTo(g.sx, g.sy - line); break;
         case VK_RIGHT: ScrollTo(g.sx + line, g.sy); break;
         case VK_LEFT: ScrollTo(g.sx - line, g.sy); break;
-        case VK_NEXT: ScrollTo(g.sx, g.sy + pg); break;
-        case VK_PRIOR: ScrollTo(g.sx, g.sy - pg); break;
-        case VK_SPACE: ScrollTo(g.sx, g.sy + (shift ? -pg : pg)); break;
+        case VK_NEXT:
+            if (g.vm == 1) SetPage(g.cur + 1);   // single mode: the flip keys
+            else ScrollTo(g.sx, g.sy + pg);
+            break;
+        case VK_PRIOR:
+            if (g.vm == 1) SetPage(g.cur - 1);
+            else ScrollTo(g.sx, g.sy - pg);
+            break;
+        case VK_SPACE:
+            if (g.vm == 1) SetPage(g.cur + (shift ? -1 : 1));
+            else ScrollTo(g.sx, g.sy + (shift ? -pg : pg));
+            break;
         case VK_HOME: ScrollTo(g.sx, 0); break;
         case VK_END: ScrollTo(g.sx, INT_MAX / 2); break;
         case VK_ADD: case VK_OEM_PLUS: ZoomBy(1.25); break;
         case VK_SUBTRACT: case VK_OEM_MINUS: ZoomBy(0.8); break;
         case '0': if (ctrl) ApplyFit(); break;
-        case '1': if (ctrl) SetZoom(1.0, false, g.cw / 2, g.ch / 2); break;
+        case '1': if (ctrl) SetZoom(1.0, g.cw / 2, g.ch / 2); break;
         case '2': if (ctrl) ApplyFit(true); break;
         case 'F': ApplyFit(); break;
         case 'C': if (ctrl && !g.selText.empty()) CopyClipboard(g.selText); break;
         case 'A': if (ctrl) SelAll(); break;
-        case VK_ESCAPE: SelClear(); break;
+        case VK_ESCAPE:
+            if (g.full) ToggleFull(h);           // full screen leaves first
+            else SelClear();
+            break;
+        case VK_F5: SetViewMode(0); break;       // KillerPDF's mode keys
+        case VK_F6: SetViewMode(1); break;
+        case VK_F7: SetViewMode(2); break;
+        case VK_F8: SetViewMode(3); break;
+        case VK_F11: ToggleFull(h); break;
         case VK_F9: ToggleSide(); break;
         }
         return 0;
@@ -1831,9 +2636,10 @@ static int Shot(const wchar_t* out, int w, int h) {
     HBITMAP b = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
     if (!b) return 4;
     HGDIOBJ old = SelectObject(dc, b);
-    int sw = (g.sideOn && g.n) ? sd.w : 0;
-    int cap = CAP(), ch = max(1, h - cap);
-    // the children render above the caption row, so composite them shifted
+    int sw = (g.sideOn && g.n && !g.full) ? sd.w : 0;
+    int cap = CAP(), sh = SBH();
+    int ch = max(1, h - cap - sh);
+    // the children render above the caption row and below it, so composite them shifted
     if (sw) {
         HDC m1 = CreateCompatibleDC(dc);
         HBITMAP b1 = CreateCompatibleBitmap(dc, sw, ch);
@@ -1850,6 +2656,14 @@ static int Shot(const wchar_t* out, int w, int h) {
         PaintViewBars(m2, w - sw, ch, 0);
         BitBlt(dc, sw, cap, w - sw, ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
+    }
+    if (!g.full && sh > 0) {                   // the footer strip
+        HDC m3 = CreateCompatibleDC(dc);
+        HBITMAP b3 = CreateCompatibleBitmap(dc, w, sh);
+        HGDIOBJ o3 = SelectObject(m3, b3);
+        StatusDraw(m3, w, sh);
+        BitBlt(dc, 0, cap + ch, w, sh, m3, 0, 0, SRCCOPY);
+        SelectObject(m3, o3); DeleteObject(b3); DeleteDC(m3);
     }
     DrawCaptionBar(dc, w);
     GdiFlush();
@@ -1896,6 +2710,19 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     sc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     sc.lpszClassName = L"DocsySide";
     RegisterClassExW(&sc);
+
+    WNDCLASSEXW tc{ sizeof tc };                    // the footer status bar
+    tc.lpfnWndProc = StatusProc; tc.hInstance = hi;
+    tc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    tc.lpszClassName = L"DocsyStatus";
+    RegisterClassExW(&tc);
+
+    WNDCLASSEXW zc{ sizeof zc };                    // the zoom dropdown popup
+    zc.style = CS_SAVEBITS | CS_DROPSHADOW;         // menu-like: saved bits + a soft shadow
+    zc.lpfnWndProc = ZoomPopProc; zc.hInstance = hi;
+    zc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    zc.lpszClassName = L"DocsyZoomPop";
+    RegisterClassExW(&zc);
 
     // WS_CAPTION is dropped (see the chrome notes above): a captioned window
     // has DWM paint its stock title bar on the first activation until a
