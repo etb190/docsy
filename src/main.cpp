@@ -100,6 +100,8 @@ static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi))
 static int Gap() { return max(4, (int)(10 * g.dpi)); }
 static int SBar() { return (int)(12 * g.dpi); }   // overlay bar gutter: KillerPDF's ScrollBarThickness
 
+static HBRUSH GrainBrush(int which);   // defined with the grain tile below
+
 // ---------------- custom caption (KillerPDF's frame) ----------------
 // The window keeps WS_OVERLAPPEDWINDOW, so Windows still owns the resize
 // borders, the drag, the double-click maximize, Aero Snap and the snap flyout;
@@ -212,12 +214,13 @@ static void DrawCaptionBar(HDC dc, int w) {
                 HBRUSH rb = CreateSolidBrush(RGB(0xE0, 0x44, 0x44));
                 RECT rr = r[i]; FillRect(dc, &rr, rb); DeleteObject(rb);
             } else {                                          // min/max: the accent green,
-                Gdiplus::Graphics gs(dc);                     // KillerPDF's ButtonFill gradient
-                Gdiplus::LinearGradientBrush gb(Gdiplus::Rect(r[i].left, r[i].top,
-                                                   r[i].right - r[i].left, r[i].bottom - r[i].top),
+                Gdiplus::Rect gr(r[i].left, r[i].top,         // KillerPDF's ButtonFill gradient
+                                 r[i].right - r[i].left, r[i].bottom - r[i].top);
+                Gdiplus::Graphics gs(dc);
+                Gdiplus::LinearGradientBrush gb(gr,
                                                    Gdiplus::Color(255, 0x22, 0xbb, 0x56),
                                                    Gdiplus::Color(255, 0x1d, 0x9d, 0x48), 90.0f);
-                gs.FillRectangle(&gb, r[i].left, r[i].top, r[i].right - r[i].left, r[i].bottom - r[i].top);
+                gs.FillRectangle(&gb, gr);
             }
         }
         SetTextColor(dc, hot ? RGB(255, 255, 255)
