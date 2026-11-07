@@ -11,7 +11,7 @@ for i in range(n):
          f"0 g BT /F1 40 Tf 72 700 Td (Tiny PDF - page {i + 1}) Tj ET\n"
          f"BT /F1 16 Tf 72 640 Td (Native Windows PDF reader.) Tj ET\n"
          f"BT /F1 16 Tf 72 610 Td (Small, fast, no dependencies.) Tj ET\n"
-         f"BT /F1 12 Tf 72 380 Td (Scroll, zoom with Ctrl+wheel, drag to pan.) Tj ET\n")
+         f"BT /F1 12 Tf 72 380 Td (Scroll with the wheel, select text with the mouse.) Tj ET\n")
     objs[3 + 2 * i] = (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {5 + 2 * i} 0 R "
                        f"/Resources << /Font << /F1 3 0 R >> >> >>")
     objs[4 + 2 * i] = f"<< /Length {len(c)} >>\nstream\n{c}\nendstream"
