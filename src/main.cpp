@@ -1031,13 +1031,13 @@ static void ApplyFit(bool pageFit = false) {
         float mw = 0; for (float w : g.pw) mw = max(mw, w);
         z = (W - 4.0 * Gap()) / (per * mw * g.dpi);
     } else {
-        int i = g.vm == 1 ? g.cur : 0;
+        int i = g.vm == 1 ? max(0, g.cur) : 0;
         float mw = g.vm == 1 ? g.pw[i] : 0;
         if (g.vm == 0) for (float w : g.pw) mw = max(mw, w);
         z = (W - 2.0 * Gap()) / (max(1.f, mw) * g.dpi);
     }
     if (pageFit) {                           // the current row must also fit vertically
-        int i0 = g.vm == 1 ? g.cur : r * per;
+        int i0 = g.vm == 1 ? max(0, g.cur) : r * per;
         int cnt = g.vm == 1 ? 1 : min(per, g.n - i0);
         float rh = 0; for (int k = 0; k < cnt; k++) rh = max(rh, g.ph[i0 + k]);
         z = min(z, (g.ch - 2.0 * Gap()) / (max(1.f, rh) * g.dpi));
@@ -2010,6 +2010,7 @@ static int StatusHit(POINT p) {
     return -1;
 }
 
+static void ZoomBy(double f);   // defined with the main window's keys
 static void ZoomPopupOpen();
 static void ZoomPopupClose();
 
@@ -2211,7 +2212,7 @@ static void ZoomPopupOpen() {
     ClientToScreen(g.status, &tl); ClientToScreen(g.status, &br);
     g_zoomComboScr = { tl.x, tl.y, br.x, br.y };
     g_zoomItemH = (int)(22 * g.dpi);
-    g_zoomPopW = max(cb.right - cb.left, (int)(96 * g.dpi));
+    g_zoomPopW = max((int)(cb.right - cb.left), (int)(96 * g.dpi));
     int popH = 8 * g_zoomItemH + 2;
     if (!g.zoomPop) {
         g.zoomPop = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DocsyZoomPop", nullptr,
