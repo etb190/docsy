@@ -51,6 +51,7 @@
 #include <cfloat>
 using std::min; using std::max;
 #include <gdiplus.h>
+#pragma comment(lib, "msimg32.lib")   // AlphaBlend: the pane shadow's premultiplied ARGB tile
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Storage.h>
@@ -1301,6 +1302,7 @@ static HFONT SideFont() {   // the page label: BrandSansFont ("Killer Sans") at 
 
 static HBRUSH ThumbEdgeBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x33, 0x33, 0x33)); return b; }  // SurfaceBrush
 static HBRUSH RowHoverBrush()    { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }  // RowHoverBrush
+static HBRUSH CardEdgeBrush()    { static HBRUSH b = CreateSolidBrush(RGB(0x55, 0x55, 0x55)); return b; }  // PaneBorderBrush
 
 static void TrackLeave(HWND h) { TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE, h, 0 }; TrackMouseEvent(&t); }
 
@@ -1489,8 +1491,11 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
     HRGN clip = card ? CreateRoundRectRgn(xoff + 1, -1, xoff + cw - 1, h - 1, 2 * rad, 2 * rad) : nullptr;
     if (clip) SelectClipRgn(dc, clip);   // ContentClip: the card's inside, 1px inside its border
-    RECT cr{ xoff, 0, xoff + cw, h };
-    FillRect(dc, &cr, GrainBrush(0));    // the card's canvas, clipped to its corners
+    HRGN canvas = card ? CreateRoundRectRgn(xoff, -1, xoff + cw, h, 2 * rad, 2 * rad) : nullptr;
+    if (canvas) SelectClipRgn(dc, canvas);   // CanvasClip: the fill and the frame share ONE
+    RECT cr{ xoff, 0, xoff + cw, h };        // region, so no bare field ring can open between
+    FillRect(dc, &cr, GrainBrush(0));        // the card's canvas and its edge at any DPI
+    if (canvas) SelectClipRgn(dc, clip);     // the pages stay 1px inside the frame
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
@@ -1501,6 +1506,7 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
+        if (canvas) { FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1); DeleteObject(canvas); }
         return;
     }
     HDC m = CreateCompatibleDC(dc);
@@ -1563,20 +1569,10 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         DrawTextW(dc, g.hint.c_str(), -1, &hn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-    if (card) {   // the 1px card edge. The top edge stays unpainted: tucked under the
-        // band above, the same -1 tuck that hides KillerPDF's own top border line.
-        Gdiplus::Graphics gs(dc);
-        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        float L = (float)xoff + 0.5f, R = (float)(xoff + cw) - 0.5f, T = -0.5f, B = (float)h - 0.5f;
-        float rr = min((float)rad, min((R - L) / 2, (B - T) / 2));
-        Gdiplus::GraphicsPath p;
-        p.AddArc(R - 2 * rr, T, 2 * rr, 2 * rr, 270, 90);   // top-right curve (its top half tucks away)
-        p.AddArc(R - 2 * rr, B - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-        p.AddArc(L, B - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-        p.AddArc(L, T, 2 * rr, 2 * rr, 180, 90);            // the connector line here is the left edge
-        Gdiplus::Pen pen(Gdiplus::Color(255, 0x55, 0x55, 0x55), 1.0f);
-        gs.DrawPath(&pen, &p);
-    }
+    if (canvas) {   // the 1px card edge, KillerPDF's PaneBorderBrush #555555: GDI-exact
+        FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1);   // FrameRgn over the same region the
+        DeleteObject(canvas);                          // canvas filled - the ring lands on the
+    }                                                  // fill, never on a bare field line
     g.lastVis = last;
     Evict(first, last);
 }
@@ -2211,6 +2207,27 @@ static void DrawGlyph(HDC dc, int id, const wchar_t* glyph, bool on) {
     DrawTextW(dc, glyph, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+// KillerPDF centers a footer text's cap body on the bar (WPF VerticalAlignment=Center on
+// BrandSansFont 16). GDI's DT_VCENTER centers the line CELL, and the rasterized ascent
+// rounds up, so Killer Sans rides ~1px low on the 24px bar. Compute the DT_TOP origin
+// that lands the baseline at barH/2 + capHeight/2 instead, from each face's true cap
+// height (the bundled subsets: Killer Sans sCapHeight 649/1324 em, Killer Sans UI 876).
+static const double StCapK = 649.0 / 1324.0;   // Killer Sans
+static const double StCapU = 876.0 / 1324.0;   // Killer Sans UI
+
+static int StCapTop(HDC dc, int barH, double emPx, double capRatio) {
+    TEXTMETRICW tm{}; GetTextMetricsW(dc, &tm);
+    return (int)std::lround(barH / 2.0 + capRatio * emPx / 2.0 - tm.tmAscent);
+}
+
+static void StText(HDC dc, RECT r, const wchar_t* s, UINT flags, HFONT f,
+                   double emPx, double capRatio, COLORREF c) {
+    SelectObject(dc, f);
+    SetTextColor(dc, c);
+    r.top += StCapTop(dc, r.bottom - r.top, emPx, capRatio);
+    DrawTextW(dc, s, -1, &r, flags | DT_SINGLELINE | DT_TOP);
+}
+
 static void DrawVersion(HDC dc) {
     // The version cell: divider (1x14, Margin="5,0,8,0") | "v1.0" (Margin="0,0,12,0")
     // | "(c) 2026 Docsy" (Margin="0,0,20,0"). KillerPDF draws the cell at
@@ -2220,13 +2237,12 @@ static void DrawVersion(HDC dc) {
     RECT d{ vr.left + (int)(5 * dpi), (SBH() - (int)(14 * dpi)) / 2,
             vr.left + (int)(5 * dpi) + 1, (SBH() + (int)(14 * dpi)) / 2 };
     FillRect(dc, &d, DividerBrush());
-    SelectObject(dc, StFontL());
-    SetTextColor(dc, g.stHot == ST_VER ? RGB(0x90, 0x90, 0x90) : RGB(0x6b, 0x6b, 0x6b));
+    COLORREF vcol = g.stHot == ST_VER ? RGB(0x90, 0x90, 0x90) : RGB(0x6b, 0x6b, 0x6b);
     RECT t1 = vr; t1.left = d.right + (int)(8 * dpi); t1.right = t1.left + TextW(StFontL(), L"v" APP_VER);
-    DrawTextW(dc, L"v" APP_VER, -1, &t1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    StText(dc, t1, L"v" APP_VER, DT_LEFT, StFontL(), 16 * g.dpi, StCapK, vcol);
     RECT t2 = vr; t2.right -= (int)(20 * dpi);
     t2.left = t2.right - TextW(StFontL(), L"\u00A9 2026 Docsy");
-    DrawTextW(dc, L"\u00A9 2026 Docsy", -1, &t2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    StText(dc, t2, L"\u00A9 2026 Docsy", DT_LEFT, StFontL(), 16 * g.dpi, StCapK, vcol);
 }
 
 static HDC g_stbdc = nullptr; static HBITMAP g_stbm = nullptr, g_stbold = nullptr;
@@ -2240,9 +2256,60 @@ static void EnsureStatusBack(HDC ref, int w, int h) {
     g_stbw = w; g_stbh = h;
 }
 
+// ---- KillerPDF's PaneShadow, landing on the footer ----
+// The document card is a lifted card and casts a soft black drop shadow DOWN over the
+// footer (PaneShadowEffect: black, BlurRadius 16, ShadowDepth 5, Direction 270, Opacity
+// 0.6; the footer sits at ZIndex -1 underneath it). Docsy's footer is a separate child
+// window, so the shadow lands here: the same gaussian falloff over the bar's top rows -
+// KillerPDF's own dark-theme render reads ~0.44 alpha on the first row, half by row 5 and
+// gone by row 15 - spanning the card's width, wrapping its rounded bottom corners and
+// fading out horizontally at the card's ends. Built once per size/dpi into an ARGB tile
+// and AlphaBlended, so the footer's hover repaints stay cheap.
+static HBITMAP g_shbm = nullptr; static HDC g_shdc = nullptr;
+static int g_shw = 0, g_shh = 0, g_shL = -1; static double g_shdpi = 0;
+
+static double Phi(double z) { return 0.5 * std::erfc(-z * 0.70710678118654752440); }
+
+static void DrawPaneShadow(HDC dc, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    int L = (g.sideOn && g.n && !g.full) ? SW() : 0;   // the card's left edge in footer coords
+    if (!g_shbm || g_shw != w || g_shh != h || g_shdpi != g.dpi || g_shL != L) {
+        int rad = max(2, (int)(6 * g.dpi));
+        int R = w - (int)(8 * g.dpi);                  // the card's right edge: the 8px window gutter
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
+        BYTE* px = nullptr;
+        HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
+        if (px && bm) {
+            const double sig = 8.0 * g.dpi, depth = 5.0 * g.dpi;
+            for (int y = 0; y < h; y++) {
+                double ay = 0.6 * Phi((depth - y) / sig);          // the card's shadow, 5px down
+                double c = y < rad ? rad - std::sqrt((double)rad * rad - (double)(rad - y) * (rad - y)) : 0.0;
+                double lEdge = L + c - 2.0, rEdge = R - c + 2.0;   // the corner pulls the ends in
+                BYTE* row = px + (size_t)y * w * 4;
+                for (int x = 0; x < w; x++) {
+                    double a = ay * Phi((x - lEdge) / sig) * Phi((rEdge - x) / sig);
+                    BYTE* p = row + (size_t)x * 4;
+                    p[0] = p[1] = p[2] = 0;
+                    p[3] = (BYTE)std::lround(a * 255.0);
+                }
+            }
+            if (!g_shdc) g_shdc = CreateCompatibleDC(dc);
+            if (g_shbm) DeleteObject(g_shbm);
+            g_shbm = bm;
+            SelectObject(g_shdc, g_shbm);
+            g_shw = w; g_shh = h; g_shdpi = g.dpi; g_shL = L;
+        }
+    }
+    if (g_shbm) {
+        BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        AlphaBlend(dc, 0, 0, w, h, g_shdc, 0, 0, w, h, bf);
+    }
+}
+
 static void StatusDraw(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     FillRect(dc, &bar, GrainBrush(1));   // the dark chrome: sidebar + footer + title = one container
+    DrawPaneShadow(dc, w, h);            // the document card's shadow falls on the bar's top rows
     if (w < (int)(200 * g.dpi)) return;
     StatusRects(w);
     SetBkMode(dc, TRANSPARENT);
@@ -2250,17 +2317,20 @@ static void StatusDraw(HDC dc, int w, int h) {
     RECT tr = g_stR[ST_STATUS];          // the status line, ellipsized before the tools cell
     tr.left = (int)(16 * dpi); tr.right -= (int)(4 * dpi);   // FooterStatusInset 16
     std::wstring t = StatusTextNow();
-    SelectObject(dc, LatinText(t.c_str()) ? StFont() : StFontF());
-    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-    DrawTextW(dc, t.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (LatinText(t.c_str())) StText(dc, tr, t.c_str(), DT_LEFT | DT_END_ELLIPSIS,
+                                     StFont(), 16 * g.dpi, StCapK, RGB(0xe0, 0xe0, 0xe0));
+    else {                               // a held file name with script the subset drops:
+        SelectObject(dc, StFontF());     // Segoe UI fallback, cell-centered as before
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        DrawTextW(dc, t.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
     DrawVersion(dc);
     if (!g.n) return;                    // no document: status + version cells only
     std::wstring lbl, det; PaperLabel(lbl, det);
     if (!lbl.empty()) {
         RECT sr = g_stR[ST_SIZE];
-        SelectObject(dc, StFont());
-        SetTextColor(dc, g.stHot == ST_SIZE ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
-        DrawTextW(dc, lbl.c_str(), -1, &sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        StText(dc, sr, lbl.c_str(), DT_CENTER | DT_END_ELLIPSIS, StFont(), 16 * g.dpi, StCapK,
+               g.stHot == ST_SIZE ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
     }
     auto div = [&](int ax, int bx) {     // a card-border line centred in the gap
         int mx = (ax + bx) / 2;
@@ -2286,9 +2356,7 @@ static void StatusDraw(HDC dc, int w, int h) {
     else if (g.fitMode == 0) wcscpy_s(zl, L"Fit Width");
     else swprintf_s(zl, L"%d%%", (int)std::lround(g.zoom * 100));
     RECT ct = cb; ct.left += (int)(6 * dpi); ct.right -= (int)(16 * dpi);
-    SelectObject(dc, StCombo());
-    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-    DrawTextW(dc, zl, -1, &ct, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    StText(dc, ct, zl, DT_LEFT | DT_END_ELLIPSIS, StCombo(), 10 * g.dpi, StCapU, RGB(0xe0, 0xe0, 0xe0));
     RECT chv{ cb.right - (int)(14 * dpi), cb.top, cb.right, cb.bottom };
     SelectObject(dc, StChevron());
     SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
@@ -2358,9 +2426,9 @@ static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         for (int i = 0; i < 8; i++) {
             RECT it{ 1, 1 + i * g_zoomItemH, r.right - 1, 1 + (i + 1) * g_zoomItemH };
             if (i == g.zoomHot) FillRect(dc, &it, PopHoverBrush());
-            SetTextColor(dc, i == cur ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
             RECT tx = it; tx.left += (int)(8 * g.dpi);
-            DrawTextW(dc, ZoomLabel(i), -1, &tx, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            StText(dc, tx, ZoomLabel(i), DT_LEFT, StCombo(), 10 * g.dpi, StCapU,
+                   i == cur ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
         }
         EndPaint(h, &ps);
         return 0;
