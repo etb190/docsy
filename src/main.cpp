@@ -1123,7 +1123,8 @@ static bool Open(const std::wstring& p) {
         if (sl != std::wstring::npos) nm = nm.substr(sl + 1);
         ClearCache();
         g.doc = d; g.n = (int)n; g.pw = w; g.ph = h; g.name = nm; g.path = full;
-        g.sx = g.sy = 0; g.fitMode = 0; g.cur = 0;
+        g.sx = g.sy = 0; g.fitMode = 0; g.cur = -1;   // -1 so LayoutMain's UpdateTitle sees the
+                                                      // change and syncs the sidebar highlight
         // fresh sidebar for the new document
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0; sd.cw = 0; sd.ch = 0;
