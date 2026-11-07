@@ -1331,7 +1331,8 @@ static void SideDraw(HDC dc, int w, int h, int xoff) {
                 Gdiplus::LinearGradientBrush gb(Gdiplus::Rect(band.left, band.top - 1, band.right - band.left, band.bottom - band.top + 2),
                                                 Gdiplus::Color(255, 0x38, 0x75, 0x52),
                                                 Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
-                gs.FillRectangle(&gb, band.left, band.top, band.right - band.left, band.bottom - band.top);
+                gs.FillRectangle(&gb, (int)band.left, (int)band.top,
+                                 (int)(band.right - band.left), (int)(band.bottom - band.top));
             } else {
                 FillRect(dc, &band, RowHoverBrush());
             }
