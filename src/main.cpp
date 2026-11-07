@@ -142,7 +142,9 @@ static void InvalidateCap(HWND h) {
 static void SetCapHot(HWND h, int hot) {
     if (g.capHot == hot) return;
     g.capHot = hot;
-    InvalidateCap(h);
+    if (hot >= 0) SetTimer(h, 3, 250, nullptr);   // while a button is hovered the band also
+    else KillTimer(h, 3);                          // repaints on a slow tick, so a surface
+    InvalidateCap(h);                              // that dropped it heals without re-hover
 }
 
 static void ToggleMax(HWND h) {
@@ -152,6 +154,9 @@ static void ToggleMax(HWND h) {
 // DWM frame attributes (Controls/DwmChrome.cs): rounded corners that square off
 // when maximized, and the 1px system border tinted the theme's AppBorderBrush
 // #3f3f3f. Both are no-ops before Windows 11 - failures are swallowed there.
+// Each attribute is only pushed when its state actually flips: re-setting them
+// on every WM_SIZE tick makes DWM re-tessellate the window region mid-resize,
+// which can drop freshly painted pixels (the vanishing caption buttons).
 static void DwmApply(HWND h) {
     using DwmSetFn = HRESULT (WINAPI*)(HWND, DWORD, const void*, UINT);
     static DwmSetFn pfn = nullptr; static bool tried = false;
@@ -161,10 +166,18 @@ static void DwmApply(HWND h) {
         if (d) pfn = (DwmSetFn)(void*)GetProcAddress(d, "DwmSetWindowAttribute");
     }
     if (!pfn) return;
+    static int s_round = -1;
     int roundc = IsZoomed(h) ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
-    pfn(h, 33, &roundc, sizeof roundc);               // DWMWA_WINDOW_CORNER_PREFERENCE
-    COLORREF border = RGB(0x3f, 0x3f, 0x3f);          // DWMWA_BORDER_COLOR, 0x00BBGGRR
-    pfn(h, 34, &border, sizeof border);
+    if (roundc != s_round) {
+        s_round = roundc;
+        pfn(h, 33, &roundc, sizeof roundc);           // DWMWA_WINDOW_CORNER_PREFERENCE
+    }
+    static bool s_border = false;
+    if (!s_border) {
+        s_border = true;
+        COLORREF border = RGB(0x3f, 0x3f, 0x3f);      // DWMWA_BORDER_COLOR, 0x00BBGGRR
+        pfn(h, 34, &border, sizeof border);
+    }
 }
 
 static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
@@ -989,6 +1002,17 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_PRINTCLIENT: {   // DWM re-materializes the surface (peek, taskbar thumbnails,
+        HDC dc = (HDC)wp;    // occlusion, snap previews) WITHOUT invalidating first, which
+        RECT r; GetClientRect(h, &r);   // blanked the band until the next re-hover
+        DrawCaptionBar(dc, r.right);
+        return 0;
+    }
+    case WM_NCACTIVATE: {    // activation flips are when DWM re-evaluates the frame; a
+        LRESULT r = DefWindowProcW(h, m, wp, lp);   // band repaint keeps the glyphs fresh
+        InvalidateCap(h);
+        return r;
+    }
     case WM_NCCALCSIZE: {
         // KillerPDF's frame: keep the real OS side and bottom borders, give the
         // caption row to the client. A maximized window clamps to the work area
@@ -1036,11 +1060,13 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (wp == HTMAXBUTTON) {
             TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE | TME_NONCLIENT, h, 0 };
             TrackMouseEvent(&t);
-        }
+            InvalidateCap(h);                  // repaint on every hover move: a dropped
+        }                                      // surface heals without leaving and re-entering
         break;
     }
     case WM_NCMOUSELEAVE:
-        if (g.capHot >= 0 || g.capPressed) { g.capHot = -1; g.capPressed = false; InvalidateCap(h); }
+        g.capPressed = false;
+        SetCapHot(h, -1);
         break;
     case WM_NCLBUTTONDOWN:
         // Claim the press, or Windows runs its own caption-button loop and
@@ -1061,12 +1087,12 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RECT r; GetClientRect(h, &r);
         int which;
         int hot = CapHit(c, r.right, which) ? which : -1;
-        if (hot >= 0) TrackLeave(h);
+        if (hot >= 0) { TrackLeave(h); InvalidateCap(h); }   // repaint on every hover move
         SetCapHot(h, hot);
         break;
     }
     case WM_MOUSELEAVE:
-        if (g.capHot >= 0) { g.capHot = -1; InvalidateCap(h); }
+        SetCapHot(h, -1);
         break;
     case WM_LBUTTONDOWN: {
         POINT c{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -1141,6 +1167,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_TIMER:
+        if (wp == 3) { InvalidateCap(h); return 0; }   // hovered-button keepalive repaint
+        break;
     case WM_DROPFILES: HandleDrop((HDROP)wp); return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
