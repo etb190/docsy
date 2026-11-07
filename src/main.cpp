@@ -7,6 +7,10 @@
 // light as a 10-page one. No stock scrollbars anywhere: scrolling is wheel,
 // drag-pan and keys, and the only bar on screen is a slim KillerPDF-style
 // overlay thumb (4px wide, 8px under the cursor) owning an invisible 12px gutter.
+// Text selection is KillerPDF's flowing model too: a press on text drags a caret
+// pair along the page's reading order (column-aware, line-banded cells from
+// Windows.Data.Pdf) and paints one 60/255 accent quad per selected line; select
+// or double-click copies at once; empty page areas still pan.
 // The frame is KillerPDF's too: the real OS side borders stay, but the window
 // is created without WS_CAPTION (and WM_NCCALCSIZE gives the top row to the
 // client), so the native caption can never appear - not even on the first
@@ -28,6 +32,7 @@
 #include <string>
 #include <cmath>
 #include <climits>
+#include <cfloat>
 using std::min; using std::max;
 #include <gdiplus.h>
 #include <winrt/Windows.Foundation.h>
@@ -52,6 +57,32 @@ using winrt::Windows::Storage::StorageFile;
 using winrt::Windows::Storage::Streams::InMemoryRandomAccessStream;
 
 struct Ent { HBITMAP b; int w, h; unsigned long long t; };
+
+// ---- flowing text selection (port of KillerPDF's TextRunService + #127) ----
+// A page's selectable units - here the Windows.Data.Pdf text-range boxes, in KillerPDF
+// the engine's word letters - are grouped into visual lines by vertical band overlap,
+// read in column-aware order, and a drag tracks the run of units between two carets
+// (page, index) in that reading order. Geometry lives in page-DIP space with the
+// top-left origin Windows.Data.Pdf reports, so painting is the same scale the page
+// bitmap already uses. Empty page areas stay with the pan gesture, exactly like
+// KillerPDF keeps its marquee for empty space.
+struct TxtCell {                      // one selectable unit: a text-range box
+    std::wstring text;
+    float l = 0, r = 0, t = 0, b = 0; // page DIPs, top-left origin, y down
+    int word = 0, line = 0;           // ordinals assigned when the page flattens
+};
+struct TxtLine {                      // a contiguous slice of the flattened cells
+    int start = 0, count = 0;
+    float top = 0, bottom = 0, left = 0, right = 0;
+    int end() const { return start + count; }
+};
+struct TxtPage {
+    float w = 0, h = 0;               // page size in DIPs
+    unsigned long long tick = 0;      // LRU stamp
+    std::vector<TxtCell> cells;
+    std::vector<TxtLine> lines;
+};
+struct FRect { float x, y, w, h; };   // selection quad in page DIPs
 
 struct App {
     HWND main = nullptr, view = nullptr, side = nullptr;
@@ -78,6 +109,16 @@ struct App {
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
+    // flowing text selection: carets over the flattened text cells of a page,
+    // plus the lazily built per-page text geometry (LRU-capped like the thumbs)
+    std::unordered_map<int, TxtPage> txt;
+    bool selArm = false;                // press started on text; the drag is live
+    bool selDrag = false;               // past the 4px click-vs-drag threshold
+    bool selRange = false;              // a committed selection is on screen
+    int selAPage = -1, selACaret = 0;   // anchor caret (page, cell index)
+    int selFPage = -1, selFCaret = 0;   // focus caret
+    POINT selDownPos{};                 // press point, view pixels
+    std::wstring selText;               // committed selection text
 };
 static App g;
 
@@ -363,6 +404,380 @@ static int PageIn(const std::vector<int>& top, int n, int y) {
 }
 static int PageAt(int y) { return PageIn(g.top, g.n, y); }
 
+// ---------------- text selection core (verbatim-portable geometry) ----------------
+// Everything in this block is pure std:: - the same functions are compiled by
+// scripts/text_check.cpp on Linux against synthetic pages.
+
+// Group cells into visual lines: a cell joins a line when its vertical band overlaps
+// the line's band by at least half the smaller height, and bands grow as members join.
+// Then KillerPDF's #185 column-aware reading order: each band is split at gutter-sized
+// gaps into segments; narrow segments cluster into columns by X-interval overlap and
+// whole columns emit left-to-right (top-to-bottom inside each), while wide segments -
+// titles and footers spanning the text width - flush the open column first. Windows.Data.Pdf
+// exposes no writing directions, so the original's vertical-text ordering and RTL mirroring
+// have nothing to key on and are not ported; lines read left-to-right.
+static void TtLines(TxtPage& pt) {
+    if (pt.cells.empty()) return;
+    struct Band { std::vector<int> idx; float top, bottom; };
+    std::vector<Band> bands;
+    for (int i = 0; i < (int)pt.cells.size(); i++) {
+        const TxtCell& c = pt.cells[i];
+        int found = -1;
+        for (int k = 0; k < (int)bands.size() && found < 0; k++) {
+            float ov = min(bands[k].bottom, c.b) - max(bands[k].top, c.t);
+            float mh = min(bands[k].bottom - bands[k].top, c.b - c.t);
+            if (mh > 0 && ov >= mh * 0.5f) found = k;
+        }
+        if (found < 0) bands.push_back({ {i}, c.t, c.b });
+        else {
+            bands[found].idx.push_back(i);
+            bands[found].top = min(bands[found].top, c.t);
+            bands[found].bottom = max(bands[found].bottom, c.b);
+        }
+    }
+    std::sort(bands.begin(), bands.end(), [](const Band& a, const Band& b) { return a.top < b.top; });
+
+    float textL = FLT_MAX, textR = -FLT_MAX;
+    for (const TxtCell& c : pt.cells) { textL = min(textL, c.l); textR = max(textR, c.r); }
+    float wideW = (textR - textL) * 0.62f;   // spans most of the text width = not a column line
+
+    std::vector<Band> ordered;
+    struct Seg { std::vector<int> idx; float top, bottom, l, r; };
+    std::vector<Seg> pending;
+    auto flush = [&]() {
+        if (pending.empty()) return;
+        struct Col { float l, r; std::vector<int> idx; };
+        std::vector<Col> cols;
+        std::vector<int> byLeft(pending.size());
+        for (int i = 0; i < (int)pending.size(); i++) byLeft[i] = i;
+        std::sort(byLeft.begin(), byLeft.end(), [&](int a, int b) { return pending[a].l < pending[b].l; });
+        for (int i : byLeft) {
+            int hit = -1;
+            for (int c = 0; c < (int)cols.size() && hit < 0; c++) {
+                float ov = min(cols[c].r, pending[i].r) - max(cols[c].l, pending[i].l);
+                float mw = min(cols[c].r - cols[c].l, pending[i].r - pending[i].l);
+                if (mw > 0 && ov >= mw * 0.5f) hit = c;
+            }
+            if (hit < 0) cols.push_back({ pending[i].l, pending[i].r, {i} });
+            else {
+                cols[hit].idx.push_back(i);
+                cols[hit].l = min(cols[hit].l, pending[i].l);
+                cols[hit].r = max(cols[hit].r, pending[i].r);
+            }
+        }
+        std::sort(cols.begin(), cols.end(), [](const Col& a, const Col& b) { return a.l < b.l; });
+        for (Col& col : cols) {
+            std::sort(col.idx.begin(), col.idx.end(), [&](int a, int b) { return pending[a].top < pending[b].top; });
+            for (int i : col.idx) ordered.push_back({ pending[i].idx, pending[i].top, pending[i].bottom });
+        }
+        pending.clear();
+    };
+    for (const Band& band : bands) {
+        std::vector<int> sorted = band.idx;
+        std::sort(sorted.begin(), sorted.end(), [&](int a, int b) { return pt.cells[a].l < pt.cells[b].l; });
+        // split threshold: well past a word space (~0.25em) but below a column gutter
+        float tw = 0; int tn = 0;
+        for (int i : sorted) { tw += pt.cells[i].r - pt.cells[i].l; tn += max(1, (int)pt.cells[i].text.size()); }
+        float gapT = max(10.0f, (tn > 0 ? tw / tn : 5.0f) * 3);
+        std::vector<Seg> segs;
+        segs.push_back({ {sorted[0]}, 0, 0, 0, 0 });
+        for (size_t k = 1; k < sorted.size(); k++) {
+            if (pt.cells[sorted[k]].l - pt.cells[sorted[k - 1]].r > gapT) segs.push_back({ {}, 0, 0, 0, 0 });
+            segs.back().idx.push_back(sorted[k]);
+        }
+        for (Seg& seg : segs) {
+            float sT = FLT_MAX, sB = -FLT_MAX, sL = FLT_MAX, sR = -FLT_MAX;
+            for (int i : seg.idx) {
+                const TxtCell& c = pt.cells[i];
+                sT = min(sT, c.t); sB = max(sB, c.b); sL = min(sL, c.l); sR = max(sR, c.r);
+            }
+            seg.top = sT; seg.bottom = sB; seg.l = sL; seg.r = sR;
+            if (sR - sL >= wideW) { flush(); ordered.push_back({ seg.idx, sT, sB }); }
+            else pending.push_back(seg);
+        }
+    }
+    flush();
+
+    // flatten in reading order; cells inside a line read left-to-right, word ordinals
+    // restart where a space sits on either side of a join or the gap is a real word
+    // space (a narrow gap with no spaces is one word split across range boxes)
+    std::vector<TxtCell> flat; flat.reserve(pt.cells.size());
+    int lineNo = 0, wordNo = 0;
+    for (const Band& band : ordered) {
+        std::vector<int> mem = band.idx;
+        std::sort(mem.begin(), mem.end(), [&](int a, int b) { return pt.cells[a].l < pt.cells[b].l; });
+        float bandH = max(1.0f, band.bottom - band.top);
+        TxtLine ln; ln.start = (int)flat.size();
+        float lt = FLT_MAX, lb = -FLT_MAX, ll = FLT_MAX, lr = -FLT_MAX;
+        for (int i : mem) {
+            TxtCell f = pt.cells[i];
+            if (ln.count == 0) f.word = wordNo++;                    // a new line starts a word
+            else {
+                const TxtCell& p = flat.back();
+                bool sp = (!p.text.empty() && p.text.back() == L' ') || (!f.text.empty() && f.text.front() == L' ');
+                if (!sp && f.l - p.r <= bandH * 0.3f) f.word = p.word;
+                else f.word = wordNo++;
+            }
+            f.line = lineNo;
+            lt = min(lt, f.t); lb = max(lb, f.b); ll = min(ll, f.l); lr = max(lr, f.r);
+            flat.push_back(std::move(f));
+            ln.count++;
+        }
+        ln.top = lt; ln.bottom = lb; ln.left = ll; ln.right = lr;
+        pt.lines.push_back(ln);
+        lineNo++;
+    }
+    pt.cells = std::move(flat);
+}
+
+// True when the point sits ON text: inside a line's vertical band and within its
+// horizontal extent (small slop). This is the gate that decides flowing selection
+// vs the pan gesture - empty page areas must keep the pan.
+static bool TtOverText(const TxtPage& pt, float x, float y) {
+    const float slop = 2.0f;   // DIPs
+    for (const TxtLine& ln : pt.lines)
+        if (y <= ln.bottom + slop && y >= ln.top - slop &&
+            x >= ln.left - slop && x <= ln.right + slop)
+            return true;
+    return false;
+}
+
+// Caret (0..cells) nearest a point, browser-style clamping: above the first line
+// selects from the page start, below the last to the page end, between lines snaps
+// to the closer line, beyond a line's ends clamps to its ends. (KillerPDF's
+// CaretFromPoint at cell granularity; y grows downward in DIP space.)
+static int TtCaret(const TxtPage& pt, float x, float y) {
+    if (pt.lines.empty()) return 0;
+    const TxtLine* target = nullptr;
+    float bestV = FLT_MAX, bestH = FLT_MAX;
+    for (const TxtLine& ln : pt.lines) {
+        float v = y < ln.top ? ln.top - y : y > ln.bottom ? y - ln.bottom : 0;
+        float h = x < ln.left ? ln.left - x : x > ln.right ? x - ln.right : 0;
+        if (v < bestV || (v == bestV && h < bestH)) { bestV = v; bestH = h; target = &ln; }
+    }
+    if (!target) return 0;
+    const TxtLine& first = pt.lines.front();
+    const TxtLine& last = pt.lines.back();
+    if (y < first.top && target == &first && x < first.left) return 0;
+    if (y > last.bottom && target == &last && x > last.right) return (int)pt.cells.size();
+    if (x <= target->left) return target->start;
+    if (x >= target->right) return target->end();
+    for (int i = target->start; i < target->end(); i++) {
+        const TxtCell& c = pt.cells[i];
+        if (x < (c.l + c.r) * 0.5f) return i;
+    }
+    return target->end();
+}
+
+// Caret range of the word (cell) under a point, or false when the point is outside
+// selectable text - the double-click word selection.
+static bool TtWordRange(const TxtPage& pt, float x, float y, int& s, int& e) {
+    if (!TtOverText(pt, x, y)) return false;
+    int best = -1; float bestD = FLT_MAX;
+    for (int i = 0; i < (int)pt.cells.size(); i++) {
+        const TxtCell& c = pt.cells[i];
+        const TxtLine& ln = pt.lines[c.line];
+        if (y < ln.top - 2 || y > ln.bottom + 2 || x < ln.left - 2 || x > ln.right + 2) continue;
+        float d = x < c.l ? c.l - x : x > c.r ? x - c.r : 0;
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) return false;
+    int word = pt.cells[best].word;
+    s = best; e = best + 1;
+    while (s > 0 && pt.cells[s - 1].word == word) s--;
+    while (e < (int)pt.cells.size() && pt.cells[e].word == word) e++;
+    return true;
+}
+
+// Per-line selection rects covering carets [start, end): one rect per line, first
+// selected cell to last, padded 12% of the line height - KillerPDF's SelectionBounds.
+static void TtRects(const TxtPage& pt, int start, int end, std::vector<FRect>& out) {
+    int i = max(0, start);
+    end = min(end, (int)pt.cells.size());
+    while (i < end) {
+        const TxtLine& ln = pt.lines[pt.cells[i].line];
+        int segEnd = min(end, ln.end());
+        float left = FLT_MAX, right = -FLT_MAX;
+        for (int k = i; k < segEnd; k++) { left = min(left, pt.cells[k].l); right = max(right, pt.cells[k].r); }
+        float pad = (ln.bottom - ln.top) * 0.12f;
+        out.push_back({ left, ln.top - pad, right - left, (ln.bottom + pad) - (ln.top - pad) });
+        i = segEnd;
+    }
+}
+
+// Text for the caret range [start, end): newlines between lines, single spaces
+// between words; a cell's own text (which may contain spaces) is appended verbatim.
+// Also reports how many distinct words the range touches.
+static std::wstring TtText(const TxtPage& pt, int start, int end, int* words) {
+    if (words) *words = 0;
+    std::wstring out;
+    int lastWord = -1, lastLine = -1;
+    for (int i = max(0, start); i < min(end, (int)pt.cells.size()); i++) {
+        const TxtCell& c = pt.cells[i];
+        if (lastLine >= 0 && c.line != lastLine) out += L'\n';
+        else if (lastWord >= 0 && c.word != lastWord) out += L' ';
+        if (c.word != lastWord && words) (*words)++;
+        out += c.text;
+        lastWord = c.word; lastLine = c.line;
+    }
+    return out;
+}
+
+// ---------------- text selection app glue ----------------
+
+// Per-page text geometry, built lazily on first touch (cursor, press or a selection
+// slice) and LRU-capped at 48 pages, so a 2,000-page book never pre-extracts.
+static TxtPage* TtFor(int i) {
+    if (!g.n || i < 0 || i >= g.n) return nullptr;
+    auto it = g.txt.find(i);
+    if (it != g.txt.end()) { it->second.tick = ++g.tick; return &it->second; }
+    TxtPage pt; pt.w = g.pw[i]; pt.h = g.ph[i];
+    try {
+        auto doc = g.doc.GetPage((uint32_t)i).GetTextAsync().get();
+        for (winrt::Windows::Data::Pdf::PdfTextRange rng : doc.TextRanges()) {
+            auto text = rng.Text();
+            auto boxes = rng.BoundingBoxes();
+            int nb = (int)boxes.Size();
+            int len = (int)text.size();
+            if (!nb || !len) continue;
+            int off = 0;
+            for (int k = 0; k < nb; k++) {
+                auto bb = boxes.GetAt(k);
+                if (bb.Width <= 0 || bb.Height <= 0) continue;
+                TxtCell c;
+                // a range spanning several lines reports one box per line without the
+                // split point, so the characters are divided across the boxes
+                // proportionally (ranges are line-sized in practice)
+                int take = k == nb - 1 ? len - off : (int)((long long)len * (k + 1) / nb) - off;
+                if (take < 0) take = 0;
+                c.text = std::wstring(text.begin() + off, text.begin() + off + take);
+                off += take;
+                c.l = bb.X; c.t = bb.Y;
+                c.r = c.l + bb.Width; c.b = c.t + bb.Height;
+                pt.cells.push_back(std::move(c));
+            }
+        }
+    } catch (...) { /* no text layer / encrypted: selection is just not offered here */ }
+    TtLines(pt);
+    pt.tick = ++g.tick;
+    g.txt[i] = std::move(pt);
+    while (g.txt.size() > 48) {           // LRU: drop the stalest page's geometry
+        auto oldest = g.txt.end();
+        for (auto x = g.txt.begin(); x != g.txt.end(); ++x)
+            if (x->first != i && (oldest == g.txt.end() || x->second.tick < oldest->second.tick)) oldest = x;
+        if (oldest == g.txt.end()) break;
+        g.txt.erase(oldest);
+    }
+    return &g.txt[i];
+}
+
+static void SelClear() {
+    bool had = g.selRange || g.selArm || g.selDrag || !g.selText.empty();
+    g.selArm = g.selDrag = g.selRange = false;
+    g.selAPage = g.selFPage = -1;
+    g.selACaret = g.selFCaret = 0;
+    g.selText.clear();
+    if (had && g.view) InvalidateRect(g.view, nullptr, FALSE);
+}
+
+// The anchor->focus pair in reading order.
+static void SelOrdered(int& sp, int& sc, int& ep, int& ec) {
+    bool aFirst = g.selAPage < g.selFPage || (g.selAPage == g.selFPage && g.selACaret <= g.selFCaret);
+    if (aFirst) { sp = g.selAPage; sc = g.selACaret; ep = g.selFPage; ec = g.selFCaret; }
+    else { sp = g.selFPage; sc = g.selFCaret; ep = g.selAPage; ec = g.selACaret; }
+}
+
+// The caret slice of the selection that falls on one page, or (0,0) when none.
+static void SelSliceForPage(int page, int& start, int& end) {
+    start = end = 0;
+    int sp, sc, ep, ec;
+    SelOrdered(sp, sc, ep, ec);
+    if (page < sp || page > ep) return;
+    TxtPage* pt = TtFor(page);
+    int n = pt ? (int)pt->cells.size() : 0;
+    start = page == sp ? sc : 0;
+    end = page == ep ? ec : n;
+    start = std::clamp(start, 0, n);
+    end = std::clamp(end, 0, n);
+    if (start > end) std::swap(start, end);
+}
+
+// Cross-page text: one page's slice per line group, pages joined with '\n'
+// (KillerPDF's BuildSelectedText).
+static std::wstring SelBuildText(int* words) {
+    if (words) *words = 0;
+    int sp, sc, ep, ec;
+    SelOrdered(sp, sc, ep, ec);
+    std::wstring out;
+    for (int p = sp; p <= ep; p++) {
+        TxtPage* pt = TtFor(p);
+        if (!pt || pt->cells.empty()) continue;
+        int s, e;
+        SelSliceForPage(p, s, e);
+        if (s >= e) continue;
+        int w = 0;
+        std::wstring t = TtText(*pt, s, e, &w);
+        if (t.empty()) continue;
+        if (!out.empty()) out += L'\n';
+        out += t;
+        if (words) *words += w;
+    }
+    return out;
+}
+
+static void CopyClipboard(const std::wstring& s) {
+    if (!OpenClipboard(g.main)) return;
+    EmptyClipboard();
+    size_t bytes = (s.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (hg) {
+        void* m = GlobalLock(hg);
+        if (m) {
+            memcpy(m, s.c_str(), bytes);
+            GlobalUnlock(hg);
+            if (!SetClipboardData(CF_UNICODETEXT, hg)) GlobalFree(hg);
+        } else GlobalFree(hg);
+    }
+    CloseClipboard();
+}
+
+// Ctrl+A: flowing select-all on the current page and copy (KillerPDF's SelectAllText).
+static void SelAll() {
+    if (!g.n) return;
+    int pg = PageAt(g.sy + g.ch / 3);
+    TxtPage* pt = TtFor(pg);
+    if (!pt || pt->cells.empty()) return;
+    SelClear();
+    g.selAPage = g.selFPage = pg;
+    g.selACaret = 0;
+    g.selFCaret = (int)pt->cells.size();
+    g.selRange = true;
+    g.selText = TtText(*pt, 0, (int)pt->cells.size(), nullptr);
+    if (!g.selText.empty()) CopyClipboard(g.selText);
+    InvalidateRect(g.view, nullptr, FALSE);
+}
+
+// The view->page transform, mirroring Draw()'s page placement exactly: which page a
+// view point falls on and where it sits inside that page, in DIPs. The point is
+// clamped into the page, so dragging past an edge parks the caret at the start or
+// end of the nearest line instead of losing the selection (KillerPDF clamps the
+// drag point into the page canvas the same way).
+static bool ViewToPage(POINT v, int w, int h, int& page, float& dx, float& dy) {
+    if (!g.n) return false;
+    int gut = g.docH > h ? SBar() : 0;
+    int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -g.sx;
+    int i = PageAt(v.y + g.sy);
+    if (i < 0 || i >= g.n) return false;
+    float k = (float)(g.zoom * g.dpi);
+    if (k <= 0) return false;
+    page = i;
+    dx = (v.x - (offx + g.gap + (g.maxw - PW(i)) / 2)) / k;
+    dy = (v.y - (g.top[i] - g.sy)) / k;
+    dx = std::clamp(dx, 0.0f, (float)PW(i) / k);
+    dy = std::clamp(dy, 0.0f, (float)PH(i) / k);
+    return true;
+}
+
 static void SideSync();
 static void LayoutMain();
 
@@ -446,6 +861,8 @@ static bool Open(const std::wstring& p) {
         // fresh sidebar for the new document
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0; sd.cw = 0; sd.ch = 0;
+        g.txt.clear();               // the new document's text geometry starts fresh
+        SelClear();
         g.sideOn = true;
         if (g.side) ShowWindow(g.side, SW_SHOWNOACTIVATE);
         LayoutMain();
@@ -780,6 +1197,7 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     int first = PageAt(g.sy), last = first;
     int gut = g.docH > h ? SBar() : 0;   // the reserved bar column, like KillerPDF's Grid layout
     int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -g.sx;
+    bool selOn = g.selRange || (g.selArm && g.selDrag);   // quads paint live during the drag
     for (int i = first; i < g.n && g.top[i] < g.sy + h; i++) {
         last = i;
         int pw = PW(i), ph = PH(i);
@@ -793,6 +1211,23 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         } else {
             RECT pr{ x, y, x + pw, y + ph };
             FillRect(dc, &pr, (HBRUSH)GetStockObject(WHITE_BRUSH));
+        }
+        // flowing selection quads: KillerPDF paints one rect per selected line on an
+        // overlay above the page - 60/255 of the dark theme's SelectionAccent #22bb56
+        if (selOn) {
+            int s, e; SelSliceForPage(i, s, e);
+            if (s < e) {
+                TxtPage* pt = TtFor(i);
+                if (pt) {
+                    std::vector<FRect> rs; TtRects(*pt, s, e, rs);
+                    float k = (float)(g.zoom * g.dpi);
+                    Gdiplus::Graphics gs(dc);
+                    Gdiplus::SolidBrush br(Gdiplus::Color(60, 0x22, 0xbb, 0x56));
+                    for (const FRect& q : rs)
+                        gs.FillRectangle(&br, Gdiplus::RectF(x + q.x * k, y + q.y * k,
+                                                             max(q.w * k, 2.0f), max(q.h * k, 2.0f)));
+                }
+            }
         }
     }
     DeleteDC(m);
@@ -898,6 +1333,21 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g.resizing = true; g.rsX = p.x; g.rsW0 = SW();
             return 0;
         }
+        // flowing text selection: a press ON text starts KillerPDF's caret drag; a press
+        // on empty page keeps the pan (KillerPDF keeps its marquee there instead)
+        int pg; float fx, fy;
+        if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+            TxtPage* pt = TtFor(pg);
+            if (pt && TtOverText(*pt, fx, fy)) {
+                SelClear();
+                g.selArm = true; g.selDrag = false;
+                g.selAPage = g.selFPage = pg;
+                g.selACaret = g.selFCaret = TtCaret(*pt, fx, fy);
+                g.selDownPos = p;
+                return 0;
+            }
+            if (g.selRange || g.selArm) SelClear();   // a plain click off text drops it
+        }
         g.drag = true; g.dp = p;
         return 0;
     }
@@ -921,6 +1371,28 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g.drag) {
             ScrollTo(g.sx - (p.x - g.dp.x), g.sy - (p.y - g.dp.y)); g.dp = p;
         }
+        // live selection drag: the focus caret tracks the pointer (cross-page, like
+        // KillerPDF's Continuous mode); ViewToPage clamps into the page so dragging
+        // past an edge parks the caret at the nearest line's start/end
+        if (g.selArm) {
+            if (!g.selDrag) {
+                if (abs(p.x - g.selDownPos.x) < (int)(4 * g.dpi) &&
+                    abs(p.y - g.selDownPos.y) < (int)(4 * g.dpi)) return 0;   // still a click
+                g.selDrag = true;
+            }
+            int pg; float fx, fy;
+            if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+                TxtPage* pt = TtFor(pg);
+                if (pt) {
+                    int caret = TtCaret(*pt, fx, fy);
+                    if (pg != g.selFPage || caret != g.selFCaret) {
+                        g.selFPage = pg; g.selFCaret = caret;
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                }
+            }
+            return 0;
+        }
         bool vhot = g.n && g.docH > g.ch && p.x >= g.cw - SBar();
         if (vhot) { int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl; }
         bool hhot = !vhot && g.n && g.docW > g.cw && p.y >= g.ch - SBar() && p.x < g.cw - (vhot ? SBar() : 0);
@@ -937,14 +1409,57 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONUP:
         if (g.resizing) { g.resizing = false; ReleaseCapture(); LayoutMain(); return 0; }
+        if (g.selArm) {
+            g.selArm = false;
+            bool dragged = g.selDrag;
+            g.selDrag = false;
+            ReleaseCapture();
+            if (!dragged || (g.selAPage == g.selFPage && g.selACaret == g.selFCaret)) {
+                SelClear();                       // plain click collapses the selection
+            } else {
+                g.selRange = true;
+                g.selText = SelBuildText(nullptr);
+                if (g.selText.find_first_not_of(L" \n\r\t") == std::wstring::npos)
+                    SelClear();                   // swept a page with no text layer
+                else CopyClipboard(g.selText);    // select copies immediately, KillerPDF-style
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            return 0;
+        }
         g.vDrag = g.hDrag = g.drag = false;
         ReleaseCapture();
         return 0;
+    case WM_LBUTTONDBLCLK: {
+        // double-click word selection, copied at once (KillerPDF's TrySelectWordAtPosition)
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int pg; float fx, fy;
+        if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+            TxtPage* pt = TtFor(pg);
+            int s, e;
+            if (pt && TtWordRange(*pt, fx, fy, s, e)) {
+                g.selArm = g.selDrag = false;
+                g.selAPage = g.selFPage = pg;
+                g.selACaret = s; g.selFCaret = e;
+                g.selRange = true;
+                g.selText = TtText(*pt, s, e, nullptr);
+                CopyClipboard(g.selText);
+                InvalidateRect(h, nullptr, FALSE);
+            }
+        }
+        return 0;
+    }
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT && g.n) {
             if (g.vDrag || g.hDrag || g.vHot || g.hHot) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             if (g.sideOn && p.x < (int)(5 * g.dpi)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
+            // I-beam over selectable text (KillerPDF's SelectableTextCursor): the cursor
+            // also says which gesture a press will start - select here, pan elsewhere
+            int pg; float fx, fy;
+            if (!g.drag && ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+                TxtPage* pt = TtFor(pg);
+                if (pt && TtOverText(*pt, fx, fy)) { SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE; }
+            }
             SetCursor(LoadCursorW(nullptr, g.drag ? IDC_SIZEALL : IDC_HAND)); return TRUE;
         }
         break;
@@ -1175,6 +1690,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case '1': if (ctrl) SetZoom(1.0, false, g.cw / 2, g.ch / 2); break;
         case '2': if (ctrl) ApplyFit(true); break;
         case 'F': ApplyFit(); break;
+        case 'C': if (ctrl && !g.selText.empty()) CopyClipboard(g.selText); break;
+        case 'A': if (ctrl) SelAll(); break;
+        case VK_ESCAPE: SelClear(); break;
         case VK_F9: ToggleSide(); break;
         }
         return 0;
@@ -1250,6 +1768,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&wc);
 
     WNDCLASSEXW vc{ sizeof vc };
+    vc.style = CS_DBLCLKS;               // double-click word selection
     vc.lpfnWndProc = ViewProc; vc.hInstance = hi;
     vc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     vc.lpszClassName = L"DocsyView";
@@ -1277,6 +1796,24 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
 
     if (shot) {
         if (lstrcmpW(argv[3], L"-") && !Open(argv[3])) return 2;
+        // CI preview seed: a committed selection over one page's cells (sel=page:c0:c1),
+        // so the release screenshot shows the selection quads
+        if (argc >= 5 && !wcsncmp(argv[4], L"sel=", 4)) {
+            const wchar_t* q = argv[4] + 4;
+            const wchar_t* c1p = wcschr(q, L':');
+            const wchar_t* c2p = c1p ? wcschr(c1p + 1, L':') : nullptr;
+            if (c1p && c2p) {
+                int pg = _wtoi(q), c0 = _wtoi(c1p + 1), c1 = _wtoi(c2p + 1);
+                TxtPage* pt = TtFor(pg);
+                if (pt && !pt->cells.empty()) {
+                    int n = (int)pt->cells.size();
+                    g.selAPage = g.selFPage = pg;
+                    g.selACaret = std::clamp(c0, 0, n);
+                    g.selFCaret = std::clamp(c1, 0, n);
+                    if (g.selACaret != g.selFCaret) g.selRange = true;
+                }
+            }
+        }
         // Size the window so the client is exactly 880x680: WM_NCCALCSIZE gives
         // the caption back to the client, so only the side borders remain.
         SetWindowPos(g.main, nullptr, 0, 0, 880, 680, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
