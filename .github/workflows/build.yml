@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: |
           python ci/make_sample.py sample.pdf
-          $p = Start-Process .\tinypdf.exe -ArgumentList '--shot','preview.png','sample.pdf' -Wait -PassThru
+          $p = Start-Process .\tinypdf.exe -ArgumentList '--shot',"$PWD\preview.png","$PWD\sample.pdf" -Wait -PassThru
           "exit code: $($p.ExitCode)" | Tee-Object shot.log
           if (!(Test-Path preview.png)) { exit 1 }
       - name: Publish
