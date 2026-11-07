@@ -164,6 +164,7 @@ static App g;
 // 256, so the sidebar never renders more than the few pages you can see.
 struct Side {
     int w = 0, cw = 0, ch = 0, scroll = 0, docH = 0, tw = 0, cur = -1;
+    int hover = -1;                     // the item under the cursor: KillerPDF's IsMouseOver row
     int hit = -1, moved = 0, pend = 0;  // drag-scroll state
     bool barHot = false, barDrag = false;   // the sidebar's own overlay bar
     int barGrab = 0;
@@ -181,6 +182,7 @@ static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi))
 static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi)); }
 static int Gap() { return max(4, (int)(10 * g.dpi)); }
 static int SBar() { return (int)(12 * g.dpi); }   // overlay bar gutter: KillerPDF's ScrollBarThickness
+static int CardW();                               // the document card's width: view minus the 8px window gutter
 
 static HBRUSH GrainBrush(int which);   // defined with the grain tile below
 
@@ -992,7 +994,7 @@ static void UpdateTitle() {   // sidebar highlight follows the page under the up
 static void UpdateScroll() {
     g.busy = true;
     g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
-    g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
+    g.sx = std::clamp(g.sx, 0, max(0, g.docW - CardW()));
     g.busy = false;
     g.scrollTick = GetTickCount64();
 }
@@ -1038,7 +1040,7 @@ static void SetZoom(double z, int ax, int ay) {
     g.zoom = z; g.fitMode = 2;              // an explicit zoom leaves the fit modes
     Layout();
     g.sy = (int)(ry * g.docH) - ay;
-    if (g.docW > g.cw) g.sx = (int)(rx * g.docW) - ax;
+    if (g.docW > CardW()) g.sx = (int)(rx * g.docW) - ax;
     UpdateScroll();
     InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
@@ -1051,7 +1053,7 @@ static void SetZoom(double z, int ax, int ay) {
 // from the resulting scale.
 static void ApplyFit(bool pageFit = false) {
     if (!g.n || g.cw <= 0) return;
-    int W = g.cw - SBar();   // the reserved overlay-bar column, as the old scrollbar subtracted itself
+    int W = CardW() - SBar();   // the card's inner width minus the reserved overlay-bar column
     int per = PerRow();
     int c = PageAt(g.sy + g.ch / 3);
     int r = g.vm == 1 ? 0 : c / per;
@@ -1080,7 +1082,7 @@ static void ApplyFit(bool pageFit = false) {
 }
 
 static void ScrollTo(int x, int y) {
-    x = std::clamp(x, 0, max(0, g.docW - g.cw));
+    x = std::clamp(x, 0, max(0, g.docW - CardW()));
     y = std::clamp(y, 0, max(0, g.docH - g.ch));
     if (x == g.sx && y == g.sy) return;
     g.sx = x; g.sy = y;
@@ -1186,12 +1188,16 @@ static void SideLayout() {
             for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
             sd.th.clear();
         }
-        int lab = (int)(20 * g.dpi), gp = (int)(8 * g.dpi);   // 2px gap + label, 8px tail: the 8,6 / 0,2 rhythm
+        // KillerPDF's page item: a full-width ListBoxItem band (Padding 8,6) around a
+        // StackPanel (Margin 8,2) holding the thumb and the label line. Consecutive
+        // bands touch, the way list items stack - a selected band reads as one card.
+        int padT = (int)(8 * g.dpi);                    // 6 item pad + 2 stack margin above the thumb
+        int below = (int)(28 * g.dpi);                  // 2 gap + ~20 label line + 6 pad below it
         sd.top.assign((size_t)g.n + 1, 0);
-        int y = (int)(8 * g.dpi);
-        for (int i = 0; i < g.n; i++) { sd.top[i] = y; y += STH(i) + lab + gp; }
+        int y = (int)(8 * g.dpi);                       // the first band's top
+        for (int i = 0; i < g.n; i++) { sd.top[i] = y + padT; y = sd.top[i] + STH(i) + below; }
         sd.top[g.n] = y;
-        sd.docH = y - gp + (int)(8 * g.dpi);
+        sd.docH = y + (int)(8 * g.dpi);
     }
     sd.scroll = std::clamp(sd.scroll, 0, max(0, sd.docH - sd.ch));
     InvalidateRect(g.side, nullptr, FALSE);
@@ -1238,7 +1244,8 @@ static void SideSync() {
     if (c == sd.cur) return;
     sd.cur = c;
     if (c >= 0 && sd.docH > 0 && GetTickCount64() >= sd.hold) {
-        int y0 = sd.top[c], y1 = sd.top[c + 1];
+        int y0 = sd.top[c] - (int)(8 * g.dpi);                        // the item band's edges
+        int y1 = sd.top[c] + STH(c) + (int)(28 * g.dpi);
         if (y1 > sd.scroll + sd.ch) SideScrollTo(y0 - (int)(4 * g.dpi));          // off the bottom: card at the top
         else if (y0 < sd.scroll) SideScrollTo(y1 - sd.ch + (int)(4 * g.dpi));     // off the top: card at the bottom
     }
@@ -1283,62 +1290,71 @@ static void RoundRectFill(HDC dc, int x, int y, int w, int h, int r, bool hot) {
     gs.FillPath(&br, &p);
 }
 
-static HFONT SideFont() {   // KillerPDF's page list: UiFont ("Killer Sans UI") at FontSize 13
+static HFONT SideFont() {   // the page label: BrandSansFont ("Killer Sans") at FontSize 14
     if (!g_sidefont)
-        g_sidefont = CreateFontW(-(int)(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        g_sidefont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans UI");
+                                  CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans");
     return g_sidefont;
 }
 
+static HBRUSH ThumbEdgeBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x33, 0x33, 0x33)); return b; }  // SurfaceBrush
+static HBRUSH RowHoverBrush()    { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }  // RowHoverBrush
+
 static void TrackLeave(HWND h) { TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE, h, 0 }; TrackMouseEvent(&t); }
 
-// Paints the sidebar rail: darker noisy background, thumbs (or page-shaped
-// placeholders while they render), page numbers, current-page accent ring, and
-// the rail's own overlay bar inside the reserved 12px gutter on the right.
+// Paints the sidebar rail: the shared dark noisy field (the same surface the
+// window margins and footer paint, so the rail belongs to no one component),
+// KillerPDF's page items - a full-width band that lights RowHoverBrush under
+// the cursor and the SelectionBg green gradient behind the current page, a
+// "Page N" label in Killer Sans 14 - and the rail's own overlay bar inside the
+// reserved 12px gutter on the right.
 static void SideDraw(HDC dc, int w, int h, int xoff) {
     RECT r{ xoff, 0, xoff + w, h };
     FillRect(dc, &r, GrainBrush(1));
     if (!g.n || sd.cw <= 0 || sd.top.empty()) return;
     int avail = sd.cw - SBar();
-    COLORREF accent = RGB(139, 92, 246);
     HGDIOBJ of = SelectObject(dc, SideFont());
     SetBkMode(dc, TRANSPARENT);
     HDC m = CreateCompatibleDC(dc);
+    int padT = (int)(8 * g.dpi), labH = (int)(20 * g.dpi), padB = (int)(6 * g.dpi), gap = (int)(2 * g.dpi);
     int first = SidePageAt(sd.scroll);
     for (int i = first; i < g.n && sd.top[i] < sd.scroll + h; i++) {
         int th = STH(i);
         int x = xoff + (avail - sd.tw) / 2;
         int y = sd.top[i] - sd.scroll;
+        int btop = y - padT, bbot = y + th + gap + labH + padB;   // the item band
+        if (i == sd.cur || i == sd.hover) {
+            RECT band{ xoff, max(0, btop), xoff + avail, min(h, bbot) };
+            if (i == sd.cur) {                                    // SelectionBg, top #387552 -> bottom #104E2B
+                Gdiplus::Graphics gs(dc);
+                Gdiplus::LinearGradientBrush gb(Gdiplus::Rect(band.left, band.top - 1, band.right - band.left, band.bottom - band.top + 2),
+                                                Gdiplus::Color(255, 0x38, 0x75, 0x52),
+                                                Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
+                gs.FillRectangle(&gb, band.left, band.top, band.right - band.left, band.bottom - band.top);
+            } else {
+                FillRect(dc, &band, RowHoverBrush());
+            }
+        }
         RECT tr{ x, y, x + sd.tw, y + th };
         auto it = sd.th.find(i);
         if (it != sd.th.end() && it->second.b) {
             HGDIOBJ o = SelectObject(m, it->second.b);
             BitBlt(dc, x, y, sd.tw, th, m, 0, 0, SRCCOPY);
             SelectObject(m, o);
-            FrameRect(dc, &tr, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            FrameRect(dc, &tr, ThumbEdgeBrush());
         } else {
             FillRect(dc, &tr, (HBRUSH)GetStockObject(LTGRAY_BRUSH));
-            FrameRect(dc, &tr, (HBRUSH)GetStockObject(GRAY_BRUSH));
+            FrameRect(dc, &tr, ThumbEdgeBrush());
         }
-        if (i == sd.cur) {
-            RECT a{ x - 2, y - 2, x + sd.tw + 2, y + th + 2 };
-            HBRUSH ab = CreateSolidBrush(accent);
-            FrameRect(dc, &a, ab);
-            InflateRect(&a, -1, -1);
-            FrameRect(dc, &a, ab);
-            DeleteObject(ab);
-        }
-        wchar_t num[16];
-        swprintf_s(num, L"%d", i + 1);
-        RECT nr{ xoff, y + th + 2, xoff + avail, y + th + 2 + (int)(18 * g.dpi) };
-        SetTextColor(dc, i == sd.cur ? RGB(178, 146, 255) : RGB(176, 178, 184));
+        wchar_t num[24];
+        swprintf_s(num, L"Page %d", i + 1);
+        RECT nr{ xoff, y + th + gap, xoff + avail, y + th + gap + labH };
+        SetTextColor(dc, i == sd.cur ? RGB(0xff, 0xff, 0xff) : RGB(0xa3, 0xa3, 0xa3));
         DrawTextW(dc, num, -1, &nr, DT_CENTER | DT_TOP | DT_SINGLELINE);
     }
     DeleteDC(m);
     SelectObject(dc, of);
-    RECT div{ xoff + w - 1, 0, xoff + w, h };
-    FillRect(dc, &div, (HBRUSH)GetStockObject(BLACK_BRUSH));
     if (sd.docH > sd.ch && sd.ch > 0) {
         int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp);
         bool hot = sd.barHot || sd.barDrag;
@@ -1360,8 +1376,10 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         if (sd.cw > 0 && sd.ch > 0) {
             EnsureSideBack(dc, sd.cw, sd.ch);
-            SideDraw(sd.bdc, sd.cw, sd.ch, 0);
-            BitBlt(dc, 0, 0, sd.cw, sd.ch, sd.bdc, 0, 0, SRCCOPY);
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the grain tile phase:
+            SetBrushOrgEx(sd.bdc, -po.x, -po.y, nullptr);           // anchored to the window, like
+            SideDraw(sd.bdc, sd.cw, sd.ch, 0);                      // every other pane's, so the
+            BitBlt(dc, 0, 0, sd.cw, sd.ch, sd.bdc, 0, 0, SRCCOPY);  // shared field runs unbroken
             SetTimer(h, 2, 25, nullptr);   // finish any pending thumbs
         }
         EndPaint(h, &ps);
@@ -1378,7 +1396,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         SetCapture(h);
         int gb = SBar();
-        if (g.n && sd.docH > sd.ch && p.x >= sd.cw - gb && p.x < sd.cw - 1) {
+        if (g.n && sd.docH > sd.ch && p.x >= sd.cw - gb && p.x < sd.cw) {
             int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp);
             if (p.y >= tp && p.y < tp + tl) { sd.barDrag = true; sd.barGrab = p.y - tp; }
             else SideScrollTo(sd.scroll + (p.y < tp ? -(int)(sd.ch * 0.9) : (int)(sd.ch * 0.9)));
@@ -1396,8 +1414,15 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SideScrollTo((int)((long long)(p.y - sd.barGrab) * max(0, sd.docH - sd.ch) / max(1, sd.ch - tl)));
             return 0;
         }
-        bool hot = g.n && sd.docH > sd.ch && p.x >= sd.cw - SBar() && p.x < sd.cw - 1;
+        bool hot = g.n && sd.docH > sd.ch && p.x >= sd.cw - SBar() && p.x < sd.cw;
         if (hot) { int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp); hot = p.y >= tp && p.y < tp + tl; }
+        int hov = (!sd.barDrag && g.n && sd.docH > 0 && p.x < sd.cw - SBar()
+                   && p.y + sd.scroll < sd.docH) ? SidePageAt(p.y + sd.scroll) : -1;
+        if (hov != sd.hover) {
+            sd.hover = hov;
+            if (hov >= 0) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
         if (hot != sd.barHot) {
             sd.barHot = hot;
             if (hot) TrackLeave(h);
@@ -1416,6 +1441,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSELEAVE:
         if (sd.barHot) { sd.barHot = false; InvalidateRect(h, nullptr, FALSE); }
+        if (sd.hover != -1) { sd.hover = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONUP: {
         bool bar = sd.barDrag;
@@ -1444,23 +1470,40 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 
 // ---------------- page view ----------------
 
+// KillerPDF's document card: the shared dark field fills the window and the
+// canvas is a rounded card on it - RadCard 6 corners, a 1px PaneBorderBrush
+// #555555 edge, inset 8px from the window's right edge, tucked -1 under the
+// band above (so its top border line hides exactly like KillerPDF's) and
+// sitting on the footer below. The field is painted by every pane from one
+// tile, so the margins, the rail and the footer read as one container that no
+// single component owns.
+static int CardW() { return max(0, g.cw - (int)(8 * g.dpi)); }
+
 static void Draw(HDC dc, int w, int h, int xoff) {
     RECT r{ xoff, 0, xoff + w, h };
-    FillRect(dc, &r, GrainBrush(0));   // textured margins instead of flat grey
+    FillRect(dc, &r, GrainBrush(1));   // the field the card floats on
+    int cw = min(w, CardW());
+    int rad = max(2, (int)(6 * g.dpi));
+    bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
+    HRGN clip = card ? CreateRoundRectRgn(xoff + 1, -1, xoff + cw - 1, h - 1, 2 * rad, 2 * rad) : nullptr;
+    if (clip) SelectClipRgn(dc, clip);   // ContentClip: the card's inside, 1px inside its border
+    RECT cr{ xoff, 0, xoff + cw, h };
+    FillRect(dc, &cr, GrainBrush(0));    // the card's canvas, clipped to its corners
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
         int cy = h / 2;
-        if (g.logo) DrawIconEx(dc, xoff + (w - sz) / 2, cy - sz - (int)(6 * g.dpi), g.logo, sz, sz, 0, nullptr, DI_NORMAL);
+        if (g.logo) DrawIconEx(dc, xoff + (cw - sz) / 2, cy - sz - (int)(6 * g.dpi), g.logo, sz, sz, 0, nullptr, DI_NORMAL);
         SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(200, 200, 205));
         SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
-        RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + w, h };
+        RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
+        if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
         return;
     }
     HDC m = CreateCompatibleDC(dc);
     int gut = g.docH > h ? SBar() : 0;   // the reserved bar column, like KillerPDF's Grid layout
-    int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -g.sx;
+    int offx = g.docW < cw - gut ? (cw - gut - g.docW) / 2 : -g.sx;
     bool selOn = g.selRange || (g.selArm && g.selDrag);   // quads paint live during the drag
     int r0 = RowAt(g.sy), r1 = RowAt(g.sy + h - 1);
     int first = RowPage(r0, 0), last = first;
@@ -1510,12 +1553,27 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     if (!g.hint.empty() && GetTickCount64() < g.hintUntil) {   // the full-screen hint
         SetBkMode(dc, TRANSPARENT);
         SelectObject(dc, UiFont());
-        RECT hs{ xoff + 1, h - (int)(34 * g.dpi) + 1, xoff + w + 1, h - (int)(12 * g.dpi) + 1 };
+        RECT hs{ xoff + 1, h - (int)(34 * g.dpi) + 1, xoff + cw + 1, h - (int)(12 * g.dpi) + 1 };
         SetTextColor(dc, RGB(10, 10, 10));
         DrawTextW(dc, g.hint.c_str(), -1, &hs, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        RECT hn{ xoff, h - (int)(34 * g.dpi), xoff + w, h - (int)(12 * g.dpi) };
+        RECT hn{ xoff, h - (int)(34 * g.dpi), xoff + cw, h - (int)(12 * g.dpi) };
         SetTextColor(dc, RGB(0xe8, 0xe8, 0xe8));
         DrawTextW(dc, g.hint.c_str(), -1, &hn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
+    if (card) {   // the 1px card edge. The top edge stays unpainted: tucked under the
+        // band above, the same -1 tuck that hides KillerPDF's own top border line.
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        float L = (float)xoff + 0.5f, R = (float)(xoff + cw) - 0.5f, T = -0.5f, B = (float)h - 0.5f;
+        float rr = min((float)rad, min((R - L) / 2, (B - T) / 2));
+        Gdiplus::GraphicsPath p;
+        p.AddArc(R - 2 * rr, T, 2 * rr, 2 * rr, 270, 90);   // top-right curve (its top half tucks away)
+        p.AddArc(R - 2 * rr, B - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+        p.AddArc(L, B - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+        p.AddArc(L, T, 2 * rr, 2 * rr, 180, 90);            // the connector line here is the left edge
+        Gdiplus::Pen pen(Gdiplus::Color(255, 0x55, 0x55, 0x55), 1.0f);
+        gs.DrawPath(&pen, &p);
     }
     g.lastVis = last;
     Evict(first, last);
@@ -1547,15 +1605,16 @@ static void EnsureBack(HDC ref, int w, int h) {
 static void PaintViewBars(HDC dc, int w, int h, int xoff) {
     if (!g.n) return;
     int gb = SBar(), r = (int)(3 * g.dpi);
+    int cw = min(w, CardW());            // the bars ride inside the card, not on the window gutter
     bool vshow = g.docH > h;
     if (vshow) {
         int tl, tp; BarThumb(g.docH, h, g.sy, tl, tp);
         bool hot = g.vHot || g.vDrag;
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
-        RoundRectFill(dc, xoff + w - gb + (gb - bw) / 2, tp, bw, tl, r, hot);
+        RoundRectFill(dc, xoff + cw - gb + (gb - bw) / 2, tp, bw, tl, r, hot);
     }
-    if (g.docW > w) {
-        int track = w - (vshow ? gb : 0);
+    if (g.docW > cw) {
+        int track = cw - (vshow ? gb : 0);
         int tl, tp; BarThumb(g.docW, track, g.sx, tl, tp);
         bool hot = g.hHot || g.hDrag;
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
@@ -1592,8 +1651,10 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         if (g.cw > 0 && g.ch > 0) {
             EnsureBack(dc, g.cw, g.ch);
-            Draw(g.bdc, g.cw, g.ch, 0);
-            PaintViewBars(g.bdc, g.cw, g.ch, 0);
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the grain tile phase is the
+            SetBrushOrgEx(g.bdc, -po.x, -po.y, nullptr);            // window's, so the field the
+            Draw(g.bdc, g.cw, g.ch, 0);                             // card floats on never shows a
+            PaintViewBars(g.bdc, g.cw, g.ch, 0);                    // seam at a pane boundary
             BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);
             SetTimer(h, 1, 5, nullptr);
         }
@@ -1627,17 +1688,18 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         SetCapture(h);
         int gb = SBar();
+        int cw = CardW();
         bool vshow = g.n && g.docH > g.ch;
-        if (vshow && p.x >= g.cw - gb) {   // the vertical bar: drag the thumb, page on the track
+        if (vshow && p.x >= cw - gb && p.x < cw) {   // the vertical bar: inside the card's edge
             int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp);
             if (p.y >= tp && p.y < tp + tl) { g.vDrag = true; g.vGrab = p.y - tp; }
             else ScrollTo(g.sx, g.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
             return 0;
         }
-        if (g.n && g.docW > g.cw && p.y >= g.ch - gb && p.x < g.cw - (vshow ? gb : 0)) {
-            int tl, tp; BarThumb(g.docW, g.cw - (vshow ? gb : 0), g.sx, tl, tp);
+        if (g.n && g.docW > cw && p.y >= g.ch - gb && p.x < cw - (vshow ? gb : 0)) {
+            int tl, tp; BarThumb(g.docW, cw - (vshow ? gb : 0), g.sx, tl, tp);
             if (p.x >= tp && p.x < tp + tl) { g.hDrag = true; g.hGrab = p.x - tp; }
-            else ScrollTo(g.sx + (p.x < tp ? -(int)(g.cw * 0.9) : (int)(g.cw * 0.9)), g.sy);
+            else ScrollTo(g.sx + (p.x < tp ? -(int)(cw * 0.9) : (int)(cw * 0.9)), g.sy);
             return 0;
         }
         if (g.sideOn && g.n && p.x < (int)(5 * g.dpi)) {   // the splitter: drag to resize the sidebar
@@ -1648,7 +1710,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         // anywhere else starts nothing - the wheel and the keys own scrolling, so the
         // old grab-and-pan gesture (which fought the selection drag) is gone.
         int pg; float fx, fy;
-        if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+        if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
             TxtPage* pt = TtFor(pg);   // builds once if the pre-warm has not reached it yet
             if (pt && TtOverText(*pt, fx, fy)) {
                 SelClear();
@@ -1675,8 +1737,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (g.hDrag) {
-            int tl, tp; BarThumb(g.docW, g.cw - ((g.n && g.docH > g.ch) ? SBar() : 0), g.sx, tl, tp);
-            ScrollTo((int)((long long)(p.x - g.hGrab) * max(0, g.docW - g.cw) / max(1, g.cw - (g.docH > g.ch ? SBar() : 0) - tl)), g.sy);
+            int cw = CardW();
+            int tl, tp; BarThumb(g.docW, cw - ((g.n && g.docH > g.ch) ? SBar() : 0), g.sx, tl, tp);
+            ScrollTo((int)((long long)(p.x - g.hGrab) * max(0, g.docW - cw) / max(1, cw - (g.docH > g.ch ? SBar() : 0) - tl)), g.sy);
             return 0;
         }
         // live selection drag: the focus caret tracks the pointer (cross-page, like
@@ -1689,7 +1752,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 g.selDrag = true;
             }
             int pg; float fx, fy;
-            if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+            if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
                 TxtPage* pt = TtFor(pg);
                 if (pt) {
                     int caret = TtCaret(*pt, fx, fy);
@@ -1701,10 +1764,10 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        bool vhot = g.n && g.docH > g.ch && p.x >= g.cw - SBar();
+        bool vhot = g.n && g.docH > g.ch && p.x >= CardW() - SBar() && p.x < CardW();
         if (vhot) { int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl; }
-        bool hhot = !vhot && g.n && g.docW > g.cw && p.y >= g.ch - SBar() && p.x < g.cw - (vhot ? SBar() : 0);
-        if (hhot) { int tl, tp; BarThumb(g.docW, g.cw - (vhot ? SBar() : 0), g.sx, tl, tp); hhot = p.x >= tp && p.x < tp + tl; }
+        bool hhot = !vhot && g.n && g.docW > CardW() && p.y >= g.ch - SBar() && p.x < CardW() - (vhot ? SBar() : 0);
+        if (hhot) { int tl, tp; BarThumb(g.docW, CardW() - (vhot ? SBar() : 0), g.sx, tl, tp); hhot = p.x >= tp && p.x < tp + tl; }
         if (vhot != g.vHot || hhot != g.hHot) {
             g.vHot = vhot; g.hHot = hhot;
             if (vhot || hhot) TrackLeave(h);
@@ -1741,7 +1804,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         // double-click word selection, copied at once (KillerPDF's TrySelectWordAtPosition)
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int pg; float fx, fy;
-        if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+        if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
             TxtPage* pt = TtFor(pg);
             int s, e;
             if (pt && TtWordRange(*pt, fx, fy, s, e)) {
@@ -1765,7 +1828,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             // without building: the cursor advertises text only once the page's OCR
             // pass has landed, and the arrow elsewhere says a press does nothing
             int pg; float fx, fy;
-            if (ViewToPage(p, g.cw, g.ch, pg, fx, fy)) {
+            if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
                 TxtPage* pt = TtPeek(pg);
                 if (pt && TtOverText(*pt, fx, fy)) { SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE; }
             }
@@ -1817,7 +1880,6 @@ static bool LatinText(const wchar_t* s) {
 }
 
 static HBRUSH DividerBrush()     { static HBRUSH b = CreateSolidBrush(RGB(0x4a, 0x4a, 0x4a)); return b; }
-static HBRUSH EdgeBrush()        { static HBRUSH b = CreateSolidBrush(RGB(0x17, 0x17, 0x17)); return b; }
 static HBRUSH AccentBrush()      { static HBRUSH b = CreateSolidBrush(RGB(0x22, 0xbb, 0x56)); return b; }
 static HBRUSH ComboFillBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x14, 0x14, 0x14)); return b; }  // MenuBackgroundBrush
 static HBRUSH ComboBorderBrush() { static HBRUSH b = CreateSolidBrush(RGB(0x40, 0x40, 0x40)); return b; }  // MenuBorderBrush
@@ -2179,8 +2241,6 @@ static void EnsureStatusBack(HDC ref, int w, int h) {
 static void StatusDraw(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     FillRect(dc, &bar, GrainBrush(1));   // the dark chrome: sidebar + footer + title = one container
-    RECT edge{ 0, 0, w, 1 };
-    FillRect(dc, &edge, EdgeBrush());    // separation from the pane above
     if (w < (int)(200 * g.dpi)) return;
     StatusRects(w);
     SetBkMode(dc, TRANSPARENT);
@@ -2347,6 +2407,8 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RECT r; GetClientRect(h, &r);
         if (r.right > 0 && r.bottom > 0) {
             EnsureStatusBack(dc, r.right, r.bottom);
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // same grain phase as every pane
+            SetBrushOrgEx(g_stbdc, -po.x, -po.y, nullptr);
             StatusDraw(g_stbdc, r.right, r.bottom);
             BitBlt(dc, 0, 0, r.right, r.bottom, g_stbdc, 0, 0, SRCCOPY);
         }
@@ -2355,6 +2417,8 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_PRINTCLIENT: {               // mirrors/hover heals, like the caption band
         RECT r; GetClientRect(h, &r);
+        POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+        SetBrushOrgEx((HDC)wp, -po.x, -po.y, nullptr);
         StatusDraw((HDC)wp, r.right, r.bottom);
         return 0;
     }
@@ -2422,7 +2486,7 @@ static void LayoutMain() {
     if (g.status) MoveWindow(g.status, 0, cap + ch, w, sh, TRUE);
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
-    g.sx = std::clamp(g.sx, 0, max(0, g.docW - g.cw));
+    g.sx = std::clamp(g.sx, 0, max(0, g.docW - CardW()));
     g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
     if (!g.resizing && !g.busy && g.cw > 0 && g.ch > 0) {
         if (g.fitMode != 2) ApplyFit(g.fitMode == 1); else Layout();   // fit modes re-run on resize
@@ -2691,6 +2755,7 @@ static int Shot(const wchar_t* out, int w, int h) {
         HDC m1 = CreateCompatibleDC(dc);
         HBITMAP b1 = CreateCompatibleBitmap(dc, sw, ch);
         HGDIOBJ o1 = SelectObject(m1, b1);
+        SetBrushOrgEx(m1, 0, -cap, nullptr);            // the pane's grain phase, as on screen
         SideDraw(m1, sw, ch, 0);
         BitBlt(dc, 0, cap, sw, ch, m1, 0, 0, SRCCOPY);
         SelectObject(m1, o1); DeleteObject(b1); DeleteDC(m1);
@@ -2699,6 +2764,7 @@ static int Shot(const wchar_t* out, int w, int h) {
         HDC m2 = CreateCompatibleDC(dc);
         HBITMAP b2 = CreateCompatibleBitmap(dc, max(1, w - sw), ch);
         HGDIOBJ o2 = SelectObject(m2, b2);
+        SetBrushOrgEx(m2, -sw, -cap, nullptr);
         Draw(m2, w - sw, ch, 0);
         PaintViewBars(m2, w - sw, ch, 0);
         BitBlt(dc, sw, cap, w - sw, ch, m2, 0, 0, SRCCOPY);
@@ -2708,6 +2774,7 @@ static int Shot(const wchar_t* out, int w, int h) {
         HDC m3 = CreateCompatibleDC(dc);
         HBITMAP b3 = CreateCompatibleBitmap(dc, w, sh);
         HGDIOBJ o3 = SelectObject(m3, b3);
+        SetBrushOrgEx(m3, 0, -(cap + ch), nullptr);
         StatusDraw(m3, w, sh);
         BitBlt(dc, 0, cap + ch, w, sh, m3, 0, 0, SRCCOPY);
         SelectObject(m3, o3); DeleteObject(b3); DeleteDC(m3);
