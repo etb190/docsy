@@ -3232,7 +3232,9 @@ static void FdEditGeom(int boxH, int& h, int& off) {
     TEXTMETRICW tm{}; GetTextMetricsW(dc, &tm);
     SelectObject(dc, of);
     ReleaseDC(g_find, dc);
-    h = min(FdD(FdEditH), tm.tmHeight + 2);                  // 1px of breathing room
+    h = min(FdD(FdEditH), (int)tm.tmHeight + 2);             // 1px of breathing room; the
+                                                             // cast: tmHeight is LONG - MSVC's
+                                                             // std::min cannot deduce across it
     int capH = (int)std::lround(tm.tmAscent * (876.0 / 1429.0));
     off = max(0, boxH / 2 + capH / 2 - (int)tm.tmAscent);
 }
