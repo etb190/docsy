@@ -1841,21 +1841,20 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 
 // KillerPDF's document card: the shared dark field fills the window and the
 // canvas is a rounded card on it - RadCard 6 corners, a 1px PaneBorderBrush
-// #555555 edge, inset 8px from the window's right edge, tucked -1 under the
-// band above (so its top border line hides exactly like KillerPDF's) and
-// sitting on the footer below. The field is painted by every pane from one
-// tile, so the margins, the rail and the footer read as one container that no
-// single component owns.
+// #555555 edge, inset 8px from the window's right edge, its other three edges
+// flush against the band above, the sidebar left and the footer below, with
+// every border pixel visible (WPF's BorderThickness draws inside the bounds).
+// The field is painted by every pane from one tile, so the margins, the rail
+// and the footer read as one container that no single component owns.
 //
-// The corners are WPF arcs there, and GDI regions here can only step them -
-// the "small cuts" the reference never shows. The split that keeps the best of
-// both renderers: GDI owns the straight edges (its region fill and FrameRgn
-// ring are pixel-exact, which GDI+ pens are not), and GDI+ repaints just the
-// four corner squares the way the Border composes them - field grain outside
-// the outer RadCard arc, canvas grain inside its radius-1 inner arc, the 1px
-// PaneBorderBrush #555555 band between, all anti-aliased, on grain tiles
-// translated to GDI's own brush-org phase. The pages keep the cheap region
-// clip.
+// The card is BAKED once per view size into a 32bpp backdrop DIB - field
+// grain, KillerPDF's PaneShadow, the canvas interior - and a paint blits it
+// under the pages. The corners were the sticking point: GDI regions stair-step
+// (the "small cuts"), and bolting GDI+ corner patches over them left the arcs
+// fighting the region edges and the top row clipped away. The bake composes
+// the whole rim as one anti-aliased path set the way WPF's Border does, once,
+// so a paint got cheaper (one BitBlt instead of fill + FrameRgn + four GDI+
+// patches) and every corner, top included, is smooth.
 static int CardW() { return max(0, g.cw - (int)(8 * g.dpi)); }
 
 static Gdiplus::GraphicsPath* CardPath(float x, float y, float w, float h, float rad, float inset) {
@@ -1894,44 +1893,126 @@ static Gdiplus::TextureBrush* GrainTex(int which) {   // a grain tile as a GDI+ 
     return tb[which];
 }
 
-// GDI's rounded regions can only step around the corners - the "small cuts"
-// KillerPDF never shows. So after the GDI fill and ring (whose straight edges
-// are pixel-exact and stay), the four corner squares are repainted by GDI+ the
-// way the WPF Border composes them: field grain outside the outer RadCard arc,
-// canvas grain inside its radius-1 inner arc, the 1px PaneBorderBrush #555555
-// band between - every edge anti-aliased. The grain tiles are translated to
-// GDI's brush-org phase, so the patches melt into the pane without a seam, and
-// the band meets FrameRgn's straight ring flush at the arc tangents.
-static HBRUSH CardEdgeBrush()   { static HBRUSH b = CreateSolidBrush(RGB(0x55, 0x55, 0x55)); return b; }  // PaneBorderBrush
+// ---- the card's backdrop, baked once per view size -------------------------
+//
+// Dark.xaml's PaneShadowEffect: black, BlurRadius 16, ShadowDepth 5, Direction
+// 270 (straight down), PaneShadowOpacity 0.6 - WPF blurs the card's rounded
+// silhouette with a Gaussian of sigma BlurRadius/2 and blends it over the
+// field before the card covers the middle. The exact signed distance to that
+// silhouette (pushed 5dip down) indexes a precomputed erfc falloff, and the
+// black multiplies into the baked field in place. Only the strip near the
+// card's right edge is visited: the card is flush against the band, the
+// sidebar and the footer (their panes sit above the shadow in KillerPDF's
+// z-order, exactly why its reference render shows no shadow there), so the
+// 8px window gutter is the only place the shadow can show - plus 4px under
+// the ring's outer AA fringe, which must blend against darkened field.
+static double Phi(double z);   // the footer's gaussian CDF, defined with it
 
-static void CardCorners(HDC dc, int x, int y, int w, int h, int rad) {
+static float SdRoundRect(float px, float py, float x0, float y0, float x1, float y1, float r) {
+    float qx = fabsf(px - (x0 + x1) * 0.5f) - (x1 - x0) * 0.5f + r;
+    float qy = fabsf(py - (y0 + y1) * 0.5f) - (y1 - y0) * 0.5f + r;
+    float ax = max(qx, 0.f), ay = max(qy, 0.f);
+    return sqrtf(ax * ax + ay * ay) + min(max(qx, qy), 0.f) - r;
+}
+
+static void CardShadowStrip(BYTE* bits, int w, int h, int cw, int rad) {
+    const double sig = 8.0 * g.dpi;
+    const double depth = 5.0 * g.dpi;                     // ShadowDepth, Direction 270
+    // the silhouette: the card pushed straight down, so the falloff reads
+    // stronger along the gutter's lower half, like KillerPDF's render
+    float sx0 = 0.f, sy0 = (float)depth, sx1 = (float)cw, sy1 = (float)h + depth;
+    // erfc falloff LUT: alpha(d) = 0.6 * Phi(-d / sig), d in [-3sig, 3sig]
+    const int LUTN = 236;                // ~0.2px steps at sigma 8
+    static float lut[LUTN]; static double lutSig = 0;
+    if (lutSig != sig) {
+        for (int i = 0; i < LUTN; i++) {
+            double d = -3.0 * sig + (6.0 * sig) * i / (LUTN - 1);
+            lut[i] = (float)(0.6 * Phi(-d / sig));
+        }
+        lutSig = sig;
+    }
+    int x0 = max(0, cw - 4), x1 = w;
+    for (int y = 0; y < h; y++) {
+        BYTE* row = bits + (size_t)y * w * 4;
+        for (int x = x0; x < x1; x++) {
+            float d = SdRoundRect(x + 0.5f, y + 0.5f, sx0, sy0, sx1, sy1, (float)rad);
+            int i = (int)((d / sig + 3.0) * (LUTN - 1) / 6.0);
+            int a = i < 0 ? (int)(0.6 * 255 + 0.5f) : (i >= LUTN ? 0 : (int)(lut[i] * 255 + 0.5f));
+            if (a <= 0) continue;
+            BYTE* p = row + (size_t)x * 4;
+            int inv = 255 - a;
+            p[0] = (BYTE)((p[0] * inv) >> 8);
+            p[1] = (BYTE)((p[1] * inv) >> 8);
+            p[2] = (BYTE)((p[2] * inv) >> 8);
+        }
+    }
+}
+
+// The ring: even-odd between the outer RadCard arc and its radius-1 inner arc,
+// PaneBorderBrush #555555 - WPF's BorderThickness=1 band, drawn over the pages
+// so the clip region's corner steps land under it. Fills land on exact pixels
+// (integer coordinates), so the straight edges stay 1px crisp like FrameRgn's
+// were, and the four arcs are anti-aliased by the same path that drew them.
+static void CardRing(HDC dc, int x, int y, int w, int h, int rad) {
     Gdiplus::Graphics gs(dc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     Gdiplus::GraphicsPath* outer = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0);
     Gdiplus::GraphicsPath* inner = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 1);
-    Gdiplus::GraphicsPath band;          // the ring: even-odd between the two arcs
+    Gdiplus::GraphicsPath band;
     band.AddPath(outer, FALSE);
     band.AddPath(inner, FALSE);
     band.SetFillMode(Gdiplus::FillModeAlternate);
     Gdiplus::SolidBrush edge(Gdiplus::Color(255, 0x55, 0x55, 0x55));
-    int sq = rad + 2;                    // the arc plus its AA tails, per corner
-    RECT cs[4] = {
-        { x, y, x + sq, y + sq },                    // top-left (its top row stays tucked)
-        { x + w - sq, y, x + w, y + sq },            // top-right
-        { x, y + h - sq, x + sq, y + h },            // bottom-left
-        { x + w - sq, y + h - sq, x + w, y + h },    // bottom-right
-    };
-    for (int i = 0; i < 4; i++) {
-        gs.SetClip(Gdiplus::Rect(cs[i].left, cs[i].top, sq, sq), Gdiplus::CombineModeReplace);
-        if (Gdiplus::TextureBrush* f = GrainTex(1))   // the field the card floats on
-            gs.FillRectangle(f, Gdiplus::Rect(cs[i].left, cs[i].top, sq, sq));
-        if (Gdiplus::TextureBrush* c = GrainTex(0))   // the canvas, inside the inner arc
-            gs.FillPath(c, inner);
-        else { Gdiplus::SolidBrush cb(Gdiplus::Color(255, 58, 58, 58)); gs.FillPath(&cb, inner); }
-        gs.FillPath(&edge, &band);                    // the PaneBorder band, arcs blended
-    }
+    gs.FillPath(&edge, &band);
     delete outer;
     delete inner;
+}
+
+// The backdrop DIB: field grain + PaneShadow strip + canvas interior (the
+// inner arc's fill, canvas grain phased to the window like every pane). The
+// ring is NOT baked - it draws after the pages each paint so a page blitting
+// through the clip region's stepped corners cannot nick it.
+static HBITMAP g_bdBmp = nullptr;   // 32bpp top-down backdrop
+static HDC g_bdDC = nullptr;
+static int g_bdW = 0, g_bdH = 0;
+static double g_bdDpi = 0;           // the bake key: size AND dpi (PerMonitorV2 hops)
+static BYTE* g_bdBits = nullptr;
+
+static void CardBackdrop(HDC ref, int w, int h, int xoff) {
+    if (g_bdBmp && g_bdW == w && g_bdH == h && g_bdDpi == g.dpi) return;
+    if (g_bdDC) { DeleteDC(g_bdDC); g_bdDC = nullptr; }
+    if (g_bdBmp) { DeleteObject(g_bdBmp); g_bdBmp = nullptr; }
+    g_bdW = 0; g_bdH = 0;
+    BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
+    BYTE* bits = nullptr;
+    HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&bits, nullptr, 0);
+    if (!bm || !bits) return;
+    HDC bdc = CreateCompatibleDC(ref);
+    HGDIOBJ ob = SelectObject(bdc, bm);
+    int cw = min(w, CardW());
+    int rad = max(2, (int)(6 * g.dpi));
+    bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
+    SetBrushOrgEx(bdc, g_grainPX, g_grainPY, nullptr);   // the window's grain phase,
+    RECT fr{ 0, 0, w, h };                                // like every sibling pane
+    FillRect(bdc, &fr, GrainBrush(1));
+    if (card) {
+        CardShadowStrip(bits, w, h, xoff + cw, rad);
+        Gdiplus::Graphics gs(bdc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath* inner = CardPath((float)xoff, 0.f, (float)cw, (float)h, (float)rad, 1);
+        if (Gdiplus::TextureBrush* c = GrainTex(0))       // the canvas, phased like GDI's
+            gs.FillPath(c, inner);
+        else {
+            Gdiplus::SolidBrush cb(Gdiplus::Color(255, 58, 58, 58));
+            gs.FillPath(&cb, inner);
+        }
+        delete inner;
+    }
+    SelectObject(bdc, ob);
+    DeleteDC(bdc);
+    g_bdBmp = bm; g_bdDC = CreateCompatibleDC(ref);
+    SelectObject(g_bdDC, bm);
+    g_bdBits = bits; g_bdW = w; g_bdH = h; g_bdDpi = g.dpi;
 }
 
 // Find highlights on one visible page (KillerPDF's AddSearchHighlight): a rounded
@@ -1977,21 +2058,17 @@ static void FindPaintPage(HDC dc, int page, int px, int py) {
 }
 
 static void Draw(HDC dc, int w, int h, int xoff) {
-    RECT r{ xoff, 0, xoff + w, h };
-    FillRect(dc, &r, GrainBrush(1));   // the field the card floats on
+    CardBackdrop(dc, w, h, xoff);        // baked field + PaneShadow + canvas, once per size
+    if (g_bdBmp) BitBlt(dc, xoff, 0, w, h, g_bdDC, 0, 0, SRCCOPY);
+    else {
+        RECT r{ xoff, 0, xoff + w, h };   // degenerate bake: the field alone
+        FillRect(dc, &r, GrainBrush(1));
+    }
     int cw = min(w, CardW());
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
-    HRGN clip = card ? CreateRoundRectRgn(xoff + 1, -1, xoff + cw - 1, h - 1, 2 * rad, 2 * rad) : nullptr;
+    HRGN clip = card ? CreateRoundRectRgn(xoff + 1, 1, xoff + cw - 1, h - 1, 2 * (rad - 1), 2 * (rad - 1)) : nullptr;
     if (clip) SelectClipRgn(dc, clip);   // ContentClip: the card's inside, 1px inside its border
-    HRGN canvas = card ? CreateRoundRectRgn(xoff, -1, xoff + cw + 1, h + 1, 2 * rad, 2 * rad) : nullptr;
-    if (canvas) SelectClipRgn(dc, canvas);   // CanvasClip: the fill and the frame share ONE
-    RECT cr{ xoff, 0, xoff + cw, h };        // region, so no bare field ring can open between
-    FillRect(dc, &cr, GrainBrush(0));        // the card's canvas and its edge at any DPI.
-                                             // GDI's rounded regions give up their last row
-                                             // and column, so the rect runs one past the
-                                             // card and the canvas still reaches the edge
-    if (canvas) SelectClipRgn(dc, clip);     // the pages stay 1px inside the frame
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
@@ -2002,8 +2079,7 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-        if (canvas) { FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1); DeleteObject(canvas); }
-        if (card) CardCorners(dc, xoff, -1, cw, h + 1, rad);
+        if (card) CardRing(dc, xoff, 0, cw, h, rad);
         return;
     }
     HDC m = CreateCompatibleDC(dc);
@@ -2067,12 +2143,8 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         DrawTextW(dc, g.hint.c_str(), -1, &hn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-    if (canvas) {   // the 1px card edge, KillerPDF's PaneBorderBrush #555555: pixel-exact
-        FrameRgn(dc, canvas, CardEdgeBrush(), 1, 1);   // on the straights, drawn before the
-        DeleteObject(canvas);                          // corners so the AA arcs land on top
-    }
-    if (card) CardCorners(dc, xoff, -1, cw, h + 1, rad);   // WPF-smooth corner arcs over the
-                                                           // steps the regions leave behind
+    if (card) CardRing(dc, xoff, 0, cw, h, rad);   // the 1px PaneBorderBrush ring, arcs AA'd,
+                                                   // drawn last over the clip's corner steps
     g.lastVis = last;
     Evict(first, last);
 }
@@ -4127,6 +4199,13 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
         RECT c; GetClientRect(g.main, &c);
+        // CI preview seed 3: zoom=NN pins the zoom to NN percent - Fit Width
+        // rides the page edge-to-edge, which hides every card corner, so the
+        // release screenshot zooms out and shows the margins, the ring, the
+        // four corners and the gutter's shadow the way a reader at 35-56% sees
+        // them.
+        if (argc >= 7 && !wcsncmp(argv[6], L"zoom=", 5))
+            SetZoom(_wtof(argv[6] + 5) / 100.0, g.cw / 2, g.ch / 2);
         for (int k = 0; k <= g.n; k++) if (!SidePump()) break;   // render the visible thumbs now
         return Shot(argv[2], c.right, c.bottom);
     }
