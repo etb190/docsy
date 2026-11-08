@@ -2440,12 +2440,16 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         if (fd.drag) {                           // the grip is moving the bar: the offsets update,
-            fd.dx += p.x - fd.dragX;             // the edit rides along, and one invalidate
-            fd.dy += p.y - fd.dragY;             // recomposites pages, bar and shadow into the
-            fd.dragX = p.x; fd.dragY = p.y;      // back buffer - a single atomic frame per
-            FindPlace();                         // pointer move. No window moves, no exposed
-            InvalidateRect(h, nullptr, FALSE);   // strips, no ghosts, no lag frame - the
-            return 0;                            // two-surface disease is gone at the root
+            RECT was = FdRect();                 // the edit rides along, and the frame lands in
+            fd.dx += p.x - fd.dragX;             // the back buffer as one atomic blit. Only the
+            fd.dy += p.y - fd.dragY;             // bar's own footprint changes - old ∪ new, and
+            fd.dragX = p.x; fd.dragY = p.y;      // FindDraw paints exactly FdRect - so a full-view
+            FindPlace();                         // recomposite (every cached page, every frame)
+            RECT now = FdRect();                 // would be pure waste on a 2000-page book. The
+            RECT u{ min(was.left, now.left), min(was.top, now.top),   // edit's own park inside the
+                    max(was.right, now.right), max(was.bottom, now.bottom) };   // union is covered:
+            InvalidateRect(h, &u, FALSE);        // FindPlace repaints the child, the union paints
+            return 0;                            // the composite around it - no ghosts, no waste
         }
         if (fd.open) {                           // the bar's hover tiles, the same flip-only
             int bx, by; FdOrigin(bx, by);        // repaint the scrollbars use
@@ -3519,6 +3523,10 @@ static void FindOpen(bool create = true) {
         }
         FindPlace();                              // the edit rides its ring at the home spot
         ShowWindow(g_fedit, SW_SHOWNOACTIVATE);
+        InvalidateRect(g_fedit, nullptr, TRUE);   // first light is a full opaque paint too:
+                                                  // the child, not the composite, owns its
+                                                  // pixels (WS_CLIPCHILDREN), so it must
+                                                  // draw itself the frame it appears
         InvalidateRect(g.view, nullptr, FALSE);   // the bar enters the composite
     }
     if (g_fedit) { SetWindowTextW(g_fedit, L""); SetFocus(g_fedit); }   // open empty, focus ready
@@ -3776,14 +3784,38 @@ static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // this one control: the line-box window (FdEditGeom) centred in the 26px box,
 // in VIEW coordinates at the bar's current origin. The composite repaints from
 // the same invalidate that follows the move - one frame, no seams.
+//
+// The repaint contract is the whole fix for the transparency/artifacts horror:
+// WS_CLIPCHILDREN clips this child's rect OUT of the view's paint, so the
+// pixels under the edit are painted by the edit ALONE - nothing else will ever
+// fill them. MoveWindow(.., FALSE) promised "no repainting of any kind", so
+// after every park the control's new rect kept showing whatever was on screen
+// before it (page pixels = "the input turns transparent"), until a caret blink
+// or a keystroke repainted a sliver - the strobing patchwork. So: skip the
+// move when the rect is already right (LayoutMain parks on every WM_SIZE),
+// and on a real move repaint the child itself (bRepaint=TRUE) AND invalidate
+// its full client for an erase+redraw in the same frame the view recomposites
+// around it. The edit's WM_CTLCOLOREDIT brush is opaque #1c1c1c - the same
+// tone the composite fills the box with - so edit and pixels meet seamlessly.
 static void FindPlace() {
     if (!g_fedit || !g.view) return;
     FindClampDrag();                              // a resized card re-clamps the drag offset
     int bx, by; FdOrigin(bx, by);
     FdRects R; FdLayout(FdEditW(CardW()), R);
     int eh, eoff; FdEditGeom(R.edit.bottom - R.edit.top, eh, eoff);
-    MoveWindow(g_fedit, bx + R.edit.left, by + R.edit.top + eoff,
-               R.edit.right - R.edit.left, eh, FALSE);
+    RECT want{ bx + R.edit.left, by + R.edit.top + eoff,
+               bx + R.edit.right, by + R.edit.top + eoff + eh };
+    RECT have; GetWindowRect(g_fedit, &have);     // screen coords on both, cheap compare
+    POINT o0{ want.left, want.top }, o1{ have.left, have.top };
+    ScreenToClient(g.view, &o0); ScreenToClient(g.view, &o1);
+    if (o0.x != o1.x || o0.y != o1.y ||           // POINT has no operator!= in the
+        want.right - want.left != have.right - have.left ||   // Windows headers: field by field
+        want.bottom - want.top != have.bottom - have.top) {
+        MoveWindow(g_fedit, want.left, want.top, want.right - want.left,
+                   want.bottom - want.top, TRUE);   // TRUE: the child repaints as it lands
+        InvalidateRect(g_fedit, nullptr, TRUE);     // ...and one full erase+redraw on top:
+                                                    // no stale rect, no patchwork, ever
+    }
 }
 
 // The grip's drag bounds: the bar's visual rect (window minus the shadow
