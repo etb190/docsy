@@ -124,7 +124,8 @@ struct TxtPage {
 struct FRect { float x, y, w, h; };   // selection quad in page DIPs
 
 struct App {
-    HWND main = nullptr, view = nullptr, side = nullptr, status = nullptr, zoomPop = nullptr;
+    HWND main = nullptr, view = nullptr, side = nullptr, status = nullptr;
+    HWND bar = nullptr, zoomPop = nullptr;      // bar: KillerPDF's toolbar row (the Find Text button)
     HINSTANCE hinst = nullptr;
     HICON logo = nullptr;
     PdfDocument doc{ nullptr };
@@ -156,6 +157,8 @@ struct App {
     int osFrame = 0;                    // OS side-border width from WM_NCCALCSIZE (the top resize grip)
     int capHot = -1;                    // hovered caption button: 0 min, 1 max, 2 close, 3 find, -1 none
     bool capPressed = false;            // the maximize button held down (non-client, SnapLayouts-style)
+    int tbHot = -1;                     // hovered toolbar button: 0 the Find Text button, -1 none
+    bool tbPressed = false;             // the Find Text button held down (capture-held, WPF's IsPressed)
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
@@ -223,6 +226,7 @@ static WNDPROC g_feditDef = nullptr;               // the edit's stock proc (sub
 static HFONT g_uifont = nullptr, g_sidefont = nullptr;
 static HFONT g_glyphfont = nullptr, g_wordfont = nullptr;
 static HFONT g_capfind = nullptr;                   // the caption find button's 12px MDL2 glyph
+static HFONT g_tbglyph = nullptr, g_tbcap = nullptr; // toolbar: E721 at 20, the caption at Killer Sans 14
 
 static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi)); }
 static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi)); }
@@ -426,6 +430,221 @@ static void PaintCaptionInto(HDC dst, int w) {
     EnsureCapBack(dst, w);
     DrawCaptionBar(g.capdc, w);
     BitBlt(dst, 0, 0, w, CAP(), g.capdc, 0, 0, SRCCOPY);
+}
+
+// ---------------- toolbar row (KillerPDF's Row 1) ----------------
+// Under the caption KillerPDF runs a full-width toolbar border: BackgroundBrush
+// #1c1c1c under the shared grain (MainWindow.xaml's ToolbarRowBorder + the
+// GrainBrushShared overlay), holding ToolbarGrid (Margin 4,2) with the tool
+// buttons. docsy is a viewer, so its bar carries the one tool that exists here:
+// ToolbarLayout's "search" unit - the magnifier E721 with Str_Lbl_Search "Find
+// Text" and the Ctrl:F caption (Shell/ToolbarLayout.cs), whose Search_Click
+// toggles the find bar. The button is the family ToolbarButton in the default
+// Large + Under mode (Shell/ToolbarStyle.cs): glyph FontSize 20 over a Killer
+// Sans 14 caption with a 2px gap, MinHeight 50, Padding 6,4 - sitting directly
+// on the chrome (no box at rest), a radius-3 SmallCornerRadius RowHoverBrush
+// #404040 tile on hover, SurfaceBrush #333333 while pressed, Opacity 0.4 when
+// no document is open, the Hand cursor, and the content's icon shadow (black,
+// blur 4, depth 2, IconShadowOpacity 0.9 on the dark themes) as the 1px dark
+// offset copy the caption's wordmark already uses. Click acts on release inside,
+// with capture held - WPF button semantics - and opens the same find bar as
+// Ctrl+F and the caption button.
+
+// The button's auto height, the way WPF's Under mode sizes it: the content
+// column (the MDL2 line box for FontSize 20 is ~23.5px, the Killer Sans 14
+// caption's cell follows the font) plus Padding 6,4, with MinHeight 50 as the
+// floor. Measured once per DPI from the real font; the row is the button plus
+// ToolbarGrid's Margin 4,2. KillerPDF's own render (the user's screenshot,
+// 100% scale) reads caption 32 + row ~55-56, which is this math.
+static int TbBtnH() {
+    static int h = 0; static double d = 0;
+    if (!h || d != g.dpi) {
+        HDC dc = GetDC(g.bar);
+        RECT rc{ 0, 0, 0, 0 };
+        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        DrawTextW(dc, L"Find Text", -1, &rc, DT_CALCRECT | DT_SINGLELINE);
+        SelectObject(dc, of);
+        ReleaseDC(g.bar, dc);
+        int capH = rc.bottom - rc.top;
+        h = max((int)(50 * g.dpi), (int)(24 * g.dpi) + (int)(2 * g.dpi) + capH + (int)(8 * g.dpi));
+        d = g.dpi;
+    }
+    return h;
+}
+static int TBH() { return g.full ? 0 : TbBtnH() + (int)(4 * g.dpi); }   // + ToolbarGrid Margin 4,2
+
+static void FindToggle();                        // the find bar's own section, below
+static void TrackLeave(HWND h);                  // defined with the view's hover helpers
+
+static HDC g_bardc = nullptr; static HBITMAP g_barbm = nullptr, g_barold = nullptr;
+static int g_barw = 0, g_barh = 0;
+static void EnsureBarBack(HDC ref, int w, int h) {
+    if (g_barbm && g_barw == w && g_barh == h) return;
+    if (g_barbm) { SelectObject(g_bardc, g_barold); DeleteObject(g_barbm); }
+    else g_bardc = CreateCompatibleDC(ref);
+    g_barbm = CreateCompatibleBitmap(ref, w, h);
+    g_barold = (HBITMAP)SelectObject(g_bardc, g_barbm);
+    g_barw = w; g_barh = h;
+}
+
+// The button's width: the wider of the 20px glyph and the "Find Text" caption,
+// plus Padding 6,4's 12 horizontal pixels (auto width in Under mode).
+static int BarBtnW(HDC dc) {
+    RECT rc{ 0, 0, 0, 0 };
+    HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+    DrawTextW(dc, L"Find Text", -1, &rc, DT_CALCRECT | DT_SINGLELINE);
+    SelectObject(dc, of);
+    int capW = rc.right - rc.left;
+    return max((int)(20 * g.dpi), capW) + (int)(12 * g.dpi);
+}
+
+// The button box inside the row: ToolbarGrid's Margin 4,2 - 4 from the right
+// edge, 2 from the top, auto height (TbBtnH, MinHeight 50 floor).
+static RECT BarBtnRect(int w) {
+    HDC dc = GetDC(g.bar);
+    int bw = BarBtnW(dc);
+    ReleaseDC(g.bar, dc);
+    int bh = TbBtnH();
+    int right = w - (int)(4 * g.dpi);
+    return { right - bw, (int)(2 * g.dpi), right, (int)(2 * g.dpi) + bh };
+}
+
+static int BarHit(POINT p, int w) {
+    RECT b = BarBtnRect(w);
+    return (p.x >= b.left && p.x < b.right && p.y >= b.top && p.y < b.bottom) ? 0 : -1;
+}
+
+static void BarDraw(HDC dc, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    RECT bar{ 0, 0, w, h };
+    FillRect(dc, &bar, GrainBrush(1));   // the shared dark chrome: title bar + toolbar + sidebar + footer
+    RECT b = BarBtnRect(w);
+    bool en = g.n != 0;                  // ToolbarAvailability: search needs an open document
+    bool hot = g.tbHot == 0, pr = g.tbPressed && en;
+    if (hot || pr) {                     // the hover/pressed tile: radius-3 SmallCornerRadius
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath p;
+        float rr = (float)(3 * g.dpi);
+        float fx = (float)b.left, fy = (float)b.top;
+        float fw = (float)(b.right - b.left), fh = (float)(b.bottom - b.top);
+        p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+        p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+        p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+        p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+        p.CloseFigure();
+        // RowHoverBrush #404040, pressed SurfaceBrush #333333; disabled bakes the
+        // style's Opacity 0.4 over #1c1c1c: 0.4*#404040 + 0.6*#1c1c1c = #2a2a2a
+        Gdiplus::Color c = pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
+                              : Gdiplus::Color(255, 0x40, 0x40, 0x40);
+        if (!en) c = Gdiplus::Color(255, 0x2a, 0x2a, 0x2a);
+        Gdiplus::SolidBrush f(c);
+        gs.FillPath(&f, &p);
+    }
+    // the content column: E721 at 20 with the caption 2px under, both centered
+    // (ToolbarStyle.cs BuildToolbarContent, Under mode), and the icon shadow's
+    // 1px dark copy under the light pass - the wordmark's treatment
+    RECT mc{ 0, 0, 0, 0 };
+    HFONT cf = CaptionFont(g_tbcap, 14, false, L"Killer Sans");
+    HFONT of = (HFONT)SelectObject(dc, cf);
+    DrawTextW(dc, L"Find Text", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
+    SelectObject(dc, of);
+    int capH = mc.bottom - mc.top;
+    int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);   // the MDL2 line box at FontSize 20 (~23.5px):
+    int colH = gh + gap + capH;                            // a 20px cell would clip the glyph
+    int y0 = b.top + max(0, ((b.bottom - b.top) - colH) / 2);
+    RECT gr{ b.left, y0, b.right, y0 + gh };
+    RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
+    SetBkMode(dc, TRANSPARENT);
+    SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
+    SetTextColor(dc, RGB(16, 16, 16));                             // the shadow copy
+    RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
+    DrawTextW(dc, L"\uE721", -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
+    SelectObject(dc, cf);
+    DrawTextW(dc, L"Find Text", -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(dc, en ? RGB(0xe0, 0xe0, 0xe0) : RGB(0x6a, 0x6a, 0x6a));   // TextBrush, 0.4 when dimmed
+    SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
+    DrawTextW(dc, L"\uE721", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, cf);
+    DrawTextW(dc, L"Find Text", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureBarBack(dc, r.right, r.bottom);
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // same grain phase as every pane
+            SetBrushOrgEx(g_bardc, -po.x, -po.y, nullptr);
+            BarDraw(g_bardc, r.right, r.bottom);
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_bardc, 0, 0, SRCCOPY);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT: {               // mirrors/hover heals, like the caption band
+        RECT r; GetClientRect(h, &r);
+        POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+        SetBrushOrgEx((HDC)wp, -po.x, -po.y, nullptr);
+        BarDraw((HDC)wp, r.right, r.bottom);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT r; GetClientRect(h, &r);
+        int hot = BarHit(p, r.right);
+        if (hot != g.tbHot) {            // repaints only on a hover flip
+            g.tbHot = hot;
+            if (hot >= 0) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g.tbHot != -1) { g.tbHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT r; GetClientRect(h, &r);
+        if (BarHit(p, r.right) == 0 && g.n) {   // capture held: WPF's IsPressed story
+            SetCapture(h);
+            g.tbPressed = true;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        bool was = g.tbPressed;
+        if (was) {
+            g.tbPressed = false;
+            if (GetCapture() == h) ReleaseCapture();
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT r; GetClientRect(h, &r);
+            if (BarHit(p, r.right) == 0 && g.n) FindToggle();   // click on release inside
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_CAPTURECHANGED:              // the press lost the mouse some other way
+        if (g.tbPressed) { g.tbPressed = false; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_MOUSEWHEEL:
+        return SendMessageW(g.main, m, wp, lp);   // route like the footer does: the wheel scrolls
+                                                  // the page from any chrome surface
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            RECT r; GetClientRect(h, &r);
+            SetCursor(LoadCursorW(nullptr, BarHit(p, r.right) == 0 ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
+    return DefWindowProcW(h, m, wp, lp);
 }
 
 // ---- film-grain margins (port of KillerPDF's procedural GrainTexture) ----
@@ -1280,6 +1499,7 @@ static bool Open(const std::wstring& p) {
         if (g.side) ShowWindow(g.side, SW_SHOWNOACTIVATE);
         LayoutMain();
         InvalidateRect(g.main, nullptr, FALSE);
+        if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);   // the Find Text button undims (Opacity 0.4 -> 1)
         return true;
     } catch (...) {
         if (!g.quiet) MessageBoxW(g.main, L"Could not open this file (invalid, encrypted or unsupported PDF).", L"Docsy", MB_ICONWARNING);
@@ -3420,18 +3640,20 @@ static void LayoutMain() {
     int w = r.right, h = r.bottom;
     int sw = (g.sideOn && g.n && !g.full) ? SW() : 0;
     int cap = CAP();
+    int tb = TBH();                             // the toolbar row under the caption
     int sh = g.full ? 0 : SBH();                // full screen hides the footer too
-    int ch = max(0, h - cap - sh);              // the children sit below the caption row
+    int ch = max(0, h - cap - tb - sh);         // the children sit below caption + toolbar
     sd.w = sw;
+    if (g.bar) MoveWindow(g.bar, 0, cap, w, tb, TRUE);
     if (g.side) {
-        MoveWindow(g.side, 0, cap, sw, ch, TRUE);
+        MoveWindow(g.side, 0, cap + tb, sw, ch, TRUE);
         if (sw) {
             RECT sr; GetClientRect(g.side, &sr);
             if (sr.right != sd.cw || sr.bottom != sd.ch) { sd.cw = sr.right; sd.ch = sr.bottom; SideLayout(); }
         }
     }
-    MoveWindow(g.view, sw, cap, w - sw, ch, TRUE);
-    if (g.status) MoveWindow(g.status, 0, cap + ch, w, sh, TRUE);
+    MoveWindow(g.view, sw, cap + tb, w - sw, ch, TRUE);
+    if (g.status) MoveWindow(g.status, 0, cap + tb + ch, w, sh, TRUE);
     if (g_find && fd.open) FindPlace();          // the bar tracks the card's top-right corner
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
@@ -3465,6 +3687,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.status = CreateWindowExW(0, L"DocsyStatus", nullptr,
                                    WS_CHILD | WS_VISIBLE,
                                    0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
+        g.bar = CreateWindowExW(0, L"DocsyBar", nullptr,
+                                WS_CHILD | WS_VISIBLE,
+                                0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
         DwmApply(h);   // rounded corners + themed 1px border (Windows 11; no-op before)
         return 0;
@@ -3606,6 +3831,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_glyphfont) { DeleteObject(g_glyphfont); g_glyphfont = nullptr; }
         if (g_wordfont) { DeleteObject(g_wordfont); g_wordfont = nullptr; }
         if (g_capfind) { DeleteObject(g_capfind); g_capfind = nullptr; }
+        if (g_tbglyph) { DeleteObject(g_tbglyph); g_tbglyph = nullptr; }
+        if (g_tbcap) { DeleteObject(g_tbcap); g_tbcap = nullptr; }
         if (g_stfont) { DeleteObject(g_stfont); g_stfont = nullptr; }
         if (g_stfontL) { DeleteObject(g_stfontL); g_stfontL = nullptr; }
         if (g_stfontF) { DeleteObject(g_stfontF); g_stfontF = nullptr; }
@@ -3710,24 +3937,24 @@ static int Shot(const wchar_t* out, int w, int h) {
     if (!b) return 4;
     HGDIOBJ old = SelectObject(dc, b);
     int sw = (g.sideOn && g.n && !g.full) ? sd.w : 0;
-    int cap = CAP(), sh = SBH();
-    int ch = max(1, h - cap - sh);
+    int cap = CAP(), tb = TBH(), sh = SBH();
+    int ch = max(1, h - cap - tb - sh);
     // the children render above the caption row and below it, so composite them shifted
     if (sw) {
         HDC m1 = CreateCompatibleDC(dc);
         HBITMAP b1 = CreateCompatibleBitmap(dc, sw, ch);
         HGDIOBJ o1 = SelectObject(m1, b1);
-        SetBrushOrgEx(m1, 0, -cap, nullptr);            // the pane's grain phase, as on screen
+        SetBrushOrgEx(m1, 0, -(cap + tb), nullptr);      // the pane's grain phase, as on screen
         SideDraw(m1, sw, ch, 0);
-        BitBlt(dc, 0, cap, sw, ch, m1, 0, 0, SRCCOPY);
+        BitBlt(dc, 0, cap + tb, sw, ch, m1, 0, 0, SRCCOPY);
         SelectObject(m1, o1); DeleteObject(b1); DeleteDC(m1);
     }
     {
         HDC m2 = CreateCompatibleDC(dc);
         HBITMAP b2 = CreateCompatibleBitmap(dc, max(1, w - sw), ch);
         HGDIOBJ o2 = SelectObject(m2, b2);
-        SetBrushOrgEx(m2, -sw, -cap, nullptr);
-        g_grainPX = -sw; g_grainPY = -cap;              // the view's grain phase, as on screen
+        SetBrushOrgEx(m2, -sw, -(cap + tb), nullptr);
+        g_grainPX = -sw; g_grainPY = -(cap + tb);        // the view's grain phase, as on screen
         Draw(m2, w - sw, ch, 0);
         PaintViewBars(m2, w - sw, ch, 0);
         if (fd.open) {                                  // the floating Find bar, over its pixels
@@ -3735,17 +3962,26 @@ static int Shot(const wchar_t* out, int w, int h) {
             int bw = FdD(FdBarFix) + editW;
             FindDraw(m2, (w - sw) - FdD(16) - bw - FdD(FdPadX) + fd.dx, FdD(6) - FdD(FdPadT) + fd.dy);
         }
-        BitBlt(dc, sw, cap, w - sw, ch, m2, 0, 0, SRCCOPY);
+        BitBlt(dc, sw, cap + tb, w - sw, ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
     }
     if (!g.full && sh > 0) {                   // the footer strip
         HDC m3 = CreateCompatibleDC(dc);
         HBITMAP b3 = CreateCompatibleBitmap(dc, w, sh);
         HGDIOBJ o3 = SelectObject(m3, b3);
-        SetBrushOrgEx(m3, 0, -(cap + ch), nullptr);
+        SetBrushOrgEx(m3, 0, -(cap + tb + ch), nullptr);
         StatusDraw(m3, w, sh);
-        BitBlt(dc, 0, cap + ch, w, sh, m3, 0, 0, SRCCOPY);
+        BitBlt(dc, 0, cap + tb + ch, w, sh, m3, 0, 0, SRCCOPY);
         SelectObject(m3, o3); DeleteObject(b3); DeleteDC(m3);
+    }
+    if (!g.full && tb > 0) {                   // the toolbar strip under the caption
+        HDC m4 = CreateCompatibleDC(dc);
+        HBITMAP b4 = CreateCompatibleBitmap(dc, w, tb);
+        HGDIOBJ o4 = SelectObject(m4, b4);
+        SetBrushOrgEx(m4, 0, -cap, nullptr);
+        BarDraw(m4, w, tb);
+        BitBlt(dc, 0, cap, w, tb, m4, 0, 0, SRCCOPY);
+        SelectObject(m4, o4); DeleteObject(b4); DeleteDC(m4);
     }
     DrawCaptionBar(dc, w);
     GdiFlush();
@@ -3812,6 +4048,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     tc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     tc.lpszClassName = L"DocsyStatus";
     RegisterClassExW(&tc);
+
+    WNDCLASSEXW bc{ sizeof bc };                    // the toolbar row: the Find Text button
+    bc.lpfnWndProc = BarProc; bc.hInstance = hi;
+    bc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    bc.lpszClassName = L"DocsyBar";
+    RegisterClassExW(&bc);
 
     WNDCLASSEXW zc{ sizeof zc };                    // the zoom dropdown popup
     zc.style = CS_SAVEBITS | CS_DROPSHADOW;         // menu-like: saved bits + a soft shadow
