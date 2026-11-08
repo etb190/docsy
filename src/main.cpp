@@ -1948,30 +1948,46 @@ static void CardShadowStrip(BYTE* bits, int w, int h, int cw, int rad) {
     }
 }
 
-// The ring: even-odd between the outer RadCard arc and its radius-1 inner arc,
-// PaneBorderBrush #555555 - WPF's BorderThickness=1 band, drawn over the pages
-// so the clip region's corner steps land under it. Fills land on exact pixels
-// (integer coordinates), so the straight edges stay 1px crisp like FrameRgn's
-// were, and the four arcs are anti-aliased by the same path that drew them.
-static void CardRing(HDC dc, int x, int y, int w, int h, int rad) {
-    Gdiplus::Graphics gs(dc);
-    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::GraphicsPath* outer = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 0);
-    Gdiplus::GraphicsPath* inner = CardPath((float)x, (float)y, (float)w, (float)h, (float)rad, 1);
-    Gdiplus::GraphicsPath band;
-    band.AddPath(outer, FALSE);
-    band.AddPath(inner, FALSE);
-    band.SetFillMode(Gdiplus::FillModeAlternate);
-    Gdiplus::SolidBrush edge(Gdiplus::Color(255, 0x55, 0x55, 0x55));
-    gs.FillPath(&edge, &band);
-    delete outer;
-    delete inner;
+// The ring, painted into the backdrop by pixel: GDI+ rasterizes with pixel
+// CENTERS at integer coordinates, so a path edge at an integer lands exactly
+// mid-pixel - the 1px even-odd band between two integer-edged paths smeared
+// into two half-alpha columns (measured 60/67 where #555 should stand). The
+// band's per-pixel coverage from the two signed distances has no such bias:
+// a pixel is band where it sits inside the outer silhouette and outside the
+// inner one, clamped over the half-pixel the center sample cannot see. The
+// straights land full #555 on the outermost pixel, and the corner arcs get
+// analytic anti-aliasing that beats a bezier arc's rasterization.
+static void CardRingBake(BYTE* bits, int w, int h, int cw, int rad) {
+    float x1 = (float)cw - 0.5f, y1 = (float)h - 0.5f;    // outer silhouette: pixels [0, cw) x [0, h)
+    float ox0 = -0.5f, oy0 = -0.5f, orad = (float)rad;    //   in pixel-center space
+    float ix0 = 0.5f, iy0 = 0.5f, irad = (float)rad - 1;  // inner silhouette: pixels [1, cw-1)
+    int band2 = min(rad + 2, min(h, cw));
+    auto ring = [&](int x, int y) {
+        float f = -SdRoundRect((float)x, (float)y, ox0, oy0, x1, y1, orad);   // inside outer
+        float gq = SdRoundRect((float)x, (float)y, ix0, iy0, x1 - 1, y1 - 1, irad);  // outside inner
+        float a = min(f, gq) + 0.5f;
+        if (a <= 0) return;
+        if (a > 1) a = 1;
+        BYTE* p = bits + ((size_t)y * w + x) * 4;
+        int al = (int)(a * 255 + 0.5f), inv = 255 - al;
+        p[0] = (BYTE)((0x55 * al + p[0] * inv) >> 8);
+        p[1] = (BYTE)((0x55 * al + p[1] * inv) >> 8);
+        p[2] = (BYTE)((0x55 * al + p[2] * inv) >> 8);
+    };
+    for (int y = 0; y < band2; y++)                       // top strip, then bottom,
+        for (int x = 0; x < cw; x++) ring(x, y);
+    for (int y = max(band2, h - band2); y < h; y++)
+        for (int x = 0; x < cw; x++) ring(x, y);
+    for (int y = band2; y < max(band2, h - band2); y++) {
+        for (int x = 0; x < band2; x++) ring(x, y);       // left, then right - the straights'
+        for (int x = max(band2, cw - band2); x < cw; x++) ring(x, y);   // mid pixels early-out inside
+    }
 }
 
 // The backdrop DIB: field grain + PaneShadow strip + canvas interior (the
-// inner arc's fill, canvas grain phased to the window like every pane). The
-// ring is NOT baked - it draws after the pages each paint so a page blitting
-// through the clip region's stepped corners cannot nick it.
+// inner arc's fill, canvas grain phased to the window like every pane) + the
+// #555555 ring. The pages clip two pixels inside the card, so their region's
+// corner steps can never nick the baked ring.
 static HBITMAP g_bdBmp = nullptr;   // 32bpp top-down backdrop
 static HDC g_bdDC = nullptr;
 static int g_bdW = 0, g_bdH = 0;
@@ -1992,6 +2008,8 @@ static void CardBackdrop(HDC ref, int w, int h, int xoff) {
     int cw = min(w, CardW());
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
+    // xoff is 0 in both call paths (the live view and the CI shot); the shadow
+    // strip and the ring bake address the card from the DIB's left edge
     SetBrushOrgEx(bdc, g_grainPX, g_grainPY, nullptr);   // the window's grain phase,
     RECT fr{ 0, 0, w, h };                                // like every sibling pane
     FillRect(bdc, &fr, GrainBrush(1));
@@ -1999,7 +2017,11 @@ static void CardBackdrop(HDC ref, int w, int h, int xoff) {
         CardShadowStrip(bits, w, h, xoff + cw, rad);
         Gdiplus::Graphics gs(bdc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::GraphicsPath* inner = CardPath((float)xoff, 0.f, (float)cw, (float)h, (float)rad, 1);
+        // the canvas interior, half a pixel in: GDI+ centers pixels on integer
+        // coordinates, so the path edge must sit at the boundary between the
+        // ring's outermost pixel and the canvas's first one to fill it whole
+        Gdiplus::GraphicsPath* inner = CardPath((float)xoff + 0.5f, 0.5f, (float)cw - 1, (float)h - 1,
+                                                (float)rad - 1, 0);
         if (Gdiplus::TextureBrush* c = GrainTex(0))       // the canvas, phased like GDI's
             gs.FillPath(c, inner);
         else {
@@ -2007,6 +2029,7 @@ static void CardBackdrop(HDC ref, int w, int h, int xoff) {
             gs.FillPath(&cb, inner);
         }
         delete inner;
+        CardRingBake(bits, w, h, xoff + cw, rad);         // the #555 ring, exact per pixel
     }
     SelectObject(bdc, ob);
     DeleteDC(bdc);
@@ -2067,8 +2090,9 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     int cw = min(w, CardW());
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
-    HRGN clip = card ? CreateRoundRectRgn(xoff + 1, 1, xoff + cw - 1, h - 1, 2 * (rad - 1), 2 * (rad - 1)) : nullptr;
-    if (clip) SelectClipRgn(dc, clip);   // ContentClip: the card's inside, 1px inside its border
+    HRGN clip = card ? CreateRoundRectRgn(xoff + 2, 2, xoff + cw - 2, h - 2, 2 * (rad - 2), 2 * (rad - 2)) : nullptr;
+    if (clip) SelectClipRgn(dc, clip);   // ContentClip: two pixels inside the card, past the
+                                         // region's corner steps, so pages never nick the ring
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
@@ -2079,7 +2103,6 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-        if (card) CardRing(dc, xoff, 0, cw, h, rad);
         return;
     }
     HDC m = CreateCompatibleDC(dc);
@@ -2143,8 +2166,6 @@ static void Draw(HDC dc, int w, int h, int xoff) {
         DrawTextW(dc, g.hint.c_str(), -1, &hn, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
-    if (card) CardRing(dc, xoff, 0, cw, h, rad);   // the 1px PaneBorderBrush ring, arcs AA'd,
-                                                   // drawn last over the clip's corner steps
     g.lastVis = last;
     Evict(first, last);
 }
