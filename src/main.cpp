@@ -322,6 +322,7 @@ static int& PaneSy(bool b) { return DV(b).sy; }
 static int RW();                        // the rail's column width (0 in full screen)
 static void RailRepaint();              // the rail repaints when a lit state flips
 static void ToggleSplit();
+static void ToggleSide();               // defined with the main window (the Pages button)
 static void InfoOpen();
 static bool InfoIsOpen();
 
@@ -1087,7 +1088,7 @@ static void TtLines(TxtPage& pt) {
                 const TxtCell& c = pt.cells[i];
                 sT = min(sT, c.t); sB = max(sB, c.b); sL = min(sL, c.l); sR = max(sR, c.r);
             }
-            seg.d.top = sT; seg.bottom = sB; seg.l = sL; seg.r = sR;
+            seg.top = sT; seg.bottom = sB; seg.l = sL; seg.r = sR;
             if (sR - sL >= wideW) { flush(); ordered.push_back({ seg.idx, sT, sB }); }
             else pending.push_back(seg);
         }
@@ -2485,7 +2486,7 @@ static void PaintViewBars(HDC dc, int w, int h, int xoff) {
 // edge (pane A's parks against the divider, pane B's against the card's right
 // edge) and the horizontal one spans the pane - each pane scrolls on its own,
 // so each carries its own pair, same reserved-gutter look as PaintViewBars.
-static void PaintPaneBars(DocState& D, bool b, bool vhot, bool hhot) {
+static void PaintPaneBars(HDC dc, DocState& D, bool b, bool vhot, bool hhot) {
     if (!D.n) return;
     int gb = SBar(), r = (int)(3 * g.dpi);
     int x0 = PaneX0(b) + CardX(b), x1 = x0 + CardW(b);   // the bars ride the CARD's own span -
@@ -2561,13 +2562,13 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                         HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
                         Draw(g.bdc, wB, g.ch, xB, g.dB, rg);
                         DeleteObject(rg);
-                        PaintPaneBars(g.dB, true, g.dB.vHot || g.dB.vDrag, g.dB.hHot || g.dB.hDrag);
+                        PaintPaneBars(g.bdc, g.dB, true, g.dB.vHot || g.dB.vDrag, g.dB.hHot || g.dB.hDrag);
                     } else {
                         RECT pr{ 0, 0, wA, g.ch };
                         HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
                         Draw(g.bdc, wA, g.ch, 0, g.d, rg);
                         DeleteObject(rg);
-                        PaintPaneBars(g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
+                        PaintPaneBars(g.bdc, g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
                     }
                 }
                 RECT dl{ g.splitX, 2, g.splitX + 1, g.ch - 2 };   // the divider: one pixel of
@@ -4443,8 +4444,8 @@ static void ToggleSplit() {
         HMONITOR mon = MonitorFromWindow(g.main, MONITOR_DEFAULTTONEAREST);
         GetMonitorInfoW(mon, &mi);
         RECT rc{}; GetWindowRect(g.main, &rc);
-        int roomRight = max(0, mi.rcWork.right - rc.right);
-        int roomLeft = max(0, rc.left - mi.rcWork.left);
+        int roomRight = max(0, (int)(mi.rcWork.right - rc.right));
+        int roomLeft = max(0, (int)(rc.left - mi.rcWork.left));
         // maximized or snapped: the window stays where Windows put it and
         // splits what it already has (KillerPDF's evenSplit rule)
         if (IsZoomed(g.main)) { roomRight = 0; roomLeft = 0; }
@@ -4833,8 +4834,8 @@ static void InfoOpen() {
     // owner disabled while it shows - the modal the reference runs
     int w = IdW(), h = IdH();
     RECT mr{}; GetWindowRect(g.main, &mr);
-    int x = mr.left + max(0, ((mr.right - mr.left) - w) / 2);
-    int y = mr.top + max(0, ((mr.bottom - mr.top) - h) / 2);
+    int x = mr.left + max(0, (int)((mr.right - mr.left) - w) / 2);
+    int y = mr.top + max(0, (int)((mr.bottom - mr.top) - h) / 2);
     g_infoDlg = CreateWindowExW(0, L"DocsyInfoDlg", nullptr,
                                 WS_POPUP | WS_CLIPCHILDREN, x, y, w, h,
                                 g.main, nullptr, g.hinst, nullptr);
@@ -5032,14 +5033,14 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             MONITORINFO mi{ sizeof mi };
             if (!mon || !GetMonitorInfoW(mon, &mi)) break;
             p->rgrc[0].left   = max(orig.left,   mi.rcWork.left);
-            p->rgrc[0].top    = max(orig.d.top,    mi.rcWork.top);
+            p->rgrc[0].top    = max(orig.top,    mi.rcWork.top);
             p->rgrc[0].right  = min(orig.right,  mi.rcWork.right);
             p->rgrc[0].bottom = min(orig.bottom, mi.rcWork.bottom);
             return 0;
         }
         DefWindowProcW(h, m, wp, lp);          // the OS lays out its full frame...
         g.osFrame = p->rgrc[0].left - orig.left;
-        p->rgrc[0].top = orig.d.top;             // ...and only the caption is dropped
+        p->rgrc[0].top = orig.top;             // ...and only the caption is dropped
         return 0;
     }
     case WM_NCHITTEST: {
@@ -5285,13 +5286,13 @@ static int Shot(const wchar_t* out, int w, int h) {
                     HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
                     Draw(m2, wB, ch, xB, g.dB, rg);
                     DeleteObject(rg);
-                    PaintPaneBars(g.dB, true, g.dB.vHot || g.dB.vDrag, g.dB.hHot || g.dB.hDrag);
+                    PaintPaneBars(m2, g.dB, true, g.dB.vHot || g.dB.vDrag, g.dB.hHot || g.dB.hDrag);
                 } else {
                     RECT pr{ 0, 0, wA, ch };
                     HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
                     Draw(m2, wA, ch, 0, g.d, rg);
                     DeleteObject(rg);
-                    PaintPaneBars(g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
+                    PaintPaneBars(m2, g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
                 }
             }
             RECT dl{ g.splitX, 2, g.splitX + 1, ch - 2 };
