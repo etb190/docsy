@@ -26,6 +26,8 @@ jobs:
           python ci/make_sample.py sample.pdf
           $p = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview.png","$PWD\sample.pdf",'sel=0:0:999','find=Windows','zoom=35' -Wait -PassThru
           "exit code: $($p.ExitCode)" | Tee-Object shot.log
+          $d = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-default.png","$PWD\sample.pdf" -Wait -PassThru
+          "default exit code: $($d.ExitCode)" | Tee-Object -Append shot.log
           $q = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-empty.png",'-' -Wait -PassThru
           "empty exit code: $($q.ExitCode)" | Tee-Object -Append shot.log
           if (!(Test-Path preview.png)) { exit 1 }
@@ -36,7 +38,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-empty.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-default.png preview-empty.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log

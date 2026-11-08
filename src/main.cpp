@@ -15,10 +15,9 @@
 // at once. The page never pans under the mouse - the wheel and the keys own
 // scrolling, so a grab always means text selection, never a scroll.
 // Find Text is KillerPDF's search bar too (Shell/Search.cs + SearchController +
-// SearchService): Ctrl+F - or the caption bar's magnifier button, the toolbar
-// search button ported to the top chrome - floats one rounded grain bar over
-// the page area (top right, KillerPDF's fallback spot) with KillerPDF's
-// DropShadow melted onto the live view pixels; the row is the drag grip (two
+// SearchService): Ctrl+F - or the toolbar row's Find Text button - floats one
+// rounded grain bar over the page area (top right, KillerPDF's fallback spot)
+// with KillerPDF's DropShadow melted onto the live view pixels; the row is the drag grip (two
 // columns of three dots; grabbing it moves the bar anywhere on the card), the
 // magnifier glyph (E721), the query edit, the Aa / ab option toggles
 // (SelectionBg gradient + white when on), the "12 / 73" counter cell and
@@ -138,7 +137,8 @@ struct App {
     std::vector<int> rh;                // pixel height of each row (the tallest page in it)
     double zoom = 1.0, dpi = 1.0;       // zoom: pixels per DIP (x dpi scale)
     int vm = 0;                         // KillerPDF's view modes: 0 continuous, 1 single, 2 two-page, 3 grid
-    int fitMode = 0;                    // KillerPDF's FitMode: 0 FitWidth, 1 FitPage, 2 none (free zoom)
+    int fitMode = 2;                    // KillerPDF's FitMode: 0 FitWidth, 1 FitPage, 2 none - a
+                                        // document opens at 100% zoom, not fit-width
     bool inv = false;                   // DocInvert (the footer moon): page bitmaps blitted inverted
     bool full = false;                  // F11 full screen: chrome gone, window over the monitor
     WINDOWPLACEMENT fsPlace{};          // pre-fullscreen placement
@@ -155,7 +155,7 @@ struct App {
     bool resizing = false;              // splitter drag: defer refits and thumb rebuilds
     int rsX = 0, rsW0 = 0;
     int osFrame = 0;                    // OS side-border width from WM_NCCALCSIZE (the top resize grip)
-    int capHot = -1;                    // hovered caption button: 0 min, 1 max, 2 close, 3 find, -1 none
+    int capHot = -1;                    // hovered caption button: 0 min, 1 max, 2 close, -1 none
     bool capPressed = false;            // the maximize button held down (non-client, SnapLayouts-style)
     int tbHot = -1;                     // hovered toolbar button: 0 the Find Text button, -1 none
     bool tbPressed = false;             // the Find Text button held down (capture-held, WPF's IsPressed)
@@ -225,7 +225,6 @@ static WNDPROC g_feditDef = nullptr;               // the edit's stock proc (sub
 
 static HFONT g_uifont = nullptr, g_sidefont = nullptr;
 static HFONT g_glyphfont = nullptr, g_wordfont = nullptr;
-static HFONT g_capfind = nullptr;                   // the caption find button's 12px MDL2 glyph
 static HFONT g_tbglyph = nullptr, g_tbcap = nullptr; // toolbar: E721 at 20, the caption at Killer Sans 14
 
 static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi)); }
@@ -249,12 +248,12 @@ static HBRUSH GrainBrush(int which);   // defined with the grain tile below
 // white glyphs, MDL2 E921/E922/E923/E8BB at 10px.
 static int CAP() { return g.full ? 0 : (int)(32 * g.dpi); }   // full screen gives the row to the page
 
-// 0 min, 1 max, 2 close - right-aligned, and 3 find: KillerPDF's toolbar search
-// button (ToolbarLayout's "search" row, E721 + Ctrl:F) ends the top chrome in
-// the same spot, so the Find bar is reachable by mouse, not only by Ctrl+F.
-static void CapRects(RECT r[4], int w) {
+// 0 min, 1 max, 2 close - right-aligned, KillerPDF's whole caption row. The
+// search button lives one row down in the toolbar (BarDraw), so the caption
+// stays exactly KillerPDF's three window buttons and the app carries exactly
+// one search button.
+static void CapRects(RECT r[3], int w) {
     int bw = (int)(44 * g.dpi), bh = CAP();
-    r[3] = { w - 4 * bw, 0, w - 3 * bw, bh };
     r[2] = { w - bw, 0, w, bh };
     r[1] = { w - 2 * bw, 0, w - bw, bh };
     r[0] = { w - 3 * bw, 0, w - 2 * bw, bh };
@@ -262,8 +261,8 @@ static void CapRects(RECT r[4], int w) {
 
 static bool CapHit(POINT c, int w, int& which) {      // c: client coords
     if (c.y < 0 || c.y >= CAP()) return false;
-    RECT r[4]; CapRects(r, w);
-    for (int i = 0; i < 4; i++)
+    RECT r[3]; CapRects(r, w);
+    for (int i = 0; i < 3; i++)
         if (c.x >= r[i].left && c.x < r[i].right) { which = i; return true; }
     return false;
 }
@@ -358,7 +357,7 @@ static void DrawCaptionBar(HDC dc, int w) {
 
     // window buttons
     SelectObject(dc, CaptionFont(g_glyphfont, 10, false, L"Segoe MDL2 Assets"));
-    RECT r[4]; CapRects(r, w);
+    RECT r[3]; CapRects(r, w);
     const wchar_t* glyph[3] = { L"\uE921", IsZoomed(g.main) ? L"\uE923" : L"\uE922", L"\uE8BB" };
     for (int i = 0; i < 3; i++) {
         bool hot = g.capHot == i;
@@ -381,36 +380,6 @@ static void DrawCaptionBar(HDC dc, int w) {
         DrawTextW(dc, glyph[i], -1, &r[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     SelectObject(dc, of);
-
-    // the find tool button: KillerPDF's toolbar search button, ported to the
-    // top chrome - ToolbarButton's look, not the window buttons': a radius-3
-    // RowHoverBrush #404040 tile (SurfaceBrush #333 pressed is not tracked),
-    // the E721 magnifier at TextBrush #e0e0e0 that never recolors on hover,
-    // hand cursor, and KillerPDF's disabled opacity 0.4 while no file is open
-    // (0.4 of #e0e0e0 over #1c1c1c bakes to #6a6a6a).
-    {
-        bool hot = g.capHot == 3;
-        if (hot) {
-            Gdiplus::Graphics gs(dc);
-            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::GraphicsPath p;
-            float rr = (float)(3 * g.dpi);
-            float fx = (float)r[3].left + 7 * g.dpi, fy = (float)r[3].top + 4 * g.dpi;
-            float fw = (float)(r[3].right - r[3].left) - 14 * g.dpi, fh = (float)(r[3].bottom - r[3].top) - 8 * g.dpi;
-            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
-            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
-            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-            p.CloseFigure();
-            Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
-            gs.FillPath(&f, &p);
-        }
-        RECT fr{ r[3].left + (int)(7 * g.dpi), r[3].top + (int)(4 * g.dpi),
-                 r[3].right - (int)(7 * g.dpi), r[3].bottom - (int)(4 * g.dpi) };
-        SelectObject(dc, CaptionFont(g_capfind, 12, false, L"Segoe MDL2 Assets"));
-        SetTextColor(dc, g.n ? RGB(0xe0, 0xe0, 0xe0) : RGB(0x6a, 0x6a, 0x6a));
-        DrawTextW(dc, L"\uE721", -1, &fr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
 }
 
 // The band's own back buffer, the way the view and the sidebar already paint.
@@ -574,6 +543,10 @@ static void BarDraw(HDC dc, int w, int h) {
 static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
+    case WM_SIZE:                        // the Find Text button anchors to the right
+        InvalidateRect(h, nullptr, FALSE);   // edge: a resize only dirties the exposed
+        return 0;                            // strip, so the row must repaint whole or
+                                             // the button vanishes and old copies linger
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
@@ -1487,8 +1460,9 @@ static bool Open(const std::wstring& p) {
         if (sl != std::wstring::npos) nm = nm.substr(sl + 1);
         ClearCache();
         g.doc = d; g.n = (int)n; g.pw = w; g.ph = h; g.name = nm; g.path = full;
-        g.sx = g.sy = 0; g.fitMode = 0; g.cur = -1;   // -1 so LayoutMain's UpdateTitle sees the
-                                                      // change and syncs the sidebar highlight
+        g.sx = g.sy = 0; g.zoom = 1.0; g.fitMode = 2; g.cur = -1;   // every document opens
+                                                      // at 100%; -1 so LayoutMain's UpdateTitle
+                                                      // sees the change and syncs the sidebar highlight
         // fresh sidebar for the new document
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0; sd.cw = 0; sd.ch = 0;
@@ -1757,7 +1731,9 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == 2 && !SidePump()) KillTimer(h, 2);
         return 0;
-    case WM_SIZE: return 0;
+    case WM_SIZE:                        // the cards re-flow to the width: a full
+        InvalidateRect(h, nullptr, FALSE);   // repaint leaves no stale column behind
+        return 0;
     case WM_MOUSEWHEEL:
         SideScrollTo(sd.scroll - GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 240) / 120);
         return 0;
@@ -2233,6 +2209,9 @@ static void ViewWheel(WPARAM wp, LPARAM lp) {
 static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
+    case WM_SIZE:                        // the overlay bars anchor to the card's edges:
+        InvalidateRect(h, nullptr, FALSE);   // a resize must repaint the whole view
+        return 0;
     // WM_MOUSEACTIVATE keeps its default (MA_ACTIVATE): clicking the document
     // must raise and focus the window. MA_NOACTIVATE here was a leftover
     // anti-flash band-aid from the WS_CAPTION era - the style is gone, nothing
@@ -3067,6 +3046,9 @@ static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
+    case WM_SIZE:                        // the pager/zoom cluster anchors to the right
+        InvalidateRect(h, nullptr, FALSE);   // edge: a resize must repaint the whole strip
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
@@ -3148,10 +3130,10 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // MutedTextBrush, "12 / 73" or "No matches"), and ChevronUp / ChevronDown /
 // Cancel 26x24 MDL2 buttons - ToolbarButton's TextBrush glyph over the
 // RowHover fill, the close X the danger style's MutedText -> DangerRed glyph.
-// The top chrome carries the toolbar's search button (CapRects cell 3, E721 +
-// Ctrl+F, ToolbarButton's radius-3 RowHover hover) so the bar opens by mouse
-// too, and the whole family - caption, bar, sidebar, footer - shares one
-// grain, one border tone and one corner language.
+// The toolbar row above the view carries KillerPDF's search unit (BarDraw's
+// E721-over-"Find Text" button, ToolbarButton's radius-3 RowHover hover) so
+// the bar opens by mouse too, and the whole family - toolbar, bar, sidebar,
+// footer - shares one grain, one border tone and one corner language.
 // Logic is SearchController's: 250ms debounce, a two-character minimum,
 // Enter/Shift+Enter and F3/Shift+F3 step the cursor with wrap, Escape closes,
 // a toggle re-runs at once, results start at the first match on or after the
@@ -3790,10 +3772,17 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_SIZE:
         LayoutMain();
+        InvalidateCap(h);   // the buttons anchor to the right edge: a resize only
+                            // invalidates the exposed strip, so without this the
+                            // cluster vanishes until a hover repaints it
         DwmApply(h);   // corners square off while maximized, round again on restore
         return 0;
     case WM_PAINT: {   // the custom caption row; the children paint their own areas
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT clip;                                   // a shrinking window exposes strips
+        if (GetClipBox(dc, &clip) != NULLREGION) {   // the children vacated: fill them with
+            FillRect(dc, &clip, GrainBrush(1));      // the shared grain or the last frame
+        }                                            // lingers there (the ghost button)
         RECT r; GetClientRect(h, &r);
         PaintCaptionInto(dc, r.right);
         EndPaint(h, &ps);
@@ -3899,7 +3888,6 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (CapHit(c, r.right, which)) {
             if (which == 0) ShowWindow(h, SW_MINIMIZE);
             else if (which == 2) PostMessageW(h, WM_CLOSE, 0, 0);
-            else if (which == 3 && g.n) FindToggle();   // the toolbar search button
             return 0;
         }
         break;
@@ -3924,7 +3912,6 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_sidefont) { DeleteObject(g_sidefont); g_sidefont = nullptr; }
         if (g_glyphfont) { DeleteObject(g_glyphfont); g_glyphfont = nullptr; }
         if (g_wordfont) { DeleteObject(g_wordfont); g_wordfont = nullptr; }
-        if (g_capfind) { DeleteObject(g_capfind); g_capfind = nullptr; }
         if (g_tbglyph) { DeleteObject(g_tbglyph); g_tbglyph = nullptr; }
         if (g_tbcap) { DeleteObject(g_tbcap); g_tbcap = nullptr; }
         if (g_stfont) { DeleteObject(g_stfont); g_stfont = nullptr; }
