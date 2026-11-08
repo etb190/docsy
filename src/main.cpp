@@ -15,24 +15,28 @@
 // at once. The page never pans under the mouse - the wheel and the keys own
 // scrolling, so a grab always means text selection, never a scroll.
 // Find Text is KillerPDF's search bar too (Shell/Search.cs + SearchController +
-// SearchService): Ctrl+F floats one rounded grain bar over the page area (top
-// right, KillerPDF's fallback spot) with KillerPDF's DropShadow melted onto the
-// live view pixels; the row is the magnifier glyph (E721), the query edit, the
-// Aa / ab option toggles (accent fill when on), the "12 / 73" counter cell and
-// ChevronUp / ChevronDown / Cancel buttons with the red close hover. 250ms
-// debounce, a two-character minimum, Enter / Shift+Enter / F3 / Shift+F3 step,
-// Escape closes. The scan walks the document page by page on a pump timer (the
-// OCR text layer is built page-wise, so a 2,000-page book streams its matches
-// instead of blocking), matches fold case unless Match Case, Whole Word rejects
-// letter/digit/underscore neighbours, and every match paints one rounded box per
-// touched word - dim orange for the field, bright with the accent ring for the
-// cursor match - and navigation lands on the first match at or after the page
-// you are on.
+// SearchService): Ctrl+F - or the caption bar's magnifier button, the toolbar
+// search button ported to the top chrome - floats one rounded grain bar over
+// the page area (top right, KillerPDF's fallback spot) with KillerPDF's
+// DropShadow melted onto the live view pixels; the row is the drag grip (two
+// columns of three dots; grabbing it moves the bar anywhere on the card), the
+// magnifier glyph (E721), the query edit, the Aa / ab option toggles
+// (SelectionBg gradient + white when on), the "12 / 73" counter cell and
+// ChevronUp / ChevronDown / Cancel buttons with the danger red close glyph.
+// 250ms debounce, a two-character minimum, Enter / Shift+Enter / F3 / Shift+F3
+// step, Escape closes. The scan walks the document page by page on a pump timer
+// (the OCR text layer is built page-wise, so a 2,000-page book streams its
+// matches instead of blocking), matches fold case unless Match Case, Whole Word
+// rejects letter/digit/underscore neighbours, and every match paints one rounded
+// box per touched word - dim orange for the field, bright with the accent ring
+// for the cursor match - and navigation lands on the first match at or after
+// the page you are on.
 // The frame is KillerPDF's too: the real OS side borders stay, but the window
 // is created without WS_CAPTION (and WM_NCCALCSIZE gives the top row to the
 // client), so the native caption can never appear - not even on the first
-// paint. A custom 32px title bar (grain, wordmark, 44x32 min/max/close
-// buttons with the green/red hovers, the Win11 snap flyout on the maximize
+// paint. A custom 32px title bar (grain, wordmark, the find tool button and
+// 44x32 min/max/close buttons - the find one KillerPDF's ToolbarButton hover,
+// the others the green/red hovers, the Win11 snap flyout on the maximize
 // button and DWM rounded corners) owns the top row; nothing read from the
 // document (no file name) is drawn anywhere on it.
 // The bottom row is KillerPDF's footer status bar, one full-width child painted
@@ -150,7 +154,7 @@ struct App {
     bool resizing = false;              // splitter drag: defer refits and thumb rebuilds
     int rsX = 0, rsW0 = 0;
     int osFrame = 0;                    // OS side-border width from WM_NCCALCSIZE (the top resize grip)
-    int capHot = -1;                    // hovered caption button: 0 min, 1 max, 2 close, -1 none
+    int capHot = -1;                    // hovered caption button: 0 min, 1 max, 2 close, 3 find, -1 none
     bool capPressed = false;            // the maximize button held down (non-client, SnapLayouts-style)
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
@@ -208,6 +212,9 @@ struct Find {
     unsigned gen = 0;                 // bumped on every cancel; a stale pump quits
     bool done = true;                 // the whole document has been scanned
     int hot = -1;                     // hovered bar button
+    int dx = 0, dy = 0;               // drag offset from the default top-right spot
+    bool drag = false;                // the grip is dragging the bar
+    int dragX = 0, dragY = 0;         // the drag's last pointer position
 };
 static Find fd;
 static HWND g_find = nullptr, g_fedit = nullptr;
@@ -215,6 +222,7 @@ static WNDPROC g_feditDef = nullptr;               // the edit's stock proc (sub
 
 static HFONT g_uifont = nullptr, g_sidefont = nullptr;
 static HFONT g_glyphfont = nullptr, g_wordfont = nullptr;
+static HFONT g_capfind = nullptr;                   // the caption find button's 12px MDL2 glyph
 
 static int PW(int i) { return max(1, (int)std::lround(g.pw[i] * g.zoom * g.dpi)); }
 static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi)); }
@@ -237,8 +245,12 @@ static HBRUSH GrainBrush(int which);   // defined with the grain tile below
 // white glyphs, MDL2 E921/E922/E923/E8BB at 10px.
 static int CAP() { return g.full ? 0 : (int)(32 * g.dpi); }   // full screen gives the row to the page
 
-static void CapRects(RECT r[3], int w) {              // 0 min, 1 max, 2 close - right-aligned
+// 0 min, 1 max, 2 close - right-aligned, and 3 find: KillerPDF's toolbar search
+// button (ToolbarLayout's "search" row, E721 + Ctrl:F) ends the top chrome in
+// the same spot, so the Find bar is reachable by mouse, not only by Ctrl+F.
+static void CapRects(RECT r[4], int w) {
     int bw = (int)(44 * g.dpi), bh = CAP();
+    r[3] = { w - 4 * bw, 0, w - 3 * bw, bh };
     r[2] = { w - bw, 0, w, bh };
     r[1] = { w - 2 * bw, 0, w - bw, bh };
     r[0] = { w - 3 * bw, 0, w - 2 * bw, bh };
@@ -246,8 +258,8 @@ static void CapRects(RECT r[3], int w) {              // 0 min, 1 max, 2 close -
 
 static bool CapHit(POINT c, int w, int& which) {      // c: client coords
     if (c.y < 0 || c.y >= CAP()) return false;
-    RECT r[3]; CapRects(r, w);
-    for (int i = 0; i < 3; i++)
+    RECT r[4]; CapRects(r, w);
+    for (int i = 0; i < 4; i++)
         if (c.x >= r[i].left && c.x < r[i].right) { which = i; return true; }
     return false;
 }
@@ -342,7 +354,7 @@ static void DrawCaptionBar(HDC dc, int w) {
 
     // window buttons
     SelectObject(dc, CaptionFont(g_glyphfont, 10, false, L"Segoe MDL2 Assets"));
-    RECT r[3]; CapRects(r, w);
+    RECT r[4]; CapRects(r, w);
     const wchar_t* glyph[3] = { L"\uE921", IsZoomed(g.main) ? L"\uE923" : L"\uE922", L"\uE8BB" };
     for (int i = 0; i < 3; i++) {
         bool hot = g.capHot == i;
@@ -365,6 +377,36 @@ static void DrawCaptionBar(HDC dc, int w) {
         DrawTextW(dc, glyph[i], -1, &r[i], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     SelectObject(dc, of);
+
+    // the find tool button: KillerPDF's toolbar search button, ported to the
+    // top chrome - ToolbarButton's look, not the window buttons': a radius-3
+    // RowHoverBrush #404040 tile (SurfaceBrush #333 pressed is not tracked),
+    // the E721 magnifier at TextBrush #e0e0e0 that never recolors on hover,
+    // hand cursor, and KillerPDF's disabled opacity 0.4 while no file is open
+    // (0.4 of #e0e0e0 over #1c1c1c bakes to #6a6a6a).
+    {
+        bool hot = g.capHot == 3;
+        if (hot) {
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath p;
+            float rr = (float)(3 * g.dpi);
+            float fx = (float)r[3].left + 7 * g.dpi, fy = (float)r[3].top + 4 * g.dpi;
+            float fw = (float)(r[3].right - r[3].left) - 14 * g.dpi, fh = (float)(r[3].bottom - r[3].top) - 8 * g.dpi;
+            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
+            gs.FillPath(&f, &p);
+        }
+        RECT fr{ r[3].left + (int)(7 * g.dpi), r[3].top + (int)(4 * g.dpi),
+                 r[3].right - (int)(7 * g.dpi), r[3].bottom - (int)(4 * g.dpi) };
+        SelectObject(dc, CaptionFont(g_capfind, 12, false, L"Segoe MDL2 Assets"));
+        SetTextColor(dc, g.n ? RGB(0xe0, 0xe0, 0xe0) : RGB(0x6a, 0x6a, 0x6a));
+        DrawTextW(dc, L"\uE721", -1, &fr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 }
 
 // The band's own back buffer, the way the view and the sidebar already paint.
@@ -2782,12 +2824,20 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // melted onto the view's own pixels: the bar's window copies the view's back
 // buffer behind itself first, so the shadow lands on the live page content and
 // the margins disappear into it. The row is KillerPDF's find row minus the
-// replace gear (Windows.Data.Pdf cannot edit text): magnifier glyph E721, the
-// query edit (26px tall in a radius-3 CardBorderBrush #404040 box on
-// BackgroundBrush #1c1c1c, UiFont 13), the Aa / ab toggles (accent fill when
-// on, SelectionFg text), the 96px counter cell (FontSize 11, MutedTextBrush,
-// "12 / 73" or "No matches"), and ChevronUp / ChevronDown / Cancel 26x24 MDL2
-// buttons with RowHoverBrush hovers and the danger red on close.
+// replace gear (Windows.Data.Pdf cannot edit text): the drag grip (two columns
+// of three 3px dots, MutedTextBrush - grabbing it moves the bar anywhere on the
+// card, the offsets clamped and kept until the document changes), the magnifier
+// glyph E721 (MutedTextBrush), the query edit (26px tall in a radius-3
+// CardBorderBrush #4a4a4a box on BackgroundBrush #1c1c1c, UiFont 13), the
+// Aa / ab toggles (SelectionBg's green gradient + SelectionFg white when on,
+// RowHover #404040 + TextBrush on hover), the 96px counter cell (FontSize 11,
+// MutedTextBrush, "12 / 73" or "No matches"), and ChevronUp / ChevronDown /
+// Cancel 26x24 MDL2 buttons - ToolbarButton's TextBrush glyph over the
+// RowHover fill, the close X the danger style's MutedText -> DangerRed glyph.
+// The top chrome carries the toolbar's search button (CapRects cell 3, E721 +
+// Ctrl+F, ToolbarButton's radius-3 RowHover hover) so the bar opens by mouse
+// too, and the whole family - caption, bar, sidebar, footer - shares one
+// grain, one border tone and one corner language.
 // Logic is SearchController's: 250ms debounce, a two-character minimum,
 // Enter/Shift+Enter and F3/Shift+F3 step the cursor with wrap, Escape closes,
 // a toggle re-runs at once, results start at the first match on or after the
@@ -2799,6 +2849,7 @@ static int FdD(int v) { return (int)std::lround(v * g.dpi); }
 static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static void FindPlace();
+static void FindClampDrag();
 
 static HFONT g_fntEdit = nullptr, g_fntOpt = nullptr, g_fntAb = nullptr,
               g_fntStat = nullptr, g_fntGlyph = nullptr;
@@ -2820,29 +2871,33 @@ static HFONT FdFontGlyph() { return CaptionFont(g_fntGlyph, 12, false, L"Segoe M
 // whole bar always fits the card, FitSearchBox-style.
 static const int FdPadX = 24, FdPadT = 14, FdPadB = 28;   // window margins for the shadow
 static const int FdBarH = 36, FdEditH = 26, FdBtnW = 26, FdBtnH = 24, FdStatW = 96;
-// left border+pad 1+4 | icon 12+6 | Aa | ab | status 2+96+2 | prev | next | close | pad+border 4+1
-static const int FdBarFix = 1 + 4 + 12 + 6 + FdBtnW * 2 + 2 + FdStatW + 2 + FdBtnW * 3 + 4 + 1;
+static const int FdGripW = 20;   // the drag grip: margin 2 + two 3px dot columns + margin 6
+// left border+pad 1+4 | grip 20 | icon 12+6 | Aa | ab | status 2+96+2 | prev | next | close | pad+border 4+1
+static const int FdBarFix = 1 + 4 + FdGripW + 12 + 6 + FdBtnW * 2 + 2 + FdStatW + 2 + FdBtnW * 3 + 4 + 1;
 
-enum { FB_AA, FB_AB, FB_PREV, FB_NEXT, FB_CLOSE, FB_COUNT };
+enum { FB_GRIP, FB_AA, FB_AB, FB_PREV, FB_NEXT, FB_CLOSE, FB_COUNT };
 
 static int FdEditW(int vw) {
     return std::clamp(vw - FdD(FdBarFix) - FdD(16) - 2 * FdD(FdPadX), FdD(60), FdD(200));
 }
 
 struct FdRects {
-    RECT bar, icon, edit, status, btn[FB_COUNT];
+    RECT bar, grip, icon, edit, status, btn[FB_COUNT];
 };
 
 static void FdLayout(int editW, FdRects& R) {
     int bw = FdD(FdBarFix) + editW;
     R.bar = { FdD(FdPadX), FdD(FdPadT), FdD(FdPadX) + bw, FdD(FdPadT) + FdD(FdBarH) };
+    R.btn[FB_GRIP] = { 0, 0, 0, 0 };                          // the grip is its own cell
     int top = R.bar.top + FdD(1) + FdD(4);                    // inside border + padding
     int x = R.bar.left + FdD(1) + FdD(4);
+    R.grip = { x, top, x + FdD(FdGripW), top + FdD(FdEditH) };   // KillerPDF's drag grip cell
+    x += FdD(FdGripW);
     R.icon = { x, top, x + FdD(12), top + FdD(FdEditH) };
     x += FdD(12) + FdD(6);
     R.edit = { x, top, x + editW, top + FdD(FdEditH) };
     x += editW;
-    for (int i = 0; i < FB_COUNT; i++) {
+    for (int i = FB_AA; i < FB_COUNT; i++) {
         if (i == FB_PREV) {                                   // the status cell sits before prev
             R.status = { x + FdD(2), R.bar.top + 1, x + FdD(2) + FdD(FdStatW), R.bar.bottom - 1 };
             x += FdD(2) + FdD(FdStatW) + FdD(2);
@@ -2854,7 +2909,9 @@ static void FdLayout(int editW, FdRects& R) {
 
 static int FdHit(POINT p) {
     FdRects R; FdLayout(FdEditW(CardW()), R);
-    for (int i = 0; i < FB_COUNT; i++)
+    if (p.x >= R.grip.left && p.x < R.grip.right && p.y >= R.grip.top && p.y < R.grip.bottom)
+        return FB_GRIP;
+    for (int i = FB_AA; i < FB_COUNT; i++)
         if (p.x >= R.btn[i].left && p.x < R.btn[i].right && p.y >= R.btn[i].top && p.y < R.btn[i].bottom)
             return i;
     return -1;
@@ -3073,13 +3130,13 @@ static void FindDraw(HDC dc, int ox, int oy) {
     // the window's view offset in the CI shot - the shadow and panel above
     // already add (ox,oy) themselves
     if (ox || oy) {
-        RECT* fr[] = { &R.bar, &R.icon, &R.edit, &R.status,
-                       &R.btn[0], &R.btn[1], &R.btn[2], &R.btn[3], &R.btn[4] };
+        RECT* fr[] = { &R.bar, &R.grip, &R.icon, &R.edit, &R.status,
+                       &R.btn[FB_AA], &R.btn[FB_AB], &R.btn[FB_PREV], &R.btn[FB_NEXT], &R.btn[FB_CLOSE] };
         for (RECT* rp : fr) { rp->left += ox; rp->top += oy; rp->right += ox; rp->bottom += oy; }
     }
     SetBkMode(dc, TRANSPARENT);
     // the query edit: a radius-3 box on BackgroundBrush #1c1c1c with the
-    // CardBorderBrush #404040 ring; the real edit control covers the interior,
+    // CardBorderBrush #4a4a4a ring; the real edit control covers the interior,
     // and with no control (the CI shot) the query text is drawn in its place
     {
         int x = R.edit.left - 1, y = R.edit.top - 1;
@@ -3094,7 +3151,7 @@ static void FindDraw(HDC dc, int ox, int oy) {
         band.AddPath(outer, FALSE);
         band.AddPath(inner, FALSE);
         band.SetFillMode(Gdiplus::FillModeAlternate);
-        Gdiplus::SolidBrush ring(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+        Gdiplus::SolidBrush ring(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a));   // CardBorderBrush (Dark)
         gs.FillPath(&ring, &band);
         delete outer;
         delete inner;
@@ -3105,12 +3162,28 @@ static void FindDraw(HDC dc, int ox, int oy) {
             DrawTextW(dc, fd.query.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     }
+    // the drag grip: KillerPDF's two columns of three 3px dots, MutedTextBrush,
+    // the affordance the sidebar splitter and the annotate bars share - grabbing
+    // it moves the whole bar (EnablePanelDrag)
+    {
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::SolidBrush dot(Gdiplus::Color(255, 0xa3, 0xa3, 0xa3));   // MutedTextBrush
+        float gx = (float)R.grip.left + (float)std::lround(3.5 * g.dpi);  // the 1.5px dot
+        float gy = (float)R.grip.top + (float)std::lround(5.5 * g.dpi);   // margins inside
+        for (int c = 0; c < 2; c++)
+            for (int ri = 0; ri < 3; ri++)
+                gs.FillEllipse(&dot, gx + c * FdD(6), gy + ri * FdD(6),
+                               (float)std::lround(3 * g.dpi), (float)std::lround(3 * g.dpi));
+    }
     // the magnifier glyph
     SelectObject(dc, FdFontGlyph());
-    SetTextColor(dc, RGB(0x8a, 0x8a, 0x8a));
+    SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));   // MutedTextBrush
     DrawTextW(dc, L"\uE721", -1, &R.icon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    // the option toggles: accent fill + dark text when on, RowHover on hover
-    for (int b = 0; b <= 1; b++) {
+    // the option toggles: KillerPDF's UpdateSearchOptionButtons - the on state
+    // fills with SelectionBg's green gradient and SelectionFg white text; the
+    // off state is ToolbarButton's RowHover fill with the TextBrush glyph
+    for (int b = FB_AA; b <= FB_AB; b++) {
         bool on = b == FB_AA ? fd.matchCase : fd.wholeWord;
         bool hot = fd.hot == b;
         if (on || hot) {
@@ -3125,13 +3198,20 @@ static void FindDraw(HDC dc, int ox, int oy) {
             p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
             p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
             p.CloseFigure();
-            Gdiplus::SolidBrush f(on ? Gdiplus::Color(255, 0x22, 0xbb, 0x56)
-                                     : Gdiplus::Color(255, 0x40, 0x40, 0x40));
-            gs.FillPath(&f, &p);
+            if (on) {
+                Gdiplus::Rect gr(fx, fy, fw, fh);   // SelectionBg: #387552 -> #104e2b
+                Gdiplus::LinearGradientBrush gb(gr, Gdiplus::Color(255, 0x38, 0x75, 0x52),
+                                                   Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
+                gs.FillPath(&gb, &p);
+            } else {
+                Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
+                gs.FillPath(&f, &p);
+            }
         }
         RECT r = R.btn[b];
         SelectObject(dc, b == FB_AA ? FdFontOpt() : FdFontAb());
-        SetTextColor(dc, on ? RGB(0x0d, 0x0d, 0x0d) : RGB(0xc8, 0xc8, 0xc8));
+        SetTextColor(dc, on ? RGB(0xff, 0xff, 0xff)      // SelectionFg
+                            : RGB(0xe0, 0xe0, 0xe0));    // TextBrush
         DrawTextW(dc, b == FB_AA ? L"Aa" : L"ab", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     // the counter cell: KillerPDF's compact "12 / 73" (current / total), or
@@ -3144,45 +3224,34 @@ static void FindDraw(HDC dc, int ox, int oy) {
     if (!st.empty()) {
         RECT r = R.status;
         SelectObject(dc, FdFontStat());
-        SetTextColor(dc, RGB(0x8a, 0x8a, 0x8a));
+        SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));   // MutedTextBrush
         DrawTextW(dc, st.c_str(), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
-    // the nav buttons: ChevronUp / ChevronDown / Cancel, red close hover
+    // the nav buttons: ChevronUp / ChevronDown / Cancel. KillerPDF's ToolbarButton
+    // keeps the TextBrush glyph over a RowHover fill; the close X is the shared
+    // danger style - no fill at all, the MutedTextBrush glyph turns DangerRed.
     const wchar_t* glyph[3] = { L"\uE70E", L"\uE70D", L"\uE711" };
     for (int b = FB_PREV; b <= FB_CLOSE; b++) {
         bool hot = fd.hot == b;
-        if (hot) {
+        if (hot && b != FB_CLOSE) {
             RECT r = R.btn[b];
-            if (b == FB_CLOSE) {
-                Gdiplus::Graphics gs(dc);
-                gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                Gdiplus::GraphicsPath p;
-                float rr = (float)FdD(3);
-                float fx = (float)r.left, fy = (float)r.top, fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
-                p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
-                p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
-                p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-                p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-                p.CloseFigure();
-                Gdiplus::SolidBrush f(Gdiplus::Color(255, 0xE0, 0x44, 0x44));
-                gs.FillPath(&f, &p);
-            } else {
-                Gdiplus::Graphics gs(dc);
-                gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                Gdiplus::GraphicsPath p;
-                float rr = (float)FdD(3);
-                float fx = (float)r.left, fy = (float)r.top, fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
-                p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
-                p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
-                p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-                p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-                p.CloseFigure();
-                Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));
-                gs.FillPath(&f, &p);
-            }
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath p;
+            float rr = (float)FdD(3);
+            float fx = (float)r.left, fy = (float)r.top, fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
+            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
+            gs.FillPath(&f, &p);
         }
         SelectObject(dc, FdFontGlyph());
-        SetTextColor(dc, hot ? RGB(255, 255, 255) : RGB(0xc8, 0xc8, 0xc8));
+        SetTextColor(dc, b == FB_CLOSE ? (hot ? RGB(0xE0, 0x44, 0x44)   // DangerRed
+                                              : RGB(0xa3, 0xa3, 0xa3))   // MutedTextBrush
+                                       : RGB(0xe0, 0xe0, 0xe0));         // TextBrush
         DrawTextW(dc, glyph[b - FB_PREV], -1, &R.btn[b], DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
@@ -3243,6 +3312,15 @@ static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (fd.drag) {                           // the grip is moving the bar
+            fd.dx += p.x - fd.dragX;
+            fd.dy += p.y - fd.dragY;
+            fd.dragX = p.x; fd.dragY = p.y;
+            FindClampDrag();
+            FindPlace();                         // moves the child; the view repaints around it
+            InvalidateRect(h, nullptr, FALSE);   // the bar repaints over the fresh backdrop
+            return 0;
+        }
         int ht = FdHit(p);
         if (ht != fd.hot) {                            // repaints only on a hover flip
             fd.hot = ht;
@@ -3255,7 +3333,13 @@ static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (fd.hot != -1) { fd.hot = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONDOWN: {
-        int ht = FdHit(POINT{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) });
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int ht = FdHit(p);
+        if (ht == FB_GRIP) {                     // grab the grip: the bar follows the pointer
+            fd.drag = true; fd.dragX = p.x; fd.dragY = p.y;
+            SetCapture(h);
+            return 0;
+        }
         if (ht == FB_CLOSE) FindClose();
         else if (ht == FB_PREV) FindStep(-1);
         else if (ht == FB_NEXT) FindStep(1);
@@ -3263,10 +3347,18 @@ static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         else if (ht == FB_AB) FindOption(false);
         return 0;
     }
+    case WM_LBUTTONUP:
+        if (fd.drag) { fd.drag = false; ReleaseCapture(); }
+        return 0;
+    case WM_CAPTURECHANGED:
+        fd.drag = false;
+        return 0;
     case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;   // the bar floats; the wheel still scrolls
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) {                  // the bar is buttons and a text box: arrow
-            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        if (LOWORD(lp) == HTCLIENT) {                  // the grip takes the hand, the rest an arrow
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            SetCursor(fd.drag || FdHit(p) == FB_GRIP ? LoadCursorW(nullptr, IDC_HAND)
+                                                     : LoadCursorW(nullptr, IDC_ARROW));
             return TRUE;
         }
         break;
@@ -3275,7 +3367,8 @@ static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 // The edit's keys: Enter steps, Shift+Enter steps back, Escape closes, Ctrl+F
-// closes (the toggle), everything else edits - KillerPDF's SearchBox_KeyDown.
+// closes (the toggle), Alt+C / Alt+W flip the option toggles from the box -
+// KillerPDF's SearchBox_KeyDown + TrySearchOptionKey; everything else edits.
 static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_KEYDOWN) {
         bool shift = GetKeyState(VK_SHIFT) < 0, ctrl = GetKeyState(VK_CONTROL) < 0;
@@ -3283,23 +3376,40 @@ static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (wp == VK_ESCAPE) { FindClose(); return 0; }
         if (wp == VK_F3) { FindStep(shift ? -1 : 1); return 0; }   // F3 steps from the box too
         if (wp == 'F' && ctrl) { FindClose(); return 0; }
+    } else if (m == WM_SYSKEYDOWN) {                   // the Alt+ chords land here
+        if (wp == 'C') { FindOption(true); return 0; }     // Match Case
+        if (wp == 'W') { FindOption(false); return 0; }    // Whole Word
     }
     return CallWindowProcW(g_feditDef, h, m, wp, lp);
 }
 
 // Size and spot the bar: the edit shrinks to fit (60..200), the bar's right
-// edge rides 16px in from the view's right, top 6px under the view's top.
+// edge rides 16px in from the view's right, top 6px under the view's top -
+// plus the grip's drag offset, clamped so the visual bar stays on the card.
 static void FindPlace() {
     if (!g_find || !g_fedit || !g.view) return;
     int vw = CardW();
     if (vw <= 0) return;
+    FindClampDrag();                         // a resized card re-clamps the drag offset
     int editW = FdEditW(vw);
     int bw = FdD(FdBarFix) + editW, bh = FdD(FdBarH);
-    MoveWindow(g_find, vw - FdD(16) - bw - FdD(FdPadX), FdD(6) - FdD(FdPadT),
+    MoveWindow(g_find, vw - FdD(16) - bw - FdD(FdPadX) + fd.dx, FdD(6) - FdD(FdPadT) + fd.dy,
                bw + 2 * FdD(FdPadX), bh + FdD(FdPadT) + FdD(FdPadB), TRUE);
     FdRects R; FdLayout(editW, R);
     MoveWindow(g_fedit, R.edit.left, R.edit.top,
                R.edit.right - R.edit.left, R.edit.bottom - R.edit.top, FALSE);
+}
+
+// The grip's drag bounds: the bar's visual rect (window minus the shadow
+// margins) must stay fully on the card. A bar wider than the card collapses
+// the range instead of letting std::clamp see lo > hi.
+static void FindClampDrag() {
+    int vw = CardW();
+    int bw = FdD(FdBarFix) + FdEditW(vw), bh = FdD(FdBarH);
+    int loX = bw + FdD(16) - vw, hiX = FdD(16);
+    fd.dx = std::clamp(fd.dx, min(loX, hiX), max(loX, hiX));
+    int loY = -FdD(6), hiY = max(-FdD(6), g.ch - FdD(6) - bh);
+    fd.dy = std::clamp(fd.dy, min(loY, hiY), max(loY, hiY));
 }
 
 // ---------------- main window ----------------
@@ -3470,6 +3580,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (CapHit(c, r.right, which)) {
             if (which == 0) ShowWindow(h, SW_MINIMIZE);
             else if (which == 2) PostMessageW(h, WM_CLOSE, 0, 0);
+            else if (which == 3 && g.n) FindToggle();   // the toolbar search button
             return 0;
         }
         break;
@@ -3494,6 +3605,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_sidefont) { DeleteObject(g_sidefont); g_sidefont = nullptr; }
         if (g_glyphfont) { DeleteObject(g_glyphfont); g_glyphfont = nullptr; }
         if (g_wordfont) { DeleteObject(g_wordfont); g_wordfont = nullptr; }
+        if (g_capfind) { DeleteObject(g_capfind); g_capfind = nullptr; }
         if (g_stfont) { DeleteObject(g_stfont); g_stfont = nullptr; }
         if (g_stfontL) { DeleteObject(g_stfontL); g_stfontL = nullptr; }
         if (g_stfontF) { DeleteObject(g_stfontF); g_stfontF = nullptr; }
@@ -3621,7 +3733,7 @@ static int Shot(const wchar_t* out, int w, int h) {
         if (fd.open) {                                  // the floating Find bar, over its pixels
             int editW = FdEditW(w - sw);
             int bw = FdD(FdBarFix) + editW;
-            FindDraw(m2, (w - sw) - FdD(16) - bw - FdD(FdPadX), FdD(6) - FdD(FdPadT));
+            FindDraw(m2, (w - sw) - FdD(16) - bw - FdD(FdPadX) + fd.dx, FdD(6) - FdD(FdPadT) + fd.dy);
         }
         BitBlt(dc, sw, cap, w - sw, ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
