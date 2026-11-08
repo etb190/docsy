@@ -210,11 +210,17 @@ struct Find {
     bool open = false;                // the bar is on screen
     std::wstring query;               // the box's text
     bool matchCase = false, wholeWord = false;
-    std::vector<FHit> hits;           // page asc, then reading order per page
+    std::vector<FHit> hits;           // scan order: from the anchor page forward, then
+                                      // wrapping to the pages before it
     int cur = -1;                     // the emphasized match (cursor)
-    int scan = 0;                     // next page the pump reads
+    int scan = 0;                     // how many pages of this run have been read
+    int anchor = 0;                   // the page the run starts at - the page you are
+                                      // on first, so the counter's numbers land in one
+                                      // OCR tick instead of a whole-book crawl
     unsigned gen = 0;                 // bumped on every cancel; a stale pump quits
     bool done = true;                 // the whole document has been scanned
+    bool pending = false;             // a query sits in the debounce: no verdict yet, so
+                                      // the cell shows nothing instead of a false "No matches"
     int hot = -1;                     // hovered bar button
     int dx = 0, dy = 0;               // drag offset from the default top-right spot
     bool drag = false;                // the grip is dragging the bar
@@ -2018,9 +2024,14 @@ static void CardBackdrop(HDC ref, int w, int h, int xoff) {
 // original's and stays consistent across font sizes.
 static void FindPaintPage(HDC dc, int page, int px, int py) {
     if (!fd.open || fd.hits.empty()) return;
-    auto it = std::lower_bound(fd.hits.begin(), fd.hits.end(), page,
-                               [](const FHit& h, int p) { return h.page < p; });
-    if (it == fd.hits.end() || it->page != page) return;
+    // The hits read in scan order - your page first, then forward, then the
+    // pages before it - so the list is a rotation, not page-ascending. Every
+    // page's matches are still one contiguous run (the pump scans a page
+    // whole), so a linear walk finds it; lower_bound's sorted-list assumption
+    // would miss the wrapped half.
+    size_t i = 0, n = fd.hits.size();
+    while (i < n && fd.hits[i].page != page) i++;
+    if (i >= n) return;
     float k = (float)(g.zoom * g.dpi);
     Gdiplus::Graphics gs(dc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -2028,9 +2039,9 @@ static void FindPaintPage(HDC dc, int page, int px, int py) {
     Gdiplus::SolidBrush hot(Gdiplus::Color(150, 255, 190, 0));
     Gdiplus::Pen dimPen(Gdiplus::Color(140, 255, 165, 0), 1.0f * (float)g.dpi);
     Gdiplus::Pen hotPen(Gdiplus::Color(255, 0x22, 0xbb, 0x56), (float)(3.5 * g.dpi));
-    for (; it != fd.hits.end() && it->page == page; ++it) {
-        bool cur = (int)(it - fd.hits.begin()) == fd.cur;
-        const FRect& r = it->r;
+    for (; i < n && fd.hits[i].page == page; ++i) {
+        bool cur = (int)i == fd.cur;
+        const FRect& r = fd.hits[i].r;
         float pad = min(r.w, r.h) * 0.30f;
         float x = px + (r.x - pad) * k, y = py + (r.y - pad) * k;
         float w = max((r.w + 2 * pad) * k, 4.0f), h = max((r.h + 2 * pad) * k, 4.0f);
@@ -3148,7 +3159,7 @@ static int FdD(int v) { return (int)std::lround(v * g.dpi); }
 
 static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
-static void FindPlace();
+static void FindPlace(bool wake = false);   // wake=true: the live drag paints its own trail
 static void FindClampDrag();
 
 static HFONT g_fntEdit = nullptr, g_fntOpt = nullptr, g_fntAb = nullptr,
@@ -3167,13 +3178,15 @@ static HFONT FdFontStat()  { return CaptionFont(g_fntStat,  11, false, L"Killer 
 static HFONT FdFontGlyph() { return CaptionFont(g_fntGlyph, 12, false, L"Segoe MDL2 Assets"); }
 
 // Metrics (dpi units): shadow margins around the visual bar, then the row.
-// Bar width = the fixed cells + the edit; the edit shrinks (60..200) so the
-// whole bar always fits the card, FitSearchBox-style.
+// The bar is KillerPDF's Border to the pixel: 1px PaneBorderBrush frame, 4px
+// padding, the content grid's own 8/6/8/6 margin, then the 26px row -> a 48px
+// card. Bar width = the fixed cells + the edit; the edit shrinks (60..200) so
+// the whole bar always fits the card, FitSearchBox-style.
 static const int FdPadX = 24, FdPadT = 14, FdPadB = 28;   // window margins for the shadow
-static const int FdBarH = 36, FdEditH = 26, FdBtnW = 26, FdBtnH = 24, FdStatW = 96;
+static const int FdBarH = 48, FdEditH = 26, FdBtnW = 26, FdBtnH = 24, FdStatW = 96;
 static const int FdGripW = 20;   // the drag grip: margin 2 + two 3px dot columns + margin 6
-// left border+pad 1+4 | grip 20 | icon 12+6 | Aa | ab | status 2+96+2 | prev | next | close | pad+border 4+1
-static const int FdBarFix = 1 + 4 + FdGripW + 12 + 6 + FdBtnW * 2 + 2 + FdStatW + 2 + FdBtnW * 3 + 4 + 1;
+// left border+pad+grid margin 1+4+8 | grip 20 | icon 12+6 | Aa | ab | status 2+96+2 | prev | next | close | grid margin+pad+border 8+4+1
+static const int FdBarFix = 13 + FdGripW + 12 + 6 + FdBtnW * 2 + 2 + FdStatW + 2 + FdBtnW * 3 + 13;
 
 enum { FB_GRIP, FB_AA, FB_AB, FB_PREV, FB_NEXT, FB_CLOSE, FB_COUNT };
 
@@ -3189,8 +3202,9 @@ static void FdLayout(int editW, FdRects& R) {
     int bw = FdD(FdBarFix) + editW;
     R.bar = { FdD(FdPadX), FdD(FdPadT), FdD(FdPadX) + bw, FdD(FdPadT) + FdD(FdBarH) };
     R.btn[FB_GRIP] = { 0, 0, 0, 0 };                          // the grip is its own cell
-    int top = R.bar.top + FdD(1) + FdD(4);                    // inside border + padding
-    int x = R.bar.left + FdD(1) + FdD(4);
+    int top = R.bar.top + FdD(11);                            // inside border 1 + padding 4 +
+                                                              // the content grid's top margin 6
+    int x = R.bar.left + FdD(13);                             // the grid's left margin 8
     R.grip = { x, top, x + FdD(FdGripW), top + FdD(FdEditH) };   // KillerPDF's drag grip cell
     x += FdD(FdGripW);
     R.icon = { x, top, x + FdD(12), top + FdD(FdEditH) };
@@ -3198,8 +3212,9 @@ static void FdLayout(int editW, FdRects& R) {
     R.edit = { x, top, x + editW, top + FdD(FdEditH) };
     x += editW;
     for (int i = FB_AA; i < FB_COUNT; i++) {
-        if (i == FB_PREV) {                                   // the status cell sits before prev
-            R.status = { x + FdD(2), R.bar.top + 1, x + FdD(2) + FdD(FdStatW), R.bar.bottom - 1 };
+        if (i == FB_PREV) {                                   // the status cell sits before prev,
+            R.status = { x + FdD(2), top,                     // centred on the 26px row like the
+                         x + FdD(2) + FdD(FdStatW), top + FdD(FdEditH) };   // WPF TextBlock is
             x += FdD(2) + FdD(FdStatW) + FdD(2);
         }
         R.btn[i] = { x, top + FdD(1), x + FdD(FdBtnW), top + FdD(1) + FdD(FdBtnH) };
@@ -3217,26 +3232,25 @@ static int FdHit(POINT p) {
     return -1;
 }
 
-// The query edit's vertical placement. A single-line EDIT paints its line box at
-// the TOP of its client (Wine's EDIT_AdjustFormatRect: "Windows doesn't care to
-// fix text placement for SL controls"), and Killer Sans UI's cell runs 133% of
-// the em (ascent 1429 + descent 332 on 1324) - a full-height box floats the
-// glyphs high, which read as "the input is not centred in height". So the
-// control gets exactly the font's line box for a window, parked where the
-// footer parks its text (StCapTop's rule): baseline at box centre + capHeight/2
-// (Killer Sans UI caps at 876/1429 of its ascent). Whatever GDI does inside a
-// single-line edit, the line box then sits centred by the cap body.
+// The query edit's vertical placement. KillerPDF centres the text the WPF way:
+// the box is 26px and the line rides its middle (VerticalContentAlignment
+// Center + the template's centred PART_ContentHost). A single-line EDIT paints
+// its line box at the TOP of its client (Wine's EDIT_AdjustFormatRect:
+// "Windows doesn't care to fix text placement for SL controls"), so the window
+// gets EXACTLY the font's line box and parks it centred in the box - a control
+// the size of the line is centred whether the EDIT draws top or centre, and
+// the glyph body lands mid-box on the real font's own metrics, no ratio guess.
 static void FdEditGeom(int boxH, int& h, int& off) {
     HDC dc = GetDC(g_find);
     HFONT of = (HFONT)SelectObject(dc, FdFontEdit());
     TEXTMETRICW tm{}; GetTextMetricsW(dc, &tm);
     SelectObject(dc, of);
     ReleaseDC(g_find, dc);
-    h = min(FdD(FdEditH), (int)tm.tmHeight + 2);             // 1px of breathing room; the
-                                                             // cast: tmHeight is LONG - MSVC's
-                                                             // std::min cannot deduce across it
-    int capH = (int)std::lround(tm.tmAscent * (876.0 / 1429.0));
-    off = max(0, boxH / 2 + capH / 2 - (int)tm.tmAscent);
+    h = min(FdD(FdEditH), (int)tm.tmHeight + 1);   // the line box + 1px of slack; the
+                                                   // cast: tmHeight is LONG - MSVC's
+                                                   // std::min cannot deduce across it
+    off = max(0, (boxH - h) / 2);                  // the line box centred: WPF's
+                                                   // VerticalContentAlignment Center
 }
 
 static void FindStatusRepaint() { if (g_find && fd.open) InvalidateRect(g_find, nullptr, FALSE); }
@@ -3289,35 +3303,42 @@ static void FindOption(bool matchCase) {
     if (fd.query.size() >= 2 && fd.query.find_first_not_of(L" \t\n\r") != std::wstring::npos) {
         if (g_find) KillTimer(g_find, 1);
         fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = false;
+        fd.anchor = max(0, g.cur);
         if (g_find) SetTimer(g_find, 2, 30, nullptr);
     }
 }
 
 static void FindRun() {
     if (fd.query.size() < 2 || fd.query.find_first_not_of(L" \t\n\r") == std::wstring::npos) return;
-    fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = false;
+    fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = false; fd.pending = false;
+    fd.anchor = max(0, g.cur);
     if (g_find) SetTimer(g_find, 2, 30, nullptr);
 }
 
 // The pump: scan pages until a small time budget is spent, then hand control
 // back - a fresh OCR page costs tens of milliseconds, so the budget only trims
 // the cheap pages; the heavy ones land one per tick and the window keeps its
-// pulse. Every edit bumps gen, and a stale pump (this gen is no longer the
-// state's) drops everything it has gathered.
+// pulse. The run starts at the page you are ON (the anchor) and walks forward,
+// wrapping to the pages before it last: the first OCR tick already covers what
+// the user is looking at, and the counter climbs from that first tick instead
+// of arriving only after the whole book. Every edit bumps gen, and a stale
+// pump (this gen is no longer the state's) drops everything it has gathered.
 static void FindPump() {
     if (!g_find || fd.done) { if (g_find) KillTimer(g_find, 2); return; }
     unsigned my = fd.gen;
     unsigned long long t0 = GetTickCount64();
     std::vector<FRect> rs;
     int before = (int)fd.hits.size();
-    while (fd.scan < g.n && GetTickCount64() - t0 < 12) {
-        TxtPage* pt = TtFor(fd.scan);
+    while (fd.scan < g.n && GetTickCount64() - t0 < 25) {
+        int i = (fd.anchor + fd.scan) % g.n;      // the anchor page first, then forward
+        TxtPage* pt = TtFor(i);
         if (pt && !pt->cells.empty() && FdMatch(*pt, fd.query, fd.matchCase, fd.wholeWord, rs) > 0)
-            for (const FRect& r : rs) fd.hits.push_back({ fd.scan, r });
+            for (const FRect& r : rs) fd.hits.push_back({ i, r });
         fd.scan++;
     }
     if (fd.gen != my) return;                     // cancelled mid-tick: drop it all
     if ((int)fd.hits.size() != before) InvalidateRect(g.view, nullptr, FALSE);   // progressive
+    FindStatusRepaint();                          // the counter climbs as pages land
     if (fd.scan >= g.n) {
         fd.done = true;
         KillTimer(g_find, 2);
@@ -3334,6 +3355,8 @@ static void FindChanged() {
     if (len) GetWindowTextW(g_fedit, q.data(), len + 1);
     fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = true;
     fd.query = q;
+    fd.pending = q.size() >= 2 &&
+                 q.find_first_not_of(L" \t\n\r") != std::wstring::npos;   // a run is coming
     if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); }
     if (q.size() < 2) {
         InvalidateRect(g.view, nullptr, FALSE);
@@ -3367,6 +3390,7 @@ static void FindOpen(bool create = true) {
         ShowWindow(g_find, SW_SHOWNOACTIVATE);
     }
     fd.query.clear(); fd.hits.clear(); fd.cur = -1; fd.scan = 0; fd.gen++; fd.done = true; fd.hot = -1;
+    fd.pending = false; fd.anchor = 0; fd.dx = fd.dy = 0;   // a fresh bar opens at home
     if (g_fedit) { SetWindowTextW(g_fedit, L""); SetFocus(g_fedit); }   // open empty, focus ready
 }
 
@@ -3374,7 +3398,7 @@ static void FindClose() {
     if (!fd.open) return;
     fd.open = false;
     fd.gen++; fd.done = true; fd.scan = 0;
-    fd.hits.clear(); fd.cur = -1; fd.query.clear(); fd.hot = -1;
+    fd.hits.clear(); fd.cur = -1; fd.query.clear(); fd.hot = -1; fd.pending = false;
     if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); ShowWindow(g_find, SW_HIDE); }
     if (g.main) SetFocus(g.main);                 // the keys go home (they live on the main window)
     InvalidateRect(g.view, nullptr, FALSE);       // the highlights leave with the bar
@@ -3537,11 +3561,24 @@ static void FindDraw(HDC dc, int ox, int oy) {
         DrawTextW(dc, b == FB_AA ? L"Aa" : L"ab", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     // the counter cell: KillerPDF's compact "12 / 73" (current / total), or
-    // "No matches" once the scan came back empty
+    // "No matches" once the scan came back empty. While the scan is still
+    // running the counter already shows the hits so far - the cursor follows
+    // the start rule (first match at or after your page) on the partial list -
+    // because the numbers are the answer to "is it finding anything" and they
+    // land one OCR tick after typing stops, not after a whole-book crawl.
     std::wstring st;
     if (!fd.query.empty() && fd.query.size() >= 2) {
-        if (fd.done) st = fd.hits.empty() ? L"No matches"
-                                          : std::to_wstring(fd.cur + 1) + L" / " + std::to_wstring(fd.hits.size());
+        if (fd.done) {
+            if (!fd.pending)   // a finished scan speaks; a pending debounce says nothing -
+                               // a flash of "No matches" between keystrokes is a lie
+                st = fd.hits.empty() ? L"No matches"
+                                     : std::to_wstring(fd.cur + 1) + L" / " + std::to_wstring(fd.hits.size());
+        } else if (!fd.hits.empty()) {
+            int start = max(0, g.cur), pc = 0;
+            for (int i = 0; i < (int)fd.hits.size(); i++)
+                if (fd.hits[i].page >= start) { pc = i; break; }
+            st = std::to_wstring(pc + 1) + L" / " + std::to_wstring(fd.hits.size());
+        }
     }
     if (!st.empty()) {
         RECT r = R.status;
@@ -3639,9 +3676,8 @@ static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             fd.dy += p.y - fd.dragY;
             fd.dragX = p.x; fd.dragY = p.y;
             FindClampDrag();
-            FindPlace();                         // moves the child; the view repaints around it
-            InvalidateRect(h, nullptr, FALSE);   // the bar repaints over the fresh backdrop
-            return 0;
+            FindPlace(true);                     // moves the bar and paints its own wake:
+            return 0;                            // no stale strip, no lag frame (see below)
         }
         int ht = FdHit(p);
         if (ht != fd.hot) {                            // repaints only on a hover flip
@@ -3683,10 +3719,11 @@ static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;   // the bar floats; the wheel still scrolls
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) {                  // the grip takes the hand, the rest an arrow
-            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
-            SetCursor(fd.drag || FdHit(p) == FB_GRIP ? LoadCursorW(nullptr, IDC_HAND)
-                                                     : LoadCursorW(nullptr, IDC_ARROW));
+        if (LOWORD(lp) == HTCLIENT) {                  // every hit cell is a button: the grip
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);   // and Aa/ab/prev/next/close take
+            int ht = fd.drag ? FB_GRIP : FdHit(p);     // the hand (ToolbarButton's Cursor=Hand),
+            SetCursor(fd.drag || ht >= 0 ? LoadCursorW(nullptr, IDC_HAND)   // the field an arrow
+                                         : LoadCursorW(nullptr, IDC_ARROW));
             return TRUE;
         }
         break;
@@ -3719,15 +3756,51 @@ static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // Size and spot the bar: the edit shrinks to fit (60..200), the bar's right
 // edge rides 16px in from the view's right, top 6px under the view's top -
 // plus the grip's drag offset, clamped so the visual bar stays on the card.
-static void FindPlace() {
+// wake=true is the live grip drag: a moved child leaves the strip it vacated
+// showing whatever was on screen until the parent's next paint, and that
+// one-frame strip of old bar over the page is the "flashing" under the cursor;
+// the move also repaints the bar a frame late, which reads as "snapping". So
+// the drag paints its own wake, in order, inside the mouse-move: the vacated
+// strips blit straight from the view's back buffer (the bar never lives there,
+// so the pixels are the clean page that belongs under it), then the bar
+// repaints synchronously over the fresh backdrop - one clean frame per
+// pointer move, WPF's single-surface drag.
+static void FindPlace(bool wake) {
     if (!g_find || !g_fedit || !g.view) return;
     int vw = CardW();
     if (vw <= 0) return;
+    RECT ro{ 0, 0, 0, 0 };
+    if (wake) {                                   // where the bar sits NOW - read off the
+        GetWindowRect(g_find, &ro);               // window itself, not the offsets: the
+        MapWindowPoints(nullptr, g.view, (POINT*)&ro, 2);   // caller has already moved them
+    }
     FindClampDrag();                         // a resized card re-clamps the drag offset
     int editW = FdEditW(vw);
     int bw = FdD(FdBarFix) + editW, bh = FdD(FdBarH);
     MoveWindow(g_find, vw - FdD(16) - bw - FdD(FdPadX) + fd.dx, FdD(6) - FdD(FdPadT) + fd.dy,
-               bw + 2 * FdD(FdPadX), bh + FdD(FdPadT) + FdD(FdPadB), TRUE);
+               bw + 2 * FdD(FdPadX), bh + FdD(FdPadT) + FdD(FdPadB), !wake);
+    if (wake && g.bdc) {
+        RECT rn{ ro.left, ro.top, ro.right, ro.bottom };   // the same math post-clamp:
+        rn.left = vw - FdD(16) - bw - FdD(FdPadX) + fd.dx;               // the window's
+        rn.top = FdD(6) - FdD(FdPadT) + fd.dy;                           // new rect
+        rn.right = rn.left + bw + 2 * FdD(FdPadX);
+        rn.bottom = rn.top + bh + FdD(FdPadT) + FdD(FdPadB);
+        HDC sdc = GetDC(g.view);
+        RECT strips[4] = {                               // old rect minus new rect:
+            { ro.left, ro.top, ro.right, min(ro.bottom, rn.top) },              // above
+            { ro.left, max(ro.top, rn.bottom), ro.right, ro.bottom },           // below
+            { ro.left, max(ro.top, rn.top), min(ro.right, rn.left), min(ro.bottom, rn.bottom) },
+            { max(ro.left, rn.right), max(ro.top, rn.top), ro.right, min(ro.bottom, rn.bottom) },
+        };
+        for (const RECT& s : strips)
+            if (s.left < s.right && s.top < s.bottom)
+                BitBlt(sdc, s.left, s.top, s.right - s.left, s.bottom - s.top,
+                       g.bdc, s.left, s.top, SRCCOPY);
+        ReleaseDC(g.view, sdc);
+        InvalidateRect(g_find, nullptr, FALSE);   // the bar repaints over the fresh
+        UpdateWindow(g_find);                     // backdrop - inside this same frame
+        return;
+    }
     FdRects R; FdLayout(editW, R);
     int eh, eoff; FdEditGeom(R.edit.bottom - R.edit.top, eh, eoff);
     MoveWindow(g_fedit, R.edit.left, R.edit.top + eoff,
