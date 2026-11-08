@@ -6,7 +6,8 @@
 // timer tick) and off-screen ones are evicted, so a 2,000-page book scrolls as
 // light as a 10-page one. No stock scrollbars anywhere: scrolling is wheel and
 // keys, and the only bar on screen is a slim KillerPDF-style overlay thumb (4px
-// wide, 8px under the cursor) owning an invisible 12px gutter.
+// wide, 8px under the cursor) owning an invisible 12px gutter. A drag on the
+// rail only cancels a click - like the page view, it never pans (no grab-to-scroll).
 // Text selection is KillerPDF's flowing model too: a press on text drags a caret
 // pair of individual characters along the page's reading order (column-aware,
 // line-banded cells: the built-in OCR pass over the page supplies word boxes, each
@@ -188,7 +189,7 @@ static App g;
 struct Side {
     int w = 0, cw = 0, ch = 0, scroll = 0, docH = 0, tw = 0, cur = -1;
     int hover = -1;                     // the item under the cursor: KillerPDF's IsMouseOver row
-    int hit = -1, moved = 0, pend = 0;  // drag-scroll state
+    int hit = -1, moved = 0;            // click-vs-drag: a drag cancels the jump
     bool barHot = false, barDrag = false;   // the sidebar's own overlay bar
     int barGrab = 0;
     POINT dp{};                         // last drag position
@@ -1749,7 +1750,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         sd.dp = p;
         sd.hit = SidePageAt(sd.dp.y + sd.scroll);
-        sd.moved = 0; sd.pend = 0;
+        sd.moved = 0;
         return 0;
     }
     case WM_MOUSEMOVE: {
@@ -1776,12 +1777,8 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (GetCapture() == h) {
             int dy = p.y - sd.dp.y;
             sd.dp = p;
-            if (dy) {
-                sd.moved += abs(dy);
-                sd.pend -= dy;
-                if (sd.moved > (int)(4 * g.dpi)) { SideScrollTo(sd.scroll + sd.pend); sd.pend = 0; }
-            }
-        }
+            if (dy) sd.moved += abs(dy);   // a drag only cancels the click: like the page
+        }                                  // view, the wheel and the thumb own scrolling
         return 0;
     }
     case WM_MOUSELEAVE:
@@ -1797,7 +1794,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (g.vm == 1) SetPage(sd.hit);     // single mode: a thumb click flips to that page
             else ScrollTo(g.sx, max(0, PageTop(sd.hit) - Gap() / 2));
         }
-        sd.moved = 0; sd.hit = -1; sd.pend = 0;
+        sd.moved = 0; sd.hit = -1;
         return 0;
     }
     case WM_SETCURSOR:
@@ -2472,15 +2469,22 @@ static int TextW(HFONT f, const wchar_t* s) {          // extent at the current 
 // page/zoom line and expires on its own; routine updates cannot stomp it
 // (MainWindow.xaml.cs's _statusHoldUntil, timed here instead ofDispatcher).
 
+// Only the two fit modes have a name; a free zoom prints its own percentage
+// alone - the zoom dropdown already reads that way ("35%"), and "Custom"
+// next to the number said the same thing twice.
 static const wchar_t* FitName() {
-    return g.fitMode == 1 ? L"Fit Page" : g.fitMode == 0 ? L"Fit Width" : L"Custom";
+    return g.fitMode == 1 ? L"Fit Page" : L"Fit Width";
 }
 
 static std::wstring StatusRoutine() {
     if (!g.n) return L"Docsy  -  Ctrl+O or drop a PDF here";
     int c = g.cur >= 0 ? g.cur : 0;
+    int pct = (int)std::lround(g.zoom * 100);
     wchar_t b[160];
-    swprintf_s(b, L"Page %d of %d, %s (%d%%)", c + 1, g.n, FitName(), (int)std::lround(g.zoom * 100));
+    if (g.fitMode == 2)   // a free zoom: the number speaks for itself
+        swprintf_s(b, L"Page %d of %d, %d%%", c + 1, g.n, pct);
+    else
+        swprintf_s(b, L"Page %d of %d, %s (%d%%)", c + 1, g.n, FitName(), pct);
     return b;
 }
 
@@ -3213,6 +3217,26 @@ static int FdHit(POINT p) {
     return -1;
 }
 
+// The query edit's vertical placement. A single-line EDIT paints its line box at
+// the TOP of its client (Wine's EDIT_AdjustFormatRect: "Windows doesn't care to
+// fix text placement for SL controls"), and Killer Sans UI's cell runs 133% of
+// the em (ascent 1429 + descent 332 on 1324) - a full-height box floats the
+// glyphs high, which read as "the input is not centred in height". So the
+// control gets exactly the font's line box for a window, parked where the
+// footer parks its text (StCapTop's rule): baseline at box centre + capHeight/2
+// (Killer Sans UI caps at 876/1429 of its ascent). Whatever GDI does inside a
+// single-line edit, the line box then sits centred by the cap body.
+static void FdEditGeom(int boxH, int& h, int& off) {
+    HDC dc = GetDC(g_find);
+    HFONT of = (HFONT)SelectObject(dc, FdFontEdit());
+    TEXTMETRICW tm{}; GetTextMetricsW(dc, &tm);
+    SelectObject(dc, of);
+    ReleaseDC(g_find, dc);
+    h = min(FdD(FdEditH), tm.tmHeight + 2);                  // 1px of breathing room
+    int capH = (int)std::lround(tm.tmAscent * (876.0 / 1429.0));
+    off = max(0, boxH / 2 + capH / 2 - (int)tm.tmAscent);
+}
+
 static void FindStatusRepaint() { if (g_find && fd.open) InvalidateRect(g_find, nullptr, FALSE); }
 
 // Lands the cursor match: the counter, the repaint, and - when stepping - the
@@ -3636,6 +3660,12 @@ static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SetCapture(h);
             return 0;
         }
+        FdRects R; FdLayout(FdEditW(CardW()), R);   // a press anywhere in the query box -
+        if (p.x >= R.edit.left - 1 && p.x < R.edit.right + 1 &&   // the edit only owns its line-
+            p.y >= R.edit.top - 1 && p.y < R.edit.bottom + 1) {   // box window - focuses it
+            SetFocus(g_fedit);
+            return 0;
+        }
         if (ht == FB_CLOSE) FindClose();
         else if (ht == FB_PREV) FindStep(-1);
         else if (ht == FB_NEXT) FindStep(1);
@@ -3671,11 +3701,16 @@ static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (wp == VK_RETURN) { FindStep(shift ? -1 : 1); return 0; }
         if (wp == VK_ESCAPE) { FindClose(); return 0; }
         if (wp == VK_F3) { FindStep(shift ? -1 : 1); return 0; }   // F3 steps from the box too
-        if (wp == 'F' && ctrl) { FindClose(); return 0; }
+        if (wp == 'A' && ctrl) { SendMessageW(h, EM_SETSEL, 0, -1); return 0; }   // a single-line
+        if (wp == 'F' && ctrl) { FindClose(); return 0; }   // EDIT has no built-in Ctrl+A
     } else if (m == WM_SYSKEYDOWN) {                   // the Alt+ chords land here
         if (wp == 'C') { FindOption(true); return 0; }     // Match Case
         if (wp == 'W') { FindOption(false); return 0; }    // Whole Word
-    }
+    } else if (m == WM_MOUSEMOVE) {                    // the edit is a child: its moves leave the
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; // bar's hover tiles stale (a button under
+        MapWindowPoints(h, g_find, &p, 1);             // the cursor stays lit) - hand them up so
+        SendMessageW(g_find, WM_MOUSEMOVE, 0, MAKELPARAM(p.x, p.y));   // the tiles clear, then let
+    }                                                  // the edit still run its own drag-select
     return CallWindowProcW(g_feditDef, h, m, wp, lp);
 }
 
@@ -3692,8 +3727,9 @@ static void FindPlace() {
     MoveWindow(g_find, vw - FdD(16) - bw - FdD(FdPadX) + fd.dx, FdD(6) - FdD(FdPadT) + fd.dy,
                bw + 2 * FdD(FdPadX), bh + FdD(FdPadT) + FdD(FdPadB), TRUE);
     FdRects R; FdLayout(editW, R);
-    MoveWindow(g_fedit, R.edit.left, R.edit.top,
-               R.edit.right - R.edit.left, R.edit.bottom - R.edit.top, FALSE);
+    int eh, eoff; FdEditGeom(R.edit.bottom - R.edit.top, eh, eoff);
+    MoveWindow(g_fedit, R.edit.left, R.edit.top + eoff,
+               R.edit.right - R.edit.left, eh, FALSE);
 }
 
 // The grip's drag bounds: the bar's visual rect (window minus the shadow
@@ -3755,7 +3791,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_CREATE: {
         g.main = h; g.dpi = GetDpiForWindow(h) / 96.0;
         g.view = CreateWindowExW(0, L"DocsyView", nullptr,
-                                 WS_CHILD | WS_VISIBLE,
+                                 WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         g.side = CreateWindowExW(0, L"DocsySide", nullptr,
                                  WS_CHILD,
@@ -4150,7 +4186,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     // paint at all; the thickframe still owns resize borders, Aero Snap, the
     // system menu and the Win11 snap flyout. SWP_FRAMECHANGED syncs the final
     // frame before the first present.
-    DWORD style = WS_OVERLAPPEDWINDOW & ~WS_CAPTION;
+    DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_CAPTION) | WS_CLIPCHILDREN;
     CreateWindowExW(0, L"Docsy", L"Docsy", style, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
                     nullptr, nullptr, hi, nullptr);
     if (!g.main) return 1;
