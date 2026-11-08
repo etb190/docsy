@@ -552,7 +552,8 @@ static void BarDraw(HDC dc, int w, int h) {
     int capH = mc.bottom - mc.top;
     int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);   // the MDL2 line box at FontSize 20 (~23.5px):
     int colH = gh + gap + capH;                            // a 20px cell would clip the glyph
-    int y0 = b.top + max(0, ((b.bottom - b.top) - colH) / 2);
+    int avail = (int)(b.bottom - b.top) - colH;            // MSVC: RECT members are LONG - cast
+    int y0 = b.top + max(0, avail) / 2;                    // before the std::max deduction
     RECT gr{ b.left, y0, b.right, y0 + gh };
     RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
     SetBkMode(dc, TRANSPARENT);
