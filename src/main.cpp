@@ -18,7 +18,12 @@
 // Find Text is KillerPDF's search bar too (Shell/Search.cs + SearchController +
 // SearchService): Ctrl+F - or the toolbar row's Find Text button - floats one
 // rounded grain bar over the page area (top right, KillerPDF's fallback spot)
-// with KillerPDF's DropShadow melted onto the live view pixels; the row is the drag grip (two
+// with KillerPDF's DropShadow melted onto the live view pixels. The bar is not
+// a window: it is composited INTO the view's back buffer every paint (pages,
+// highlights, overlay bars, the bar and its shadow land in one buffer and one
+// blit), so a drag or a repaint is one atomic frame - WPF's single surface.
+// The only real window is the query EDIT, a child of the view parked inside its
+// ring. The row is the drag grip (two
 // columns of three dots; grabbing it moves the bar anywhere on the card), the
 // magnifier glyph (E721), the query edit, the Aa / ab option toggles
 // (SelectionBg gradient + white when on), the "12 / 73" counter cell and
@@ -227,7 +232,9 @@ struct Find {
     int dragX = 0, dragY = 0;         // the drag's last pointer position
 };
 static Find fd;
-static HWND g_find = nullptr, g_fedit = nullptr;
+static HWND g_fedit = nullptr;                     // the query EDIT: the bar's only real
+                                                   // window, a child of the view (its pixels
+                                                   // are composite; see the Find section)
 static WNDPROC g_feditDef = nullptr;               // the edit's stock proc (subclassed for keys)
 
 static HFONT g_uifont = nullptr, g_sidefont = nullptr;
@@ -451,6 +458,100 @@ static int TBH() { return g.full ? 0 : TbBtnH() + (int)(4 * g.dpi); }   // + Too
 
 static void FindToggle();                        // the find bar's own section, below
 static void TrackLeave(HWND h);                  // defined with the view's hover helpers
+static int FdD(int v) { return (int)std::lround(v * g.dpi); }
+
+// Metrics (dpi units): shadow margins around the visual bar, then the row.
+// The bar is KillerPDF's Border to the pixel: 1px PaneBorderBrush frame, 4px
+// padding, the content grid's own 8/6/8/6 margin, then the 26px row -> a 48px
+// card. Bar width = the fixed cells + the edit; the edit shrinks (60..200) so
+// the whole bar always fits the card, FitSearchBox-style.
+static const int FdPadX = 24, FdPadT = 14, FdPadB = 28;   // window margins for the shadow
+static const int FdBarH = 48, FdEditH = 26, FdBtnW = 26, FdBtnH = 24, FdStatW = 96;
+static const int FdGripW = 20;   // the drag grip: margin 2 + two 3px dot columns + margin 6
+// left border+pad+grid margin 1+4+8 | grip 20 | icon 12+6 | Aa | ab | status 2+96+2 | prev | next | close | grid margin+pad+border 8+4+1
+static const int FdBarFix = 13 + FdGripW + 12 + 6 + FdBtnW * 2 + 2 + FdStatW + 2 + FdBtnW * 3 + 13;
+
+enum { FB_GRIP, FB_AA, FB_AB, FB_PREV, FB_NEXT, FB_CLOSE, FB_COUNT };
+
+static int FdEditW(int vw) {
+    return std::clamp(vw - FdD(FdBarFix) - FdD(16) - 2 * FdD(FdPadX), FdD(60), FdD(200));
+}
+
+struct FdRects {
+    RECT bar, grip, icon, edit, status, btn[FB_COUNT];
+};
+
+static void FdLayout(int editW, FdRects& R) {
+    int bw = FdD(FdBarFix) + editW;
+    R.bar = { FdD(FdPadX), FdD(FdPadT), FdD(FdPadX) + bw, FdD(FdPadT) + FdD(FdBarH) };
+    R.btn[FB_GRIP] = { 0, 0, 0, 0 };                          // the grip is its own cell
+    int top = R.bar.top + FdD(11);                            // inside border 1 + padding 4 +
+                                                              // the content grid's top margin 6
+    int x = R.bar.left + FdD(13);                             // the grid's left margin 8
+    R.grip = { x, top, x + FdD(FdGripW), top + FdD(FdEditH) };   // KillerPDF's drag grip cell
+    x += FdD(FdGripW);
+    R.icon = { x, top, x + FdD(12), top + FdD(FdEditH) };
+    x += FdD(12) + FdD(6);
+    R.edit = { x, top, x + editW, top + FdD(FdEditH) };
+    x += editW;
+    for (int i = FB_AA; i < FB_COUNT; i++) {
+        if (i == FB_PREV) {                                   // the status cell sits before prev,
+            R.status = { x + FdD(2), top,                     // centred on the 26px row like the
+                         x + FdD(2) + FdD(FdStatW), top + FdD(FdEditH) };   // WPF TextBlock is
+            x += FdD(2) + FdD(FdStatW) + FdD(2);
+        }
+        R.btn[i] = { x, top + FdD(1), x + FdD(FdBtnW), top + FdD(1) + FdD(FdBtnH) };
+        x += FdD(FdBtnW);
+    }
+}
+
+static int FdHit(POINT p) {
+    FdRects R; FdLayout(FdEditW(CardW()), R);
+    if (p.x >= R.grip.left && p.x < R.grip.right && p.y >= R.grip.top && p.y < R.grip.bottom)
+        return FB_GRIP;
+    for (int i = FB_AA; i < FB_COUNT; i++)
+        if (p.x >= R.btn[i].left && p.x < R.btn[i].right && p.y >= R.btn[i].top && p.y < R.btn[i].bottom)
+            return i;
+    return -1;
+}
+
+// The bar's geometry in VIEW coordinates. The old design moved a child window
+// and re-derived everything from it; now the origin is pure arithmetic - the
+// home spot (KillerPDF's fallback placement) plus the grip's clamped drag
+// offset - and paint, hit tests and invalidations all ride it.
+static void FdOrigin(int& bx, int& by) {
+    int bw = FdD(FdBarFix) + FdEditW(CardW());
+    bx = CardW() - FdD(16) - bw - FdD(FdPadX) + fd.dx;
+    by = FdD(6) - FdD(FdPadT) + fd.dy;
+}
+static RECT FdRect() {                       // the full shadow-padded window rect
+    int bx, by; FdOrigin(bx, by);
+    int bw = FdD(FdBarFix) + FdEditW(CardW());
+    return { bx, by, bx + bw + 2 * FdD(FdPadX), by + FdD(FdBarH) + FdD(FdPadT) + FdD(FdPadB) };
+}
+static int FdHitView(POINT p) {              // a cell hit in view coordinates
+    int bx, by; FdOrigin(bx, by);
+    p.x -= bx; p.y -= by;
+    return FdHit(p);
+}
+static bool FdOverBar(POINT p) {             // over the visual card (frame, not shadow)
+    int bx, by; FdOrigin(bx, by);
+    FdRects R; FdLayout(FdEditW(CardW()), R);
+    p.x -= bx; p.y -= by;
+    return p.x >= R.bar.left && p.x < R.bar.right && p.y >= R.bar.top && p.y < R.bar.bottom;
+}
+
+// The find bar composites into the view's back buffer, so the view's proc needs
+// the bar's geometry and cell actions (defined with the find section, below):
+static void FindPlace();                         // park the edit inside its ring
+static void FindStatusRepaint();                 // repaint the counter cell
+static void FindDraw(HDC dc, int ox, int oy);    // the bar's paint (composite pixels)
+static void FindStep(int dir);                   // prev / next
+static void FindOption(bool matchCase);          // Aa / ab
+static void FindClose();                         // the bar leaves
+static void FindRun();                           // the debounce fired: start the scan
+static void FindPump();                          // the scan's timer tick
+static void FindChanged();                       // the query edit's EN_CHANGE
 
 static HDC g_bardc = nullptr; static HBITMAP g_barbm = nullptr, g_barold = nullptr;
 static int g_barw = 0, g_barh = 0;
@@ -1475,7 +1576,8 @@ static bool Open(const std::wstring& p) {
         sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0; sd.cw = 0; sd.ch = 0;
         g.txt.clear();               // the new document's text geometry starts fresh
         SelClear();
-        if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); ShowWindow(g_find, SW_HIDE); }
+        if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
+        if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
         fd = Find{};                 // the Find bar's results die with the old document
         g.sideOn = true;
         if (g.side) ShowWindow(g.side, SW_SHOWNOACTIVATE);
@@ -2234,11 +2336,14 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g_grainPX = -po.x; g_grainPY = -po.y;   // corner patches phase their tiles to it
             Draw(g.bdc, g.cw, g.ch, 0);                             // card floats on never shows a
             PaintViewBars(g.bdc, g.cw, g.ch, 0);                    // seam at a pane boundary
-            BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);
-            if (g_find && fd.open) InvalidateRect(g_find, nullptr, FALSE);   // the bar's backdrop
-            SetTimer(h, 1, 5, nullptr);                              // rides the view's own pixels
-        }
-        EndPaint(h, &ps);
+            if (fd.open) {                          // the Find bar is composite pixels, not a
+                int bx, by; FdOrigin(bx, by);       // window: pages, highlights, overlay bars,
+                FindDraw(g.bdc, bx, by);            // the bar and its shadow land in ONE buffer,
+            }                                       // and the blit below is ONE atomic frame -
+            BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);   // no exposed strips, no lag
+            SetTimer(h, 1, 5, nullptr);             // frame, no second surface to fall out of
+        }                                           // sync with the edit (WS_CLIPCHILDREN
+        EndPaint(h, &ps);                           // already guards the edit's own pixels)
         return 0;
     }
     case WM_TIMER:
@@ -2247,6 +2352,12 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (GetTickCount64() >= g.hintUntil) InvalidateRect(h, nullptr, FALSE);
             return 0;
         }
+        if (wp == 7) {                         // the find bar's debounce fired
+            KillTimer(h, 7);
+            FindRun();
+            return 0;
+        }
+        if (wp == 8) { FindPump(); return 0; }   // the find scan's pump tick
         if (wp == 4) {                         // deferred text pre-warm: OCR the settled
             KillTimer(h, 4);                   // page once it exists and scrolling has been
             if (g.n && !g.selArm) {            // quiet for a moment - off the click path
@@ -2267,6 +2378,28 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         SetCapture(h);
+        if (fd.open) {                           // the floating bar owns its pixels first: the
+            int bx, by; FdOrigin(bx, by);        // grip drags, the ring focuses the edit, the
+            POINT q{ p.x - bx, p.y - by };       // buttons act - a press on the bar never falls
+            int ht = FdHit(q);                   // through to the page underneath, and a press
+            if (ht == FB_GRIP) {                 // in the shadow margins does (WPF's DropShadow
+                fd.drag = true; fd.dragX = p.x; fd.dragY = p.y;   // never extends hit testing)
+                fd.hot = -1;
+                return 0;
+            }
+            FdRects R; FdLayout(FdEditW(CardW()), R);   // a press anywhere in the query box -
+            if (q.x >= R.edit.left - 1 && q.x < R.edit.right + 1 &&   // the edit only owns its
+                q.y >= R.edit.top - 1 && q.y < R.edit.bottom + 1) {   // line-box window - focuses it
+                SetFocus(g_fedit);
+                return 0;
+            }
+            if (ht == FB_CLOSE) { FindClose(); return 0; }
+            else if (ht == FB_PREV) { FindStep(-1); return 0; }
+            else if (ht == FB_NEXT) { FindStep(1); return 0; }
+            else if (ht == FB_AA) { FindOption(true); return 0; }
+            else if (ht == FB_AB) { FindOption(false); return 0; }
+            if (FdOverBar(p)) return 0;          // the card's frame and padding: chrome, not a page press
+        }
         int gb = SBar();
         int cw = CardW();
         bool vshow = g.n && g.docH > g.ch;
@@ -2306,6 +2439,26 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (fd.drag) {                           // the grip is moving the bar: the offsets update,
+            fd.dx += p.x - fd.dragX;             // the edit rides along, and one invalidate
+            fd.dy += p.y - fd.dragY;             // recomposites pages, bar and shadow into the
+            fd.dragX = p.x; fd.dragY = p.y;      // back buffer - a single atomic frame per
+            FindPlace();                         // pointer move. No window moves, no exposed
+            InvalidateRect(h, nullptr, FALSE);   // strips, no ghosts, no lag frame - the
+            return 0;                            // two-surface disease is gone at the root
+        }
+        if (fd.open) {                           // the bar's hover tiles, the same flip-only
+            int bx, by; FdOrigin(bx, by);        // repaint the scrollbars use
+            POINT q{ p.x - bx, p.y - by };
+            int ht = FdHit(q);
+            if (ht != fd.hot) {
+                RECT r = FdRect();
+                fd.hot = ht;
+                if (ht >= 0) TrackLeave(h);
+                InvalidateRect(h, &r, FALSE);
+            }
+            if (ht >= 0 || FdOverBar(p)) return 0;   // over the chrome: no page hover work
+        }
         if (g.resizing) {
             int w = g.rsW0 + (p.x - g.rsX);
             if (w != g.sideW) { g.sideW = w; LayoutMain(); }   // thumbs rebuild once, on release
@@ -2356,9 +2509,13 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.vHot || g.hHot) { g.vHot = g.hHot = false; InvalidateRect(h, nullptr, FALSE); }
+        if (g.vHot || g.hHot || fd.hot >= 0) {
+            g.vHot = g.hHot = false; fd.hot = -1;
+            InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
     case WM_LBUTTONUP:
+        if (fd.drag) { fd.drag = false; fd.hot = -1; }   // the grip releases; capture goes below
         if (g.resizing) { g.resizing = false; ReleaseCapture(); LayoutMain(); return 0; }
         if (g.selArm) {
             g.selArm = false;
@@ -2380,9 +2537,14 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.vDrag = g.hDrag = false;
         ReleaseCapture();
         return 0;
+    case WM_CAPTURECHANGED:
+        fd.drag = false;                       // someone else took it (a modal loop, a close)
+        return 0;
     case WM_LBUTTONDBLCLK: {
         // double-click word selection, copied at once (KillerPDF's TrySelectWordAtPosition)
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (fd.open && FdOverBar(p)) return 0;   // the second click on the bar is not a page
+                                                 // double-click (the first press was the bar's)
         int pg; float fx, fy;
         if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
             TxtPage* pt = TtFor(pg);
@@ -2400,7 +2562,15 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT && g.n) {
+        if (LOWORD(lp) == HTCLIENT) {
+            if (fd.open) {                     // the bar's cells take the hand (ToolbarButton's
+                POINT p; GetCursorPos(&p);     // Cursor=Hand); over the chrome an arrow - the
+                ScreenToClient(h, &p);         // page's I-beam must not peek through the card
+                int ht = fd.drag ? FB_GRIP : FdHitView(p);
+                if (fd.drag || ht >= 0) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+                if (FdOverBar(p)) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+            }
+            if (g.n) {
             if (g.vDrag || g.hDrag || g.vHot || g.hHot) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             if (g.sideOn && p.x < (int)(5 * g.dpi)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
@@ -2413,9 +2583,20 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (pt && TtOverText(*pt, fx, fy)) { SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE; }
             }
             SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE;
+            }
         }
         break;
     case WM_DROPFILES: HandleDrop((HDROP)wp); return 0;
+    case WM_COMMAND:                           // the query edit's EN_CHANGE (its parent now)
+        if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g_fedit) FindChanged();
+        return 0;
+    case WM_CTLCOLOREDIT: {                    // the dark query edit: light text on chrome
+        HDC dc = (HDC)wp;
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        SetBkColor(dc, RGB(0x1c, 0x1c, 0x1c));
+        static HBRUSH b = CreateSolidBrush(RGB(0x1c, 0x1c, 0x1c));
+        return (LRESULT)b;
+    }
     }
     return DefWindowProcW(h, m, wp, lp);
 }
@@ -3127,14 +3308,25 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 // ---------------- Find Text bar (KillerPDF's Shell/Search.cs) ----------------
-// One floating child of the page view, KillerPDF's fallback spot: the bar's top
+// One floating bar over the page area, KillerPDF's fallback spot: the bar's top
 // edge 6px under the view's top, its right edge 16px in from the view's right.
+// The bar is NOT a window - it is composited INTO the view's back buffer on
+// every paint (the same path the CI shot uses), because a floating child window
+// over a GDI view is two surfaces that must be kept in step by hand: the view
+// paints, the bar repaints over it, a moved bar leaves stale strips behind, and
+// every one of those seams flashed under the mouse - the horror show. Composite
+// pixels have no seams: pages, highlights, overlay bars, the bar and its
+// DropShadow land in ONE buffer and ONE blit, and a drag is a coordinate change
+// plus one invalidate - a single atomic frame per pointer move, WPF's single
+// surface. The only real window is the query EDIT (a child of the view, parked
+// inside its ring by FindPlace): the native control brings the caret, the IME,
+// the clipboard and the selection for free, and the view's WS_CLIPCHILDREN
+// keeps every composite blit out of its pixels - nothing can show through it,
+// clobber it or turn it transparent.
 // The visual is the original Border: CornerRadius 6, a 1px PaneBorderBrush
 // #555555 frame, MenuBackgroundBrush #141414 + grain inside, and the DropShadow
 // (black, blur 16, depth 3, down, opacity 0.55) - built as an ARGB tile and
-// melted onto the view's own pixels: the bar's window copies the view's back
-// buffer behind itself first, so the shadow lands on the live page content and
-// the margins disappear into it. The row is KillerPDF's find row minus the
+// melted onto the view's own pixels. The row is KillerPDF's find row minus the
 // replace gear (Windows.Data.Pdf cannot edit text): the drag grip (two columns
 // of three 3px dots, MutedTextBrush - grabbing it moves the bar anywhere on the
 // card, the offsets clamped and kept until the document changes), the magnifier
@@ -3155,11 +3347,8 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // page you are on, and the scan pumps page by page on a timer so the window
 // never blocks on a long book.
 
-static int FdD(int v) { return (int)std::lround(v * g.dpi); }
-
-static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
-static void FindPlace(bool wake = false);   // wake=true: the live drag paints its own trail
+static void FindPlace();
 static void FindClampDrag();
 
 static HFONT g_fntEdit = nullptr, g_fntOpt = nullptr, g_fntAb = nullptr,
@@ -3177,61 +3366,6 @@ static HFONT FdFontAb()    {            // "ab": KillerPDF's underlined Whole Wo
 static HFONT FdFontStat()  { return CaptionFont(g_fntStat,  11, false, L"Killer Sans UI"); }
 static HFONT FdFontGlyph() { return CaptionFont(g_fntGlyph, 12, false, L"Segoe MDL2 Assets"); }
 
-// Metrics (dpi units): shadow margins around the visual bar, then the row.
-// The bar is KillerPDF's Border to the pixel: 1px PaneBorderBrush frame, 4px
-// padding, the content grid's own 8/6/8/6 margin, then the 26px row -> a 48px
-// card. Bar width = the fixed cells + the edit; the edit shrinks (60..200) so
-// the whole bar always fits the card, FitSearchBox-style.
-static const int FdPadX = 24, FdPadT = 14, FdPadB = 28;   // window margins for the shadow
-static const int FdBarH = 48, FdEditH = 26, FdBtnW = 26, FdBtnH = 24, FdStatW = 96;
-static const int FdGripW = 20;   // the drag grip: margin 2 + two 3px dot columns + margin 6
-// left border+pad+grid margin 1+4+8 | grip 20 | icon 12+6 | Aa | ab | status 2+96+2 | prev | next | close | grid margin+pad+border 8+4+1
-static const int FdBarFix = 13 + FdGripW + 12 + 6 + FdBtnW * 2 + 2 + FdStatW + 2 + FdBtnW * 3 + 13;
-
-enum { FB_GRIP, FB_AA, FB_AB, FB_PREV, FB_NEXT, FB_CLOSE, FB_COUNT };
-
-static int FdEditW(int vw) {
-    return std::clamp(vw - FdD(FdBarFix) - FdD(16) - 2 * FdD(FdPadX), FdD(60), FdD(200));
-}
-
-struct FdRects {
-    RECT bar, grip, icon, edit, status, btn[FB_COUNT];
-};
-
-static void FdLayout(int editW, FdRects& R) {
-    int bw = FdD(FdBarFix) + editW;
-    R.bar = { FdD(FdPadX), FdD(FdPadT), FdD(FdPadX) + bw, FdD(FdPadT) + FdD(FdBarH) };
-    R.btn[FB_GRIP] = { 0, 0, 0, 0 };                          // the grip is its own cell
-    int top = R.bar.top + FdD(11);                            // inside border 1 + padding 4 +
-                                                              // the content grid's top margin 6
-    int x = R.bar.left + FdD(13);                             // the grid's left margin 8
-    R.grip = { x, top, x + FdD(FdGripW), top + FdD(FdEditH) };   // KillerPDF's drag grip cell
-    x += FdD(FdGripW);
-    R.icon = { x, top, x + FdD(12), top + FdD(FdEditH) };
-    x += FdD(12) + FdD(6);
-    R.edit = { x, top, x + editW, top + FdD(FdEditH) };
-    x += editW;
-    for (int i = FB_AA; i < FB_COUNT; i++) {
-        if (i == FB_PREV) {                                   // the status cell sits before prev,
-            R.status = { x + FdD(2), top,                     // centred on the 26px row like the
-                         x + FdD(2) + FdD(FdStatW), top + FdD(FdEditH) };   // WPF TextBlock is
-            x += FdD(2) + FdD(FdStatW) + FdD(2);
-        }
-        R.btn[i] = { x, top + FdD(1), x + FdD(FdBtnW), top + FdD(1) + FdD(FdBtnH) };
-        x += FdD(FdBtnW);
-    }
-}
-
-static int FdHit(POINT p) {
-    FdRects R; FdLayout(FdEditW(CardW()), R);
-    if (p.x >= R.grip.left && p.x < R.grip.right && p.y >= R.grip.top && p.y < R.grip.bottom)
-        return FB_GRIP;
-    for (int i = FB_AA; i < FB_COUNT; i++)
-        if (p.x >= R.btn[i].left && p.x < R.btn[i].right && p.y >= R.btn[i].top && p.y < R.btn[i].bottom)
-            return i;
-    return -1;
-}
-
 // The query edit's vertical placement. KillerPDF centres the text the WPF way:
 // the box is 26px and the line rides its middle (VerticalContentAlignment
 // Center + the template's centred PART_ContentHost). A single-line EDIT paints
@@ -3241,11 +3375,11 @@ static int FdHit(POINT p) {
 // the size of the line is centred whether the EDIT draws top or centre, and
 // the glyph body lands mid-box on the real font's own metrics, no ratio guess.
 static void FdEditGeom(int boxH, int& h, int& off) {
-    HDC dc = GetDC(g_find);
+    HDC dc = GetDC(g_fedit ? g_fedit : (g.view ? g.view : nullptr));
     HFONT of = (HFONT)SelectObject(dc, FdFontEdit());
     TEXTMETRICW tm{}; GetTextMetricsW(dc, &tm);
     SelectObject(dc, of);
-    ReleaseDC(g_find, dc);
+    ReleaseDC(g_fedit ? g_fedit : (g.view ? g.view : nullptr), dc);
     h = min(FdD(FdEditH), (int)tm.tmHeight + 1);   // the line box + 1px of slack; the
                                                    // cast: tmHeight is LONG - MSVC's
                                                    // std::min cannot deduce across it
@@ -3253,7 +3387,9 @@ static void FdEditGeom(int boxH, int& h, int& off) {
                                                    // VerticalContentAlignment Center
 }
 
-static void FindStatusRepaint() { if (g_find && fd.open) InvalidateRect(g_find, nullptr, FALSE); }
+static void FindStatusRepaint() {
+    if (g.view && fd.open) { RECT r = FdRect(); InvalidateRect(g.view, &r, FALSE); }
+}
 
 // Lands the cursor match: the counter, the repaint, and - when stepping - the
 // scroll onto the match (Single mode flips pages first, the other modes scroll
@@ -3301,10 +3437,10 @@ static void FindOption(bool matchCase) {
     else fd.wholeWord = !fd.wholeWord;
     FindStatusRepaint();
     if (fd.query.size() >= 2 && fd.query.find_first_not_of(L" \t\n\r") != std::wstring::npos) {
-        if (g_find) KillTimer(g_find, 1);
+        if (g.view) KillTimer(g.view, 7);
         fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = false;
         fd.anchor = max(0, g.cur);
-        if (g_find) SetTimer(g_find, 2, 30, nullptr);
+        if (g.view) SetTimer(g.view, 8, 30, nullptr);
     }
 }
 
@@ -3312,7 +3448,7 @@ static void FindRun() {
     if (fd.query.size() < 2 || fd.query.find_first_not_of(L" \t\n\r") == std::wstring::npos) return;
     fd.gen++; fd.scan = 0; fd.hits.clear(); fd.cur = -1; fd.done = false; fd.pending = false;
     fd.anchor = max(0, g.cur);
-    if (g_find) SetTimer(g_find, 2, 30, nullptr);
+    if (g.view) SetTimer(g.view, 8, 30, nullptr);
 }
 
 // The pump: scan pages until a small time budget is spent, then hand control
@@ -3324,7 +3460,7 @@ static void FindRun() {
 // of arriving only after the whole book. Every edit bumps gen, and a stale
 // pump (this gen is no longer the state's) drops everything it has gathered.
 static void FindPump() {
-    if (!g_find || fd.done) { if (g_find) KillTimer(g_find, 2); return; }
+    if (fd.done) { if (g.view) KillTimer(g.view, 8); return; }
     unsigned my = fd.gen;
     unsigned long long t0 = GetTickCount64();
     std::vector<FRect> rs;
@@ -3341,7 +3477,7 @@ static void FindPump() {
     FindStatusRepaint();                          // the counter climbs as pages land
     if (fd.scan >= g.n) {
         fd.done = true;
-        KillTimer(g_find, 2);
+        if (g.view) KillTimer(g.view, 8);
         FindFinish();
     }
 }
@@ -3357,40 +3493,34 @@ static void FindChanged() {
     fd.query = q;
     fd.pending = q.size() >= 2 &&
                  q.find_first_not_of(L" \t\n\r") != std::wstring::npos;   // a run is coming
-    if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); }
+    if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
     if (q.size() < 2) {
         InvalidateRect(g.view, nullptr, FALSE);
         FindStatusRepaint();
         return;
     }
-    if (g_find) SetTimer(g_find, 1, 250, nullptr);
+    if (g.view) SetTimer(g.view, 7, 250, nullptr);
 }
 
 static void FindOpen(bool create = true) {
     fd.open = true;
+    fd.query.clear(); fd.hits.clear(); fd.cur = -1; fd.scan = 0; fd.gen++; fd.done = true; fd.hot = -1;
+    fd.pending = false; fd.anchor = 0; fd.dx = fd.dy = 0;   // a fresh bar opens at home
     if (create && g.view) {
-        if (!g_find) {
-            WNDCLASSEXW fc{ sizeof fc };
-            fc.lpfnWndProc = FindProc; fc.hInstance = g.hinst;
-            fc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            fc.lpszClassName = L"DocsyFind";
-            RegisterClassExW(&fc);
-            g_find = CreateWindowExW(0, L"DocsyFind", nullptr, WS_CHILD | WS_CLIPCHILDREN,
-                                     0, 0, 0, 0, g.view, nullptr, g.hinst, nullptr);
-            if (!g_find) { fd.open = false; return; }
+        if (!g_fedit) {
             g_fedit = CreateWindowExW(0, L"EDIT", nullptr,
-                                      WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                      0, 0, 0, 0, g_find, nullptr, g.hinst, nullptr);
+                                      WS_CHILD | ES_AUTOHSCROLL,
+                                      0, 0, 0, 0, g.view, nullptr, g.hinst, nullptr);
+            if (!g_fedit) { fd.open = false; return; }
             SendMessageW(g_fedit, WM_SETFONT, (WPARAM)FdFontEdit(), TRUE);
             SendMessageW(g_fedit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
                          MAKELPARAM(FdD(6), FdD(6)));
             g_feditDef = (WNDPROC)SetWindowLongPtrW(g_fedit, GWLP_WNDPROC, (LONG_PTR)FindEditProc);
         }
-        FindPlace();
-        ShowWindow(g_find, SW_SHOWNOACTIVATE);
+        FindPlace();                              // the edit rides its ring at the home spot
+        ShowWindow(g_fedit, SW_SHOWNOACTIVATE);
+        InvalidateRect(g.view, nullptr, FALSE);   // the bar enters the composite
     }
-    fd.query.clear(); fd.hits.clear(); fd.cur = -1; fd.scan = 0; fd.gen++; fd.done = true; fd.hot = -1;
-    fd.pending = false; fd.anchor = 0; fd.dx = fd.dy = 0;   // a fresh bar opens at home
     if (g_fedit) { SetWindowTextW(g_fedit, L""); SetFocus(g_fedit); }   // open empty, focus ready
 }
 
@@ -3399,9 +3529,10 @@ static void FindClose() {
     fd.open = false;
     fd.gen++; fd.done = true; fd.scan = 0;
     fd.hits.clear(); fd.cur = -1; fd.query.clear(); fd.hot = -1; fd.pending = false;
-    if (g_find) { KillTimer(g_find, 1); KillTimer(g_find, 2); ShowWindow(g_find, SW_HIDE); }
+    if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
+    if (g_fedit) ShowWindow(g_fedit, SW_HIDE);   // the bar was never a window: hide the edit
     if (g.main) SetFocus(g.main);                 // the keys go home (they live on the main window)
-    InvalidateRect(g.view, nullptr, FALSE);       // the highlights leave with the bar
+    InvalidateRect(g.view, nullptr, FALSE);       // the highlights and the bar leave with it
 }
 
 static void FindToggle() { fd.open ? FindClose() : FindOpen(); }
@@ -3615,122 +3746,6 @@ static void FindDraw(HDC dc, int ox, int oy) {
     }
 }
 
-// The bar's back buffer (one blit: a direct paint showed every intermediate
-// step - backdrop copy, shadow, panel - which is exactly the strobing the
-// caption buttons once did under the cursor).
-static HDC g_fdc = nullptr; static HBITMAP g_fbm = nullptr, g_fold = nullptr;
-static int g_fw = 0, g_fh = 0;
-static void EnsureFindBack(HDC ref, int w, int h) {
-    if (g_fbm && g_fw == w && g_fh == h) return;
-    if (g_fbm) { SelectObject(g_fdc, g_fold); DeleteObject(g_fbm); }
-    else g_fdc = CreateCompatibleDC(ref);
-    g_fbm = CreateCompatibleBitmap(ref, w, h);
-    g_fold = (HBITMAP)SelectObject(g_fdc, g_fbm);
-    g_fw = w; g_fh = h;
-}
-
-static LRESULT CALLBACK FindProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
-    switch (m) {
-    case WM_ERASEBKGND: return 1;
-    case WM_PAINT: {
-        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
-        RECT r; GetClientRect(h, &r);
-        if (r.right > 0 && r.bottom > 0) {
-            EnsureFindBack(dc, r.right, r.bottom);
-            // the view's live pixels behind us: the shadow melts onto the pages,
-            // the margins disappear into the view - the bar floats, WPF-style
-            POINT po{ 0, 0 }; MapWindowPoints(h, g.view, &po, 1);
-            RECT vr{ po.x, po.y, po.x + r.right, po.y + r.bottom };
-            FillRect(g_fdc, &r, GrainBrush(1));
-            RECT ix{ max(0, (int)vr.left), max(0, (int)vr.top),
-                     min(g.bw, (int)vr.right), min(g.bh, (int)vr.bottom) };
-            if (g.bdc && ix.right > ix.left && ix.bottom > ix.top)
-                BitBlt(g_fdc, ix.left - vr.left, ix.top - vr.top, ix.right - ix.left, ix.bottom - ix.top,
-                       g.bdc, ix.left, ix.top, SRCCOPY);
-            POINT pm{ 0, 0 }; MapWindowPoints(h, g.main, &pm, 1);   // the shared grain phase
-            SetBrushOrgEx(g_fdc, -pm.x, -pm.y, nullptr);
-            FindDraw(g_fdc, 0, 0);
-            BitBlt(dc, 0, 0, r.right, r.bottom, g_fdc, 0, 0, SRCCOPY);
-        }
-        EndPaint(h, &ps);
-        return 0;
-    }
-    case WM_TIMER:
-        if (wp == 1) { KillTimer(h, 1); FindRun(); return 0; }    // the debounce fired
-        if (wp == 2) { FindPump(); return 0; }
-        return 0;
-    case WM_COMMAND:
-        if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g_fedit) FindChanged();
-        return 0;
-    case WM_CTLCOLOREDIT: {                            // the dark edit: light text on chrome
-        HDC dc = (HDC)wp;
-        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-        SetBkColor(dc, RGB(0x1c, 0x1c, 0x1c));
-        static HBRUSH b = CreateSolidBrush(RGB(0x1c, 0x1c, 0x1c));
-        return (LRESULT)b;
-    }
-    case WM_MOUSEMOVE: {
-        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        if (fd.drag) {                           // the grip is moving the bar
-            fd.dx += p.x - fd.dragX;
-            fd.dy += p.y - fd.dragY;
-            fd.dragX = p.x; fd.dragY = p.y;
-            FindClampDrag();
-            FindPlace(true);                     // moves the bar and paints its own wake:
-            return 0;                            // no stale strip, no lag frame (see below)
-        }
-        int ht = FdHit(p);
-        if (ht != fd.hot) {                            // repaints only on a hover flip
-            fd.hot = ht;
-            if (ht >= 0) TrackLeave(h);
-            InvalidateRect(h, nullptr, FALSE);
-        }
-        return 0;
-    }
-    case WM_MOUSELEAVE:
-        if (fd.hot != -1) { fd.hot = -1; InvalidateRect(h, nullptr, FALSE); }
-        return 0;
-    case WM_LBUTTONDOWN: {
-        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        int ht = FdHit(p);
-        if (ht == FB_GRIP) {                     // grab the grip: the bar follows the pointer
-            fd.drag = true; fd.dragX = p.x; fd.dragY = p.y;
-            SetCapture(h);
-            return 0;
-        }
-        FdRects R; FdLayout(FdEditW(CardW()), R);   // a press anywhere in the query box -
-        if (p.x >= R.edit.left - 1 && p.x < R.edit.right + 1 &&   // the edit only owns its line-
-            p.y >= R.edit.top - 1 && p.y < R.edit.bottom + 1) {   // box window - focuses it
-            SetFocus(g_fedit);
-            return 0;
-        }
-        if (ht == FB_CLOSE) FindClose();
-        else if (ht == FB_PREV) FindStep(-1);
-        else if (ht == FB_NEXT) FindStep(1);
-        else if (ht == FB_AA) FindOption(true);
-        else if (ht == FB_AB) FindOption(false);
-        return 0;
-    }
-    case WM_LBUTTONUP:
-        if (fd.drag) { fd.drag = false; ReleaseCapture(); }
-        return 0;
-    case WM_CAPTURECHANGED:
-        fd.drag = false;
-        return 0;
-    case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;   // the bar floats; the wheel still scrolls
-    case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) {                  // every hit cell is a button: the grip
-            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);   // and Aa/ab/prev/next/close take
-            int ht = fd.drag ? FB_GRIP : FdHit(p);     // the hand (ToolbarButton's Cursor=Hand),
-            SetCursor(fd.drag || ht >= 0 ? LoadCursorW(nullptr, IDC_HAND)   // the field an arrow
-                                         : LoadCursorW(nullptr, IDC_ARROW));
-            return TRUE;
-        }
-        break;
-    }
-    return DefWindowProcW(h, m, wp, lp);
-}
-
 // The edit's keys: Enter steps, Shift+Enter steps back, Escape closes, Ctrl+F
 // closes (the toggle), Alt+C / Alt+W flip the option toggles from the box -
 // KillerPDF's SearchBox_KeyDown + TrySearchOptionKey; everything else edits.
@@ -3747,63 +3762,27 @@ static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (wp == 'W') { FindOption(false); return 0; }    // Whole Word
     } else if (m == WM_MOUSEMOVE) {                    // the edit is a child: its moves leave the
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; // bar's hover tiles stale (a button under
-        MapWindowPoints(h, g_find, &p, 1);             // the cursor stays lit) - hand them up so
-        SendMessageW(g_find, WM_MOUSEMOVE, 0, MAKELPARAM(p.x, p.y));   // the tiles clear, then let
-    }                                                  // the edit still run its own drag-select
+        MapWindowPoints(h, g.view, &p, 1);             // the cursor stays lit) - hand them to the
+        SendMessageW(g.view, WM_MOUSEMOVE, 0,          // view so the tiles clear, then let the
+                     MAKELPARAM(p.x, p.y));            // edit still run its own drag-select
+    } else if (m == WM_MOUSEWHEEL) {                   // the wheel scrolls the page from the box
+        ViewWheel(wp, lp); return 0;                   // too, the way WPF bubbles it upward
+    }
     return CallWindowProcW(g_feditDef, h, m, wp, lp);
 }
 
-// Size and spot the bar: the edit shrinks to fit (60..200), the bar's right
-// edge rides 16px in from the view's right, top 6px under the view's top -
-// plus the grip's drag offset, clamped so the visual bar stays on the card.
-// wake=true is the live grip drag: a moved child leaves the strip it vacated
-// showing whatever was on screen until the parent's next paint, and that
-// one-frame strip of old bar over the page is the "flashing" under the cursor;
-// the move also repaints the bar a frame late, which reads as "snapping". So
-// the drag paints its own wake, in order, inside the mouse-move: the vacated
-// strips blit straight from the view's back buffer (the bar never lives there,
-// so the pixels are the clean page that belongs under it), then the bar
-// repaints synchronously over the fresh backdrop - one clean frame per
-// pointer move, WPF's single-surface drag.
-static void FindPlace(bool wake) {
-    if (!g_find || !g_fedit || !g.view) return;
-    int vw = CardW();
-    if (vw <= 0) return;
-    RECT ro{ 0, 0, 0, 0 };
-    if (wake) {                                   // where the bar sits NOW - read off the
-        GetWindowRect(g_find, &ro);               // window itself, not the offsets: the
-        MapWindowPoints(nullptr, g.view, (POINT*)&ro, 2);   // caller has already moved them
-    }
-    FindClampDrag();                         // a resized card re-clamps the drag offset
-    int editW = FdEditW(vw);
-    int bw = FdD(FdBarFix) + editW, bh = FdD(FdBarH);
-    MoveWindow(g_find, vw - FdD(16) - bw - FdD(FdPadX) + fd.dx, FdD(6) - FdD(FdPadT) + fd.dy,
-               bw + 2 * FdD(FdPadX), bh + FdD(FdPadT) + FdD(FdPadB), !wake);
-    if (wake && g.bdc) {
-        RECT rn{ ro.left, ro.top, ro.right, ro.bottom };   // the same math post-clamp:
-        rn.left = vw - FdD(16) - bw - FdD(FdPadX) + fd.dx;               // the window's
-        rn.top = FdD(6) - FdD(FdPadT) + fd.dy;                           // new rect
-        rn.right = rn.left + bw + 2 * FdD(FdPadX);
-        rn.bottom = rn.top + bh + FdD(FdPadT) + FdD(FdPadB);
-        HDC sdc = GetDC(g.view);
-        RECT strips[4] = {                               // old rect minus new rect:
-            { ro.left, ro.top, ro.right, min(ro.bottom, rn.top) },              // above
-            { ro.left, max(ro.top, rn.bottom), ro.right, ro.bottom },           // below
-            { ro.left, max(ro.top, rn.top), min(ro.right, rn.left), min(ro.bottom, rn.bottom) },
-            { max(ro.left, rn.right), max(ro.top, rn.top), ro.right, min(ro.bottom, rn.bottom) },
-        };
-        for (const RECT& s : strips)
-            if (s.left < s.right && s.top < s.bottom)
-                BitBlt(sdc, s.left, s.top, s.right - s.left, s.bottom - s.top,
-                       g.bdc, s.left, s.top, SRCCOPY);
-        ReleaseDC(g.view, sdc);
-        InvalidateRect(g_find, nullptr, FALSE);   // the bar repaints over the fresh
-        UpdateWindow(g_find);                     // backdrop - inside this same frame
-        return;
-    }
-    FdRects R; FdLayout(editW, R);
+// Park the edit inside its ring. The bar itself is composite pixels - there is
+// no bar window to move, ever, so a drag, a resize or an open only re-parks
+// this one control: the line-box window (FdEditGeom) centred in the 26px box,
+// in VIEW coordinates at the bar's current origin. The composite repaints from
+// the same invalidate that follows the move - one frame, no seams.
+static void FindPlace() {
+    if (!g_fedit || !g.view) return;
+    FindClampDrag();                              // a resized card re-clamps the drag offset
+    int bx, by; FdOrigin(bx, by);
+    FdRects R; FdLayout(FdEditW(CardW()), R);
     int eh, eoff; FdEditGeom(R.edit.bottom - R.edit.top, eh, eoff);
-    MoveWindow(g_fedit, R.edit.left, R.edit.top + eoff,
+    MoveWindow(g_fedit, bx + R.edit.left, by + R.edit.top + eoff,
                R.edit.right - R.edit.left, eh, FALSE);
 }
 
@@ -3841,7 +3820,7 @@ static void LayoutMain() {
     }
     MoveWindow(g.view, sw, cap + tb, w - sw, ch, TRUE);
     if (g.status) MoveWindow(g.status, 0, cap + tb + ch, w, sh, TRUE);
-    if (g_find && fd.open) FindPlace();          // the bar tracks the card's top-right corner
+    if (g_fedit && fd.open) FindPlace();        // the edit tracks the card's top-right corner
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
     g.sx = std::clamp(g.sx, 0, max(0, g.docW - CardW()));
@@ -4149,11 +4128,9 @@ static int Shot(const wchar_t* out, int w, int h) {
         g_grainPX = -sw; g_grainPY = -(cap + tb);        // the view's grain phase, as on screen
         Draw(m2, w - sw, ch, 0);
         PaintViewBars(m2, w - sw, ch, 0);
-        if (fd.open) {                                  // the floating Find bar, over its pixels
-            int editW = FdEditW(w - sw);
-            int bw = FdD(FdBarFix) + editW;
-            FindDraw(m2, (w - sw) - FdD(16) - bw - FdD(FdPadX) + fd.dx, FdD(6) - FdD(FdPadT) + fd.dy);
-        }
+        if (fd.open) {                                  // the floating Find bar, over its pixels -
+            FindDraw(m2, FdRect().left, FdRect().top);  // the same FdRect the live view paints,
+        }                                               // so the shot IS the app's composite
         BitBlt(dc, sw, cap + tb, w - sw, ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
     }
