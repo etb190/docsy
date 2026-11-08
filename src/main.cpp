@@ -2637,7 +2637,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (ht >= 0 || FdOverBar(p)) return 0;   // over the chrome: no page hover work
         }
         if (g.splitDrag) {                       // the divider follows the pointer, clamped so
-            int nl = std::clamp(p.x, g.cw / 5, g.cw * 4 / 5);   // neither pane goes under a fifth
+            int nl = std::clamp((int)p.x, g.cw / 5, g.cw * 4 / 5);   // neither pane under a fifth
+                                                // (p.x is LONG: MSVC's clamp cannot deduce it)
             if (nl != g.splitX) {
                 int band0 = max(0, min(g.splitX, nl) - SBar() - SplitGap());
                 int band1 = min(g.cw, max(g.splitX, nl) + SplitGap() + SBar() + 1);
