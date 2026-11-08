@@ -186,6 +186,24 @@ struct App {
     int stHot = -1;                     // hovered footer control, -1 none
     bool zoomOpen = false;              // the footer zoom dropdown is on screen
     int zoomHot = -1;                   // highlighted item inside the open dropdown
+    // the right rail (the reference app's vertical button strip): three vector
+    // buttons - Pages, Split pane, Document Info - gray at rest, green while
+    // their feature is on, RowHover under the cursor
+    HWND rail = nullptr;
+    int railHot = -1;                   // hovered rail button, -1 none
+    bool railPressed = false;           // a rail button is held down
+    // split view: two panes over ONE shared page layout, each with its own
+    // scroll position (KillerPDF's split, minus its per-copy edit machinery -
+    // docsy is a reader, so a pane is a viewport, not a document copy)
+    bool split = false;                 // split view is on
+    int splitX = 0;                     // divider x in view coords; pane A is [0, splitX)
+    bool splitA = true;                 // the focused pane: true = A, false = B
+    bool splitDrag = false;             // the divider is being dragged
+    bool lineHot = false;               // the divider is hovered
+    int sx2 = 0, sy2 = 0;               // pane B's scroll position
+    bool vHot2 = false, vDrag2 = false, hHot2 = false, hDrag2 = false;   // pane B's bars
+    int vGrab2 = 0, hGrab2 = 0;
+    bool infoOpen = false;              // the Document Info flyout is on screen
 };
 static App g;
 
@@ -246,6 +264,24 @@ static int PH(int i) { return max(1, (int)std::lround(g.ph[i] * g.zoom * g.dpi))
 static int Gap() { return max(4, (int)(10 * g.dpi)); }
 static int SBar() { return (int)(12 * g.dpi); }   // overlay bar gutter: KillerPDF's ScrollBarThickness
 static int CardW();                               // the document card's width: view minus the 8px window gutter
+
+// ---- split-view pane helpers ----
+// Pane A owns the classic scroll state (g.sx/g.sy); pane B has its own pair.
+// The page layout itself (g.px/g.top/g.rh/g.docW/g.docH) stays shared and is
+// computed at the full view width, so both panes are two viewports onto one
+// document flow - the reader's split, not two copies of the file. Pane B's
+// screen x ranges [splitX+gap, g.cw); the middle strip is the divider.
+static int SplitGap() { return max(3, (int)(3 * g.dpi)); }
+static bool PaneB(int x) { return g.split && x >= g.splitX + SplitGap(); }   // a view x is in pane B
+static bool FocusB() { return g.split && !g.splitA; }                        // the focused pane is B
+static int FocusSy() { return FocusB() ? g.sy2 : g.sy; }                     // its vertical scroll
+static int& PaneSx(bool b) { return b ? g.sx2 : g.sx; }
+static int& PaneSy(bool b) { return b ? g.sy2 : g.sy; }
+
+// the rail's Document Info flyout, defined with the rail section below
+static RECT InfoRect();
+static void InfoToggle();
+static void InfoDraw(HDC dc, int ox, int oy);
 
 static HBRUSH GrainBrush(int which);   // defined with the grain tile below
 
@@ -1396,11 +1432,13 @@ static void SelAll() {
 // drag point into the page canvas the same way). Multi-column rows resolve the
 // page by x (a point in the gap clamps to the nearest page, so a drag across a
 // spread flows through both pages like KillerPDF's Continuous does).
-static bool ViewToPage(POINT v, int w, int h, int& page, float& dx, float& dy) {
+// Pane-aware core: the caller names the scroll state the point lives in (pane
+// B passes its own pair). Everything else is the classic mapping.
+static bool ViewToPageAt(POINT v, int w, int h, int sx, int sy, int& page, float& dx, float& dy) {
     if (!g.n) return false;
     int gut = g.docH > h ? SBar() : 0;
-    int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -g.sx;
-    int r = RowAt(v.y + g.sy);
+    int offx = g.docW < w - gut ? (w - gut - g.docW) / 2 : -sx;
+    int r = RowAt(v.y + sy);
     if (r < 0 || r >= RowCount()) return false;
     int cnt = g.vm == 1 ? 1 : min(PerRow(), g.n - r * PerRow());
     int best = -1; float bestD = FLT_MAX;
@@ -1414,7 +1452,7 @@ static bool ViewToPage(POINT v, int w, int h, int& page, float& dx, float& dy) {
     float k = (float)(g.zoom * g.dpi);
     if (k <= 0) return false;
     page = best;
-    int py = g.top[r] - g.sy + (g.rh[r] - PH(best)) / 2;
+    int py = g.top[r] - sy + (g.rh[r] - PH(best)) / 2;
     dx = (v.x - (offx + g.px[best])) / k;
     dy = (v.y - py) / k;
     dx = std::clamp(dx, 0.0f, (float)PW(best) / k);
@@ -1422,14 +1460,18 @@ static bool ViewToPage(POINT v, int w, int h, int& page, float& dx, float& dy) {
     return true;
 }
 
+static bool ViewToPage(POINT v, int w, int h, int& page, float& dx, float& dy) {
+    return ViewToPageAt(v, w, h, g.sx, g.sy, page, dx, dy);
+}
+
 static void SideSync();
 static void LayoutMain();
 static void StatusRepaint();
 
-static void UpdateTitle() {   // sidebar highlight follows the page under the upper
-    int c = g.n ? PageAt(g.sy + g.ch / 3) : -1;   // third. The window text stays "Docsy"
-    if (c != g.cur) {                             // - the open file's name shows nowhere.
-        g.cur = c;
+static void UpdateTitle() {   // the sidebar highlight follows the focused pane's
+    int c = g.n ? PageAt(FocusSy() + g.ch / 3) : -1;   // page under its upper third. The
+    if (c != g.cur) {                             // window text stays "Docsy" - the open
+        g.cur = c;                                // file's name shows nowhere.
         if (g.view) SetTimer(g.view, 4, 160, nullptr);   // pre-warm the page's text once
         SideSync();                           // the scroll settles (never mid-gesture)
         StatusRepaint();                      // "Page N of M" moved
@@ -1440,6 +1482,10 @@ static void UpdateScroll() {
     g.busy = true;
     g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
     g.sx = std::clamp(g.sx, 0, max(0, g.docW - CardW()));
+    if (g.split) {                                // pane B rides the same shared layout,
+        g.sy2 = std::clamp(g.sy2, 0, max(0, g.docH - g.ch));   // so its clamps are identical
+        g.sx2 = std::clamp(g.sx2, 0, max(0, g.docW - CardW()));
+    }
     g.busy = false;
     g.scrollTick = GetTickCount64();
 }
@@ -1478,19 +1524,22 @@ static void Layout() {
     UpdateTitle();
 }
 
-static void SetZoom(double z, int ax, int ay) {
-    z = std::clamp(z, 0.1, 4.0);
-    double ry = g.docH ? (double)(g.sy + ay) / g.docH : 0, rx = g.docW ? (double)(g.sx + ax) / g.docW : 0;
+static void SetZoomAt(double z, int ax, int ay, bool b) {
+    int& sxr = PaneSx(b); int& syr = PaneSy(b);   // the anchor names its pane: pane B zooms
+    z = std::clamp(z, 0.1, 4.0);                  // around its own viewport point
+    double ry = g.docH ? (double)(syr + ay) / g.docH : 0, rx = g.docW ? (double)(sxr + ax) / g.docW : 0;
     if (z != g.zoom) ClearCache();
     g.zoom = z; g.fitMode = 2;              // an explicit zoom leaves the fit modes
     Layout();
-    g.sy = (int)(ry * g.docH) - ay;
-    if (g.docW > CardW()) g.sx = (int)(rx * g.docW) - ax;
+    syr = (int)(ry * g.docH) - ay;
+    if (g.docW > CardW()) sxr = (int)(rx * g.docW) - ax;
     UpdateScroll();
     InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
     StatusRepaint();
 }
+
+static void SetZoom(double z, int ax, int ay) { SetZoomAt(z, ax, ay, FocusB()); }
 
 // KillerPDF's FitToWidth / FitToPage, mode-aware: the fit target is the widest
 // ROW (a spread in TwoPage, 3 columns in Grid), and Page additionally height-
@@ -1526,15 +1575,25 @@ static void ApplyFit(bool pageFit = false) {
     StatusRepaint();
 }
 
-static void ScrollTo(int x, int y) {
+// One pane's scroll: clamped into the shared layout, invalidated over THAT
+// pane's pixels only, and the sidebar/status follow just the focused pane (a
+// background pane may scroll without dragging the page ring along).
+static void ScrollPane(bool b, int x, int y) {
     x = std::clamp(x, 0, max(0, g.docW - CardW()));
     y = std::clamp(y, 0, max(0, g.docH - g.ch));
-    if (x == g.sx && y == g.sy) return;
-    g.sx = x; g.sy = y;
+    int& sxr = PaneSx(b); int& syr = PaneSy(b);
+    if (x == sxr && y == syr) return;
+    sxr = x; syr = y;
     g.scrollTick = GetTickCount64();
-    InvalidateRect(g.view, nullptr, FALSE);
-    UpdateTitle();
+    if (g.view) {
+        RECT r{ 0, 0, g.split ? g.splitX : g.cw, g.ch };
+        if (b) r = { g.splitX + SplitGap(), 0, g.cw, g.ch };
+        InvalidateRect(g.view, &r, FALSE);
+    }
+    if (b == FocusB()) UpdateTitle();
 }
+
+static void ScrollTo(int x, int y) { ScrollPane(FocusB(), x, y); }
 
 // Single mode's page flip (KillerPDF's F6 view): the document IS one page, so
 // navigation replaces it and parks at the top. The sidebar's current-page ring
@@ -1544,7 +1603,7 @@ static void SetPage(int i) {
     i = std::clamp(i, 0, g.n - 1);
     g.cur = i;
     if (g.fitMode != 2) ApplyFit(g.fitMode == 1); else Layout();
-    g.sx = 0; g.sy = 0;
+    PaneSx(FocusB()) = 0; PaneSy(FocusB()) = 0;   // the flip parks the focused pane at the top
     UpdateScroll();
     if (g.view) SetTimer(g.view, 4, 160, nullptr);   // pre-warm the new page's text
     SideSync();
@@ -1571,6 +1630,7 @@ static bool Open(const std::wstring& p) {
         g.sx = g.sy = 0; g.zoom = 1.0; g.fitMode = 2; g.cur = -1;   // every document opens
                                                       // at 100%; -1 so LayoutMain's UpdateTitle
                                                       // sees the change and syncs the sidebar highlight
+        g.sx2 = g.sy2 = 0; g.splitA = true;          // pane B restarts with the document too
         // fresh sidebar for the new document
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0; sd.cw = 0; sd.ch = 0;
@@ -2166,7 +2226,10 @@ static void FindPaintPage(HDC dc, int page, int px, int py) {
     }
 }
 
-static void Draw(HDC dc, int w, int h, int xoff) {
+// `extra` (optional) intersects the card clip with a pane region, so the
+// split's two passes can share one Draw: same backdrop bake, same layout, each
+// pass revealing only its pane's strip of the one document flow.
+static void Draw(HDC dc, int w, int h, int xoff, HRGN extra = nullptr) {
     CardBackdrop(dc, w, h, xoff);        // baked field + PaneShadow + canvas, once per size
     if (g_bdBmp) BitBlt(dc, xoff, 0, w, h, g_bdDC, 0, 0, SRCCOPY);
     else {
@@ -2179,6 +2242,7 @@ static void Draw(HDC dc, int w, int h, int xoff) {
     HRGN clip = card ? CreateRoundRectRgn(xoff + 2, 2, xoff + cw - 2, h - 2, 2 * (rad - 2), 2 * (rad - 2)) : nullptr;
     if (clip) SelectClipRgn(dc, clip);   // ContentClip: two pixels inside the card, past the
                                          // region's corner steps, so pages never nick the ring
+    if (extra) ExtSelectClipRgn(dc, extra, RGN_AND);   // then the pane's strip, if splitting
     if (!g.n) {
         int sz = (int)(128 * g.dpi);
         if (!g.logo) g.logo = (HICON)LoadImageW(g.hinst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
@@ -2299,20 +2363,51 @@ static void PaintViewBars(HDC dc, int w, int h, int xoff) {
     }
 }
 
+// One split pane's overlay bars: the vertical thumb hugs THIS pane's right
+// edge (pane A's parks against the divider, pane B's against the card's right
+// edge) and the horizontal one spans the pane - each pane scrolls on its own,
+// so each carries its own pair, same reserved-gutter look as PaintViewBars.
+static void PaintPaneBars(HDC dc, int x0, int x1, int sx, int sy, bool vhot, bool hhot) {
+    if (!g.n || x1 - x0 <= SBar() * 2) return;
+    int gb = SBar(), r = (int)(3 * g.dpi);
+    bool vshow = g.docH > g.ch;
+    if (vshow) {
+        int tl, tp; BarThumb(g.docH, g.ch, sy, tl, tp);
+        int bw = vhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
+        RoundRectFill(dc, x1 - gb + (gb - bw) / 2, tp, bw, tl, r, vhot);
+    }
+    if (g.docW > CardW()) {
+        int track = (x1 - x0) - (vshow ? gb : 0);
+        int tl, tp; BarThumb(g.docW, track, sx, tl, tp);
+        int bw = hhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
+        RoundRectFill(dc, x0 + tp, g.ch - gb + (gb - bw) / 2, tl, bw, r, hhot);
+    }
+}
+
+static HBRUSH SplitLineBrush(bool hot) {   // the divider: chrome gray, green while it
+    static HBRUSH n = CreateSolidBrush(RGB(0x4a, 0x4a, 0x4a));   // means "grab me"
+    static HBRUSH h = CreateSolidBrush(RGB(0x22, 0xbb, 0x56));
+    return hot ? h : n;
+}
+
 static void ViewWheel(WPARAM wp, LPARAM lp) {
     int d = GET_WHEEL_DELTA_WPARAM(wp);
+    POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+    ScreenToClient(g.view, &p);                   // the pane under the wheel scrolls, focused
+    bool b = PaneB(p.x);                          // or not - that is what a split means
     if (LOWORD(wp) & MK_CONTROL) {
-        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; ScreenToClient(g.view, &p);
-        SetZoom(g.zoom * std::pow(1.12, d / 120.0), p.x, p.y);
-    } else if (LOWORD(wp) & MK_SHIFT) ScrollTo(g.sx - d * (int)(g.dpi * 80) / 120, g.sy);
-    else {
+        SetZoomAt(g.zoom * std::pow(1.12, d / 120.0), p.x, p.y, b);
+    } else if (LOWORD(wp) & MK_SHIFT) {
+        ScrollPane(b, PaneSx(b) - d * (int)(g.dpi * 80) / 120, PaneSy(b));
+    } else {
         // Single mode flips at the edges: scrolling past a page's end brings the
         // next one (KillerPDF's Single keeps one page up and navigates by flip).
         if (g.vm == 1) {
-            if (d < 0 && g.sy >= max(0, g.docH - g.ch)) { SetPage(g.cur + 1); return; }
-            if (d > 0 && g.sy <= 0) { SetPage(g.cur - 1); return; }
+            int& syr = PaneSy(b);
+            if (d < 0 && syr >= max(0, g.docH - g.ch)) { SetPage(g.cur + 1); return; }
+            if (d > 0 && syr <= 0) { SetPage(g.cur - 1); return; }
         }
-        ScrollTo(g.sx, g.sy - d * (int)(g.dpi * 80) / 120);
+        ScrollPane(b, PaneSx(b), PaneSy(b) - d * (int)(g.dpi * 80) / 120);
     }
 }
 
@@ -2334,16 +2429,45 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the grain tile phase is the
             SetBrushOrgEx(g.bdc, -po.x, -po.y, nullptr);            // window's, so the field the
             g_grainPX = -po.x; g_grainPY = -po.y;   // corner patches phase their tiles to it
-            Draw(g.bdc, g.cw, g.ch, 0);                             // card floats on never shows a
-            PaintViewBars(g.bdc, g.cw, g.ch, 0);                    // seam at a pane boundary
+            if (g.split && g.n) {                   // split: two clipped passes over ONE shared
+                int gap = SplitGap();               // layout - pane B swaps the scroll pair in,
+                int lw = std::clamp(g.splitX, g.cw / 5, g.cw * 4 / 5);   // draws its strip, swaps
+                int savSx = g.sx, savSy = g.sy;     // back out. The focused pane draws LAST so
+                for (int pass = 0; pass < 2; pass++) {   // Evict/lastVis/prefetch follow the focus
+                    bool drawB = g.splitA ? pass == 0 : pass == 1;
+                    if (drawB) {
+                        RECT pr{ lw + gap, 0, g.cw, g.ch };
+                        HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
+                        g.sx = g.sx2; g.sy = g.sy2;
+                        Draw(g.bdc, g.cw, g.ch, 0, rg);
+                        g.sx = savSx; g.sy = savSy;
+                        DeleteObject(rg);
+                        PaintPaneBars(g.bdc, lw + gap, CardW(), g.sx2, g.sy2,
+                                      g.vHot2 || g.vDrag2, g.hHot2 || g.hDrag2);
+                    } else {
+                        RECT pr{ 0, 0, lw, g.ch };
+                        HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
+                        Draw(g.bdc, g.cw, g.ch, 0, rg);
+                        DeleteObject(rg);
+                        PaintPaneBars(g.bdc, 0, lw, g.sx, g.sy, g.vHot || g.vDrag, g.hHot || g.hDrag);
+                    }
+                }
+                int lx = lw + gap / 2;              // the divider: one pixel of chrome that
+                RECT dl{ lx, 2, lx + 1, g.ch - 2 }; // turns green when it means "grab me"
+                FillRect(g.bdc, &dl, SplitLineBrush(g.lineHot || g.splitDrag));
+            } else {
+                Draw(g.bdc, g.cw, g.ch, 0);                         // card floats on never shows a
+                PaintViewBars(g.bdc, g.cw, g.ch, 0);                // seam at a pane boundary
+            }
             if (fd.open) {                          // the Find bar is composite pixels, not a
                 int bx, by; FdOrigin(bx, by);       // window: pages, highlights, overlay bars,
                 FindDraw(g.bdc, bx, by);            // the bar and its shadow land in ONE buffer,
             }                                       // and the blit below is ONE atomic frame -
-            BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);   // no exposed strips, no lag
-            SetTimer(h, 1, 5, nullptr);             // frame, no second surface to fall out of
-        }                                           // sync with the edit (WS_CLIPCHILDREN
-        EndPaint(h, &ps);                           // already guards the edit's own pixels)
+            if (g.infoOpen) InfoDraw(g.bdc, 0, 0);  // no exposed strips, no lag
+            BitBlt(dc, 0, 0, g.cw, g.ch, g.bdc, 0, 0, SRCCOPY);   // frame, no second surface to fall out of
+            SetTimer(h, 1, 5, nullptr);             // sync with the edit (WS_CLIPCHILDREN
+        }                                           // already guards the edit's own pixels)
+        EndPaint(h, &ps);
         return 0;
     }
     case WM_TIMER:
@@ -2362,7 +2486,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             KillTimer(h, 4);                   // page once it exists and scrolling has been
             if (g.n && !g.selArm) {            // quiet for a moment - off the click path
                 if (GetTickCount64() - g.scrollTick > 250) {
-                    int pg = PageAt(g.sy + g.ch / 3);
+                    int pg = PageAt(FocusSy() + g.ch / 3);
                     if (g.txt.find(pg) == g.txt.end()) TtFor(pg);
                 } else {
                     SetTimer(h, 4, 160, nullptr);   // still moving: try again after it settles
@@ -2372,8 +2496,12 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         KillTimer(h, 1); Prefetch(); return 0;
     case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;
-    case WM_MOUSEHWHEEL:
-        ScrollTo(g.sx + GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 80) / 120, g.sy); return 0;
+    case WM_MOUSEHWHEEL: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; ScreenToClient(g.view, &p);
+        bool b = PaneB(p.x);
+        ScrollPane(b, PaneSx(b) + GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 80) / 120, PaneSy(b));
+        return 0;
+    }
     case WM_KEYDOWN: return 0;   // keys live on the main window
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -2400,9 +2528,51 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             else if (ht == FB_AB) { FindOption(false); return 0; }
             if (FdOverBar(p)) return 0;          // the card's frame and padding: chrome, not a page press
         }
+        if (g.infoOpen) {                        // a press off the flyout closes it and still
+            RECT ir = InfoRect();                // lands where it fell - no dead click; a press
+            if (!PtInRect(&ir, p)) InfoToggle(); // inside is chrome and never reaches the page
+            else return 0;
+        }
         int gb = SBar();
         int cw = CardW();
         bool vshow = g.n && g.docH > g.ch;
+        if (g.split && g.n) {                    // the split owns its chrome first: the divider
+            int gap = SplitGap();                // drags, a click focuses the pane under it, and
+            int lw = std::clamp(g.splitX, g.cw / 5, g.cw * 4 / 5);   // each pane's bars answer there
+            if (p.x >= lw && p.x < lw + gap) { g.splitDrag = true; return 0; }
+            bool inB = p.x >= lw + gap;
+            if (inB != !g.splitA) { g.splitA = !inB; InvalidateRect(h, nullptr, FALSE); }   // click = focus
+            if (inB) {
+                if (vshow && p.x >= cw - gb && p.x < cw) {   // pane B's v-bar hugs the card's edge
+                    int tl, tp; BarThumb(g.docH, g.ch, g.sy2, tl, tp);
+                    if (p.y >= tp && p.y < tp + tl) { g.vDrag2 = true; g.vGrab2 = p.y - tp; }
+                    else ScrollPane(true, g.sx2, g.sy2 + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
+                    return 0;
+                }
+                if (g.docW > cw && p.y >= g.ch - gb) {   // pane B's h-bar spans its own width
+                    int x0 = lw + gap;
+                    int track = cw - x0 - (vshow ? gb : 0);
+                    int tl, tp; BarThumb(g.docW, track, g.sx2, tl, tp);
+                    if (p.x >= x0 + tp && p.x < x0 + tp + tl) { g.hDrag2 = true; g.hGrab2 = p.x - (x0 + tp); }
+                    else ScrollPane(true, g.sx2 + (p.x < x0 + tp ? -(int)(cw * 0.9) : (int)(cw * 0.9)), g.sy2);
+                    return 0;
+                }
+            } else {
+                if (vshow && p.x >= lw - gb && p.x < lw) {   // pane A's v-bar hugs the divider
+                    int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp);
+                    if (p.y >= tp && p.y < tp + tl) { g.vDrag = true; g.vGrab = p.y - tp; }
+                    else ScrollPane(false, g.sx, g.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
+                    return 0;
+                }
+                if (g.docW > cw && p.y >= g.ch - gb && p.x < lw - (vshow ? gb : 0)) {
+                    int track = lw - (vshow ? gb : 0);
+                    int tl, tp; BarThumb(g.docW, track, g.sx, tl, tp);
+                    if (p.x >= tp && p.x < tp + tl) { g.hDrag = true; g.hGrab = p.x - tp; }
+                    else ScrollPane(false, g.sx + (p.x < tp ? -(int)(cw * 0.9) : (int)(cw * 0.9)), g.sy);
+                    return 0;
+                }
+            }
+        } else {
         if (vshow && p.x >= cw - gb && p.x < cw) {   // the vertical bar: inside the card's edge
             int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp);
             if (p.y >= tp && p.y < tp + tl) { g.vDrag = true; g.vGrab = p.y - tp; }
@@ -2415,15 +2585,18 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             else ScrollTo(g.sx + (p.x < tp ? -(int)(cw * 0.9) : (int)(cw * 0.9)), g.sy);
             return 0;
         }
+        }
         if (g.sideOn && g.n && p.x < (int)(5 * g.dpi)) {   // the splitter: drag to resize the sidebar
             g.resizing = true; g.rsX = p.x; g.rsW0 = SW();
             return 0;
         }
         // flowing text selection: a press ON text starts KillerPDF's caret drag. A press
         // anywhere else starts nothing - the wheel and the keys own scrolling, so the
-        // old grab-and-pan gesture (which fought the selection drag) is gone.
+        // old grab-and-pan gesture (which fought the selection drag) is gone. The press
+        // maps through the pane it landed in, so pane B selects too.
         int pg; float fx, fy;
-        if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
+        bool pb = PaneB(p.x);
+        if (ViewToPageAt(p, CardW(), g.ch, PaneSx(pb), PaneSy(pb), pg, fx, fy)) {
             TxtPage* pt = TtFor(pg);   // builds once if the pre-warm has not reached it yet
             if (pt && TtOverText(*pt, fx, fy)) {
                 SelClear();
@@ -2463,6 +2636,31 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             if (ht >= 0 || FdOverBar(p)) return 0;   // over the chrome: no page hover work
         }
+        if (g.splitDrag) {                       // the divider follows the pointer, clamped so
+            int nl = std::clamp(p.x, g.cw / 5, g.cw * 4 / 5);   // neither pane goes under a fifth
+            if (nl != g.splitX) {
+                int band0 = max(0, min(g.splitX, nl) - SBar() - SplitGap());
+                int band1 = min(g.cw, max(g.splitX, nl) + SplitGap() + SBar() + 1);
+                g.splitX = nl;
+                RECT u{ band0, 0, band1, g.ch };   // both thumbs hug the moving edges
+                InvalidateRect(h, &u, FALSE);
+            }
+            return 0;
+        }
+        if (g.vDrag2) {
+            int tl, tp; BarThumb(g.docH, g.ch, g.sy2, tl, tp);
+            ScrollPane(true, g.sx2, (int)((long long)(p.y - g.vGrab2) * max(0, g.docH - g.ch) / max(1, g.ch - tl)));
+            return 0;
+        }
+        if (g.hDrag2) {
+            int x0 = g.splitX + SplitGap(), x1 = CardW();
+            int track = x1 - x0 - ((g.n && g.docH > g.ch) ? SBar() : 0);
+            int tl, tp; BarThumb(g.docW, track, g.sx2, tl, tp);
+            // the grab was measured from the thumb's absolute x, so the map back
+            // into scroll space subtracts the pane's track origin first
+            ScrollPane(true, (int)((long long)(p.x - x0 - g.hGrab2) * max(0, g.docW - CardW()) / max(1, track - tl)), g.sy2);
+            return 0;
+        }
         if (g.resizing) {
             int w = g.rsW0 + (p.x - g.rsX);
             if (w != g.sideW) { g.sideW = w; LayoutMain(); }   // thumbs rebuild once, on release
@@ -2489,7 +2687,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 g.selDrag = true;
             }
             int pg; float fx, fy;
-            if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
+            bool pb = PaneB(p.x);
+            if (ViewToPageAt(p, CardW(), g.ch, PaneSx(pb), PaneSy(pb), pg, fx, fy)) {
                 TxtPage* pt = TtFor(pg);
                 if (pt) {
                     int caret = TtCaret(*pt, fx, fy);
@@ -2498,6 +2697,44 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                         InvalidateRect(h, nullptr, FALSE);
                     }
                 }
+            }
+            return 0;
+        }
+        if (g.split && g.n) {                    // the split's hover work: the divider's hot
+            int gap = SplitGap();                // flip, then each pane's bars over their own
+            int lw = std::clamp(g.splitX, g.cw / 5, g.cw * 4 / 5);   // tracks
+            bool lineHot = p.x >= lw && p.x < lw + gap;
+            if (lineHot != g.lineHot) {
+                g.lineHot = lineHot;
+                RECT u{ max(0, lw - SBar()), 0, min(g.cw, lw + gap + 1), g.ch };
+                InvalidateRect(h, &u, FALSE);
+                if (lineHot) TrackLeave(h);
+            }
+            bool inB = p.x >= lw + gap;
+            bool vhot = false, hhot = false;     // pane A's bars hug the divider
+            bool vhot2 = false, hhot2 = false;   // pane B's hug the card's right edge
+            int gb = SBar();
+            if (g.docH > g.ch) {
+                if (!inB && p.x >= lw - gb && p.x < lw) {
+                    int tl, tp; BarThumb(g.docH, g.ch, g.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl;
+                }
+                if (inB && p.x >= CardW() - gb && p.x < CardW()) {
+                    int tl, tp; BarThumb(g.docH, g.ch, g.sy2, tl, tp); vhot2 = p.y >= tp && p.y < tp + tl;
+                }
+            }
+            if (g.docW > CardW() && p.y >= g.ch - gb) {
+                if (!inB && p.x < lw - ((g.docH > g.ch) ? gb : 0)) {
+                    int tl, tp; BarThumb(g.docW, lw - ((g.docH > g.ch) ? gb : 0), g.sx, tl, tp); hhot = p.x >= tp && p.x < tp + tl;
+                }
+                if (inB && p.x >= lw + gap) {
+                    int track = CardW() - (lw + gap) - ((g.docH > g.ch) ? gb : 0);
+                    int tl, tp; BarThumb(g.docW, track, g.sx2, tl, tp); hhot2 = p.x >= lw + gap + tp && p.x < lw + gap + tp + tl;
+                }
+            }
+            if (vhot != g.vHot || hhot != g.hHot || vhot2 != g.vHot2 || hhot2 != g.hHot2) {
+                g.vHot = vhot; g.hHot = hhot; g.vHot2 = vhot2; g.hHot2 = hhot2;
+                if (vhot || hhot || vhot2 || hhot2) TrackLeave(h);
+                InvalidateRect(h, nullptr, FALSE);
             }
             return 0;
         }
@@ -2513,10 +2750,11 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.vHot || g.hHot || fd.hot >= 0) {
-            g.vHot = g.hHot = false; fd.hot = -1;
+        if (g.vHot || g.hHot || g.vHot2 || g.hHot2 || fd.hot >= 0) {
+            g.vHot = g.hHot = g.vHot2 = g.hHot2 = false; fd.hot = -1;
             InvalidateRect(h, nullptr, FALSE);
         }
+        if (g.lineHot) { g.lineHot = false; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONUP:
         if (fd.drag) { fd.drag = false; fd.hot = -1; }   // the grip releases; capture goes below
@@ -2538,7 +2776,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
-        g.vDrag = g.hDrag = false;
+        g.vDrag = g.hDrag = g.vDrag2 = g.hDrag2 = g.splitDrag = false;
         ReleaseCapture();
         return 0;
     case WM_CAPTURECHANGED:
@@ -2549,8 +2787,18 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         if (fd.open && FdOverBar(p)) return 0;   // the second click on the bar is not a page
                                                  // double-click (the first press was the bar's)
+        if (g.split && g.n) {                    // a divider double-click snaps the split back
+            int gap = SplitGap();                // to the even 50/50 it opened at
+            int lw = std::clamp(g.splitX, g.cw / 5, g.cw * 4 / 5);
+            if (p.x >= lw && p.x < lw + gap) {
+                g.splitX = max(1, g.cw / 2);
+                InvalidateRect(h, nullptr, FALSE);
+                return 0;
+            }
+        }
         int pg; float fx, fy;
-        if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
+        bool pb = PaneB(p.x);
+        if (ViewToPageAt(p, CardW(), g.ch, PaneSx(pb), PaneSy(pb), pg, fx, fy)) {
             TxtPage* pt = TtFor(pg);
             int s, e;
             if (pt && TtWordRange(*pt, fx, fy, s, e)) {
@@ -2575,14 +2823,21 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (FdOverBar(p)) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
             }
             if (g.n) {
-            if (g.vDrag || g.hDrag || g.vHot || g.hHot) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+            if (g.vDrag || g.hDrag || g.vHot || g.hHot || g.vDrag2 || g.hDrag2 || g.vHot2 || g.hHot2)
+                { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            if (g.split) {                     // the divider drags horizontally: the cursor says so
+                int gap = SplitGap();
+                int lw = std::clamp(g.splitX, g.cw / 5, g.cw * 4 / 5);
+                if (p.x >= lw && p.x < lw + gap) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
+            }
             if (g.sideOn && p.x < (int)(5 * g.dpi)) { SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE; }
             // I-beam over selectable text (KillerPDF's SelectableTextCursor), peeked
             // without building: the cursor advertises text only once the page's OCR
             // pass has landed, and the arrow elsewhere says a press does nothing
             int pg; float fx, fy;
-            if (ViewToPage(p, CardW(), g.ch, pg, fx, fy)) {
+            bool pb = PaneB(p.x);
+            if (ViewToPageAt(p, CardW(), g.ch, PaneSx(pb), PaneSy(pb), pg, fx, fy)) {
                 TxtPage* pt = TtPeek(pg);
                 if (pt && TtOverText(*pt, fx, fy)) { SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE; }
             }
@@ -3830,6 +4085,342 @@ static void FindClampDrag() {
     fd.dy = std::clamp(fd.dy, min(loY, hiY), max(loY, hiY));
 }
 
+// ---------------- the right rail: Pages / Split / Document Info ----------------
+// The reference app's vertical strip, in docsy's container language: the same
+// shared grain field the sidebar and footer paint, three vector buttons in a
+// narrow column, RowHover under the cursor and the green accent while a
+// feature is on - Pages lights with the thumbnails sidebar, Split with the
+// split view, Info with its flyout. Nothing else from that strip comes over
+// (no comments, attachments, translate or theme buttons): exactly the three
+// asked for, with their logic and nothing else.
+
+static void ToggleSide();
+static void ToggleSplit();
+static void InfoToggle();
+
+static int RW() { return g.full ? 0 : (int)(40 * g.dpi); }   // full screen gives the column to the page
+
+enum { RB_PAGES, RB_SPLIT, RB_INFO, RB_COUNT };
+
+static void RailRects(RECT r[RB_COUNT]) {   // three 30px cells from the rail's top
+    int bw = (int)(30 * g.dpi);
+    int x = max(0, (RW() - bw) / 2), y = (int)(10 * g.dpi);
+    for (int i = 0; i < RB_COUNT; i++) {
+        r[i] = { x, y, x + bw, y + bw };
+        y += bw + (int)(6 * g.dpi);
+    }
+}
+
+static bool RailOn(int id) {                // the green state: the feature it toggles is on
+    return id == RB_PAGES ? (g.sideOn && g.n)
+         : id == RB_SPLIT ? g.split
+         : g.infoOpen;
+}
+
+// The icons are drawn as vectors (the same prims the footer's mode glyphs
+// use), not font glyphs: a 2x2 page grid, an outlined pane pair split by a
+// heavier line, and the circle-i - they read at 16px and never depend on a
+// glyph being present in the OS font.
+static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c) {
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)),
+                     (float)max(1.0, 1.4 * g.dpi));
+    float s = (float)(rc.right - rc.left);
+    float m = s * 0.24f;                    // the icon box inside the 30px cell
+    float ix = (float)rc.left + m, iy = (float)rc.top + m, iw = s - 2 * m;
+    if (id == RB_PAGES) {                   // 2x2 grid of page tiles
+        float gap = (float)(2 * g.dpi), q = (iw - gap) / 2;
+        for (int a = 0; a < 2; a++)
+            for (int b = 0; b < 2; b++)
+                gs.DrawRectangle(&pen, ix + a * (q + gap), iy + b * (q + gap), q, q);
+    } else if (id == RB_SPLIT) {            // two panes: an outline with a heavier middle line
+        float t = iw * 0.12f;
+        gs.DrawRectangle(&pen, ix, iy + t, iw, iw - 2 * t);
+        Gdiplus::Pen mid(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)),
+                         (float)max(1.0, 2.4 * g.dpi));
+        gs.DrawLine(&mid, ix + iw / 2, iy + t, ix + iw / 2, iy + iw - t);
+    } else {                                // circle-i: ring, dot, stem
+        float cx = ix + iw / 2, cy = iy + iw / 2, r = iw / 2;
+        gs.DrawEllipse(&pen, cx - r, cy - r, 2 * r, 2 * r);
+        float d = (float)(2.2 * g.dpi);
+        Gdiplus::SolidBrush dot(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
+        gs.FillEllipse(&dot, cx - d / 2, cy - r * 0.52f, d, d);
+        gs.DrawLine(&pen, cx, cy - r * 0.02f, cx, cy + r * 0.55f);
+    }
+}
+
+static void RailDraw(HDC dc, int w, int h) {
+    RECT r{ 0, 0, w, h };
+    FillRect(dc, &r, GrainBrush(1));        // the shared field, so the rail reads as part
+    RECT seam{ 0, 0, max(1, (int)g.dpi), h };   // of the one container wrapping the page
+    FillRect(dc, &seam, SplitLineBrush(false));
+    RECT bs[RB_COUNT]; RailRects(bs);
+    for (int i = 0; i < RB_COUNT; i++) {
+        bool en = g.n > 0, on = en && RailOn(i), hot = en && g.railHot == i;
+        if (hot) {                          // RowHover's tile under the cursor, darker held
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath p;
+            float rr = (float)(3 * g.dpi);
+            float fx = (float)bs[i].left, fy = (float)bs[i].top;
+            float fw = (float)(bs[i].right - bs[i].left), fh = (float)(bs[i].bottom - bs[i].top);
+            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            Gdiplus::SolidBrush b(g.railPressed ? Gdiplus::Color(255, 0x30, 0x30, 0x30)
+                                                : Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            gs.FillPath(&b, &p);
+        }
+        COLORREF c = !en ? RGB(0x5a, 0x5a, 0x5a)               // no document: the strip dims
+                   : on ? RGB(0x22, 0xbb, 0x56)                // the feature is on: the accent
+                   : hot ? RGB(0xe0, 0xe0, 0xe0)
+                   : RGB(0xa3, 0xa3, 0xa3);
+        RailIcon(dc, i, bs[i], c);
+    }
+}
+
+static void RailActivate(int id) {
+    if (id == RB_PAGES) ToggleSide();
+    else if (id == RB_SPLIT) ToggleSplit();
+    else InfoToggle();
+}
+
+static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+        SetBrushOrgEx(dc, -po.x, -po.y, nullptr);   // the grain phase is the window's
+        RailDraw(dc, r.right, r.bottom);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT bs[RB_COUNT]; RailRects(bs);
+        int hot = -1;
+        for (int i = 0; i < RB_COUNT; i++) if (PtInRect(&bs[i], p)) hot = i;
+        if (hot != g.railHot) {                 // repaint on a hover flip, never per move
+            g.railHot = hot;
+            if (hot >= 0) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g.railHot >= 0 || g.railPressed) {
+            g.railHot = -1; g.railPressed = false;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT bs[RB_COUNT]; RailRects(bs);
+        for (int i = 0; i < RB_COUNT; i++)
+            if (g.n && PtInRect(&bs[i], p)) {   // without a document the strip is inert
+                g.railPressed = true;
+                SetCapture(h);
+                InvalidateRect(h, nullptr, FALSE);
+                break;
+            }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        if (!g.railPressed) return 0;
+        g.railPressed = false;
+        ReleaseCapture();
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT bs[RB_COUNT]; RailRects(bs);
+        int hit = -1;
+        for (int i = 0; i < RB_COUNT; i++) if (PtInRect(&bs[i], p)) hit = i;
+        if (hit >= 0 && g.railHot == hit) RailActivate(hit);   // press + release on one button
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT && g.railHot >= 0 && g.n) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE;
+        }
+        break;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+
+// ---- Split pane: the toggle and its toggle-time state ----
+// Pane B opens mirroring pane A's position, so the split first reads as one
+// continuous page flow with a line through it; each side then scrolls (and
+// Ctrl+wheel zooms) on its own. Turning it off keeps both positions so a
+// re-split resumes where the panes were.
+static void ToggleSplit() {
+    if (!g.n) return;
+    g.split = !g.split;
+    if (g.split) {
+        g.splitX = max(1, g.cw / 2);
+        if (!g.sx2 && !g.sy2) { g.sx2 = g.sx; g.sy2 = g.sy; }   // first open: mirror pane A
+        g.splitA = true;
+        g.splitDrag = false; g.lineHot = false;
+        g.vDrag2 = g.hDrag2 = g.vHot2 = g.hHot2 = false;
+    }
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+    if (g.rail) InvalidateRect(g.rail, nullptr, FALSE);
+}
+
+// ---- the Document Info flyout ----
+// The find bar's container language, anchored under the rail's Info button:
+// the soft DropShadow, the radius-6 MenuBackground #141414 + grain panel with
+// its #555555 ring, labels in muted Killer Sans UI and values in white. Every
+// field is real, read from what the app already holds - nothing invented.
+static HFONT g_infoTitle = nullptr, g_infoLab = nullptr, g_infoVal = nullptr;
+static HFONT InfoTitleFont() { return CaptionFont(g_infoTitle, 14, false, L"Killer Sans"); }
+static HFONT InfoLabFont()   { return CaptionFont(g_infoLab,  10, false, L"Killer Sans UI"); }
+static HFONT InfoValFont()   { return CaptionFont(g_infoVal,  12, false, L"Killer Sans UI"); }
+
+static int InfoW() { return (int)(264 * g.dpi); }
+static int InfoH() { return (int)(208 * g.dpi); }
+
+static RECT InfoRect() {                    // in view coords, under the find bar's spot
+    int w = InfoW(), h = InfoH();
+    int x = max(0, CardW() - (int)(16 * g.dpi) - w);
+    int y = (int)(6 * g.dpi);
+    if (fd.open) { RECT fr = FdRect(); y = fr.bottom + (int)(8 * g.dpi); }   // never overlap
+    return { x, y, x + w, y + h };
+}
+
+// The flyout's DropShadow: the find bar's recipe generalized - a blurred rect
+// silhouette cached per size/dpi, blitted under the panel in one AlphaBlend.
+static void FlyShadow(HDC dc, int x, int y, int w, int h) {
+    static HBITMAP shb = nullptr; static HDC shdc = nullptr;
+    static int shw = 0, shh = 0; static double shdpi = 0;
+    int padX = (int)(24 * g.dpi), padT = (int)(14 * g.dpi), padB = (int)(28 * g.dpi);
+    int tw = w + 2 * padX, th = padT + h + padB;
+    if (!shb || shw != tw || shh != th || shdpi != g.dpi) {
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), tw, -th, 1, 32, BI_RGB };
+        BYTE* px = nullptr;
+        HBITMAP nb = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
+        if (px && nb) {
+            const double sig = 8.0 * g.dpi, depth = 3.0 * g.dpi;
+            double top = padT + depth, bottom = padT + h + depth;
+            double left = padX, right = padX + w;
+            for (int yy = 0; yy < th; yy++) {
+                double ay = Phi((yy - top) / sig) - Phi((yy - bottom) / sig);
+                BYTE* row = px + (size_t)yy * tw * 4;
+                for (int xx = 0; xx < tw; xx++) {
+                    double a = 0.55 * ay * (Phi((xx - left) / sig) - Phi((xx - right) / sig));
+                    BYTE* p = row + (size_t)xx * 4;
+                    p[0] = p[1] = p[2] = 0;
+                    p[3] = (BYTE)std::lround(a * 255.0);
+                }
+            }
+            if (!shdc) shdc = CreateCompatibleDC(dc);
+            if (shb) DeleteObject(shb);
+            shb = nb;
+            SelectObject(shdc, shb);
+            shw = tw; shh = th; shdpi = g.dpi;
+        }
+    }
+    if (shb) {
+        BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        AlphaBlend(dc, x - padX, y - padT, tw, th, shdc, 0, 0, tw, th, bf);
+    }
+}
+
+static void InfoDraw(HDC dc, int ox, int oy) {
+    RECT r = InfoRect();
+    OffsetRect(&r, ox, oy);
+    FlyShadow(dc, r.left, r.top, r.right - r.left, r.bottom - r.top);
+    int spx = g_grainPX, spy = g_grainPY;   // the grain tiles phase with the view's own
+    g_grainPX += ox; g_grainPY += oy;
+    {
+        int bw = r.right - r.left, bh = r.bottom - r.top;
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath* outer = CardPath((float)r.left, (float)r.top, (float)bw, (float)bh, (float)(6 * g.dpi), 0);
+        Gdiplus::GraphicsPath* inner = CardPath((float)r.left, (float)r.top, (float)bw, (float)bh, (float)(6 * g.dpi), 1);
+        if (Gdiplus::TextureBrush* t = GrainTex(2)) gs.FillPath(t, inner);
+        else { Gdiplus::SolidBrush mb(Gdiplus::Color(255, 0x14, 0x14, 0x14)); gs.FillPath(&mb, inner); }
+        Gdiplus::GraphicsPath band;
+        band.AddPath(outer, FALSE);
+        band.AddPath(inner, FALSE);
+        band.SetFillMode(Gdiplus::FillModeAlternate);
+        Gdiplus::SolidBrush edge(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+        gs.FillPath(&edge, &band);
+        delete outer;
+        delete inner;
+    }
+    g_grainPX = spx; g_grainPY = spy;
+    SetBkMode(dc, TRANSPARENT);
+    int pad = (int)(16 * g.dpi);
+    SelectObject(dc, InfoTitleFont());
+    SetTextColor(dc, RGB(0xe8, 0xe8, 0xe8));
+    RECT tr{ r.left + pad, r.top + (int)(10 * g.dpi), r.right - pad, r.top + (int)(30 * g.dpi) };
+    DrawTextW(dc, L"Document", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // the fields: label left in muted, value right in white. A value wider than
+    // its lane ellipsifies (the path with DT_PATH_ELLIPSIS, which drops the
+    // middle directories and keeps the file's own name visible).
+    wchar_t pages[24]; swprintf_s(pages, L"%d", g.n);
+    std::wstring psize = L"-";
+    if (g.n && g.cur >= 0 && g.cur < g.n) {
+        wchar_t b[64];
+        swprintf_s(b, L"%.2f x %.2f in", g.pw[g.cur] / 72.0, g.ph[g.cur] / 72.0);
+        psize = b;
+    }
+    std::wstring fsize = L"-", modified = L"-";
+    if (!g.path.empty()) {
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        if (GetFileAttributesExW(g.path.c_str(), GetFileExInfoStandard, &fa)) {
+            long long bytes = ((long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+            wchar_t sz[40];
+            if (bytes >= 1LL << 20) FmtNum(sz, 40, bytes / 1048576.0, 2), wcscat_s(sz, L" MB");
+            else if (bytes >= 1LL << 10) FmtNum(sz, 40, bytes / 1024.0, 1), wcscat_s(sz, L" KB");
+            else swprintf_s(sz, L"%lld B", bytes);
+            fsize = sz;
+            SYSTEMTIME st{};
+            if (FileTimeToSystemTime(&fa.ftLastWriteTime, &st)) {
+                wchar_t d[48], t[24];
+                if (GetDateFormatW(LOCALE_USER_DEFAULT, DATE_SHORTDATE, &st, nullptr, d, 48) &&
+                    GetTimeFormatW(LOCALE_USER_DEFAULT, TIME_NOTIMEMARKER | TIME_NOSECONDS, &st, nullptr, t, 24))
+                    modified = std::wstring(d) + L" " + t;
+            }
+        }
+    }
+    struct Row { const wchar_t* lab; const wchar_t* val; bool path; };
+    const Row rows[] = {
+        { L"Name",     g.name.c_str(),          false },
+        { L"Location", g.path.c_str(),          true  },
+        { L"Pages",    pages,                   false },
+        { L"Page size", psize.c_str(),          false },
+        { L"File size", fsize.c_str(),          false },
+        { L"Modified", modified.c_str(),        false },
+    };
+    int y = r.top + (int)(34 * g.dpi);
+    int rowH = (int)(26 * g.dpi);
+    int vx = r.left + pad + (int)(64 * g.dpi);   // the values' column: labels stay left,
+    for (const Row& row : rows) {                // values all start at one clean x
+        RECT lr{ r.left + pad, y, vx - (int)(4 * g.dpi), y + rowH };
+        RECT vr{ vx, y, r.right - pad, y + rowH };
+        SelectObject(dc, InfoLabFont());
+        SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+        DrawTextW(dc, row.lab, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dc, InfoValFont());
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        DrawTextW(dc, row.val, -1, &vr, DT_LEFT | DT_VCENTER | DT_SINGLELINE |
+                  (row.path ? DT_PATH_ELLIPSIS : DT_END_ELLIPSIS));
+        y += rowH;
+    }
+}
+
+static void InfoToggle() {
+    g.infoOpen = !g.infoOpen;
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+    if (g.rail) InvalidateRect(g.rail, nullptr, FALSE);
+}
+
 // ---------------- main window ----------------
 
 static void LayoutMain() {
@@ -3837,6 +4428,7 @@ static void LayoutMain() {
     RECT r; GetClientRect(g.main, &r);
     int w = r.right, h = r.bottom;
     int sw = (g.sideOn && g.n && !g.full) ? SW() : 0;
+    int rw = RW();                              // the rail's column on the right
     int cap = CAP();
     int tb = TBH();                             // the toolbar row under the caption
     int sh = g.full ? 0 : SBH();                // full screen hides the footer too
@@ -3850,13 +4442,22 @@ static void LayoutMain() {
             if (sr.right != sd.cw || sr.bottom != sd.ch) { sd.cw = sr.right; sd.ch = sr.bottom; SideLayout(); }
         }
     }
-    MoveWindow(g.view, sw, cap + tb, w - sw, ch, TRUE);
+    MoveWindow(g.view, sw, cap + tb, max(0, w - sw - rw), ch, TRUE);
+    if (g.rail) {
+        MoveWindow(g.rail, max(0, w - rw), cap + tb, rw, ch, TRUE);
+        ShowWindow(g.rail, rw > 0 ? SW_SHOWNOACTIVATE : SW_HIDE);
+    }
     if (g.status) MoveWindow(g.status, 0, cap + tb + ch, w, sh, TRUE);
     if (g_fedit && fd.open) FindPlace();        // the edit tracks the card's top-right corner
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
     g.sx = std::clamp(g.sx, 0, max(0, g.docW - CardW()));
     g.sy = std::clamp(g.sy, 0, max(0, g.docH - g.ch));
+    if (g.split) {   // a resize re-normalizes the split: the divider keeps its fifth-to-
+        g.splitX = std::clamp(g.splitX, max(1, g.cw / 5), max(1, g.cw * 4 / 5));   // four-fifths
+        g.sx2 = std::clamp(g.sx2, 0, max(0, g.docW - CardW()));   // span, pane B keeps its
+        g.sy2 = std::clamp(g.sy2, 0, max(0, g.docH - g.ch));      // place in the document
+    }
     if (!g.resizing && !g.busy && g.cw > 0 && g.ch > 0) {
         if (g.fitMode != 2) ApplyFit(g.fitMode == 1); else Layout();   // fit modes re-run on resize
         UpdateTitle();
@@ -3888,6 +4489,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.bar = CreateWindowExW(0, L"DocsyBar", nullptr,
                                 WS_CHILD | WS_VISIBLE,
                                 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
+        g.rail = CreateWindowExW(0, L"DocsyRail", nullptr,
+                                 WS_CHILD | WS_VISIBLE,
+                                 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
         DwmApply(h);   // rounded corners + themed 1px border (Windows 11; no-op before)
         return 0;
@@ -4042,6 +4646,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_stcombo) { DeleteObject(g_stcombo); g_stcombo = nullptr; }
         if (g_stglyph) { DeleteObject(g_stglyph); g_stglyph = nullptr; }
         if (g_stchev) { DeleteObject(g_stchev); g_stchev = nullptr; }
+        if (g_infoTitle) { DeleteObject(g_infoTitle); g_infoTitle = nullptr; }
+        if (g_infoLab) { DeleteObject(g_infoLab); g_infoLab = nullptr; }
+        if (g_infoVal) { DeleteObject(g_infoVal); g_infoVal = nullptr; }
         if (g_fntEdit) { DeleteObject(g_fntEdit); g_fntEdit = nullptr; }
         if (g_fntOpt) { DeleteObject(g_fntOpt); g_fntOpt = nullptr; }
         if (g_fntAb) { DeleteObject(g_fntAb); g_fntAb = nullptr; }
@@ -4070,31 +4677,36 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         ViewWheel(wp, lp);
         return 0;
     }
-    case WM_MOUSEHWHEEL:
-        ScrollTo(g.sx + GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 80) / 120, g.sy); return 0;
+    case WM_MOUSEHWHEEL: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; ScreenToClient(g.view, &p);
+        bool b = PaneB(p.x);
+        ScrollPane(b, PaneSx(b) + GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 80) / 120, PaneSy(b));
+        return 0;
+    }
     case WM_KEYDOWN: {
         bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
         int line = (int)(56 * g.dpi), pg = max(1, (int)(g.ch * 0.9));
+        int& fx = PaneSx(FocusB()); int& fy = PaneSy(FocusB());   // the keys steer the focused pane
         switch (wp) {
         case 'O': if (ctrl) OpenDlg(); break;
-        case VK_DOWN: ScrollTo(g.sx, g.sy + line); break;
-        case VK_UP: ScrollTo(g.sx, g.sy - line); break;
-        case VK_RIGHT: ScrollTo(g.sx + line, g.sy); break;
-        case VK_LEFT: ScrollTo(g.sx - line, g.sy); break;
+        case VK_DOWN: ScrollTo(fx, fy + line); break;
+        case VK_UP: ScrollTo(fx, fy - line); break;
+        case VK_RIGHT: ScrollTo(fx + line, fy); break;
+        case VK_LEFT: ScrollTo(fx - line, fy); break;
         case VK_NEXT:
             if (g.vm == 1) SetPage(g.cur + 1);   // single mode: the flip keys
-            else ScrollTo(g.sx, g.sy + pg);
+            else ScrollTo(fx, fy + pg);
             break;
         case VK_PRIOR:
             if (g.vm == 1) SetPage(g.cur - 1);
-            else ScrollTo(g.sx, g.sy - pg);
+            else ScrollTo(fx, fy - pg);
             break;
         case VK_SPACE:
             if (g.vm == 1) SetPage(g.cur + (shift ? -1 : 1));
-            else ScrollTo(g.sx, g.sy + (shift ? -pg : pg));
+            else ScrollTo(fx, fy + (shift ? -pg : pg));
             break;
-        case VK_HOME: ScrollTo(g.sx, 0); break;
-        case VK_END: ScrollTo(g.sx, INT_MAX / 2); break;
+        case VK_HOME: ScrollTo(fx, 0); break;
+        case VK_END: ScrollTo(fx, INT_MAX / 2); break;
         case VK_ADD: case VK_OEM_PLUS: ZoomBy(1.25); break;
         case VK_SUBTRACT: case VK_OEM_MINUS: ZoomBy(0.8); break;
         case '0': if (ctrl) ApplyFit(); break;
@@ -4109,6 +4721,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             break;
         case VK_ESCAPE:
             if (fd.open) FindClose();              // the bar leaves first
+            else if (g.infoOpen) InfoToggle();     // then the flyout
             else if (g.full) ToggleFull(h);        // full screen leaves next
             else SelClear();
             break;
@@ -4140,6 +4753,7 @@ static int Shot(const wchar_t* out, int w, int h) {
     if (!b) return 4;
     HGDIOBJ old = SelectObject(dc, b);
     int sw = (g.sideOn && g.n && !g.full) ? sd.w : 0;
+    int rw = RW();                                  // the rail's column rides the shot too
     int cap = CAP(), tb = TBH(), sh = SBH();
     int ch = max(1, h - cap - tb - sh);
     // the children render above the caption row and below it, so composite them shifted
@@ -4154,17 +4768,27 @@ static int Shot(const wchar_t* out, int w, int h) {
     }
     {
         HDC m2 = CreateCompatibleDC(dc);
-        HBITMAP b2 = CreateCompatibleBitmap(dc, max(1, w - sw), ch);
+        HBITMAP b2 = CreateCompatibleBitmap(dc, max(1, w - sw - rw), ch);
         HGDIOBJ o2 = SelectObject(m2, b2);
         SetBrushOrgEx(m2, -sw, -(cap + tb), nullptr);
         g_grainPX = -sw; g_grainPY = -(cap + tb);        // the view's grain phase, as on screen
-        Draw(m2, w - sw, ch, 0);
-        PaintViewBars(m2, w - sw, ch, 0);
+        Draw(m2, w - sw - rw, ch, 0);
+        PaintViewBars(m2, w - sw - rw, ch, 0);
         if (fd.open) {                                  // the floating Find bar, over its pixels -
             FindDraw(m2, FdRect().left, FdRect().top);  // the same FdRect the live view paints,
         }                                               // so the shot IS the app's composite
-        BitBlt(dc, sw, cap + tb, w - sw, ch, m2, 0, 0, SRCCOPY);
+        if (g.infoOpen) InfoDraw(m2, 0, 0);
+        BitBlt(dc, sw, cap + tb, max(1, w - sw - rw), ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
+    }
+    if (rw > 0) {                                       // the rail strip at the window's right
+        HDC m5 = CreateCompatibleDC(dc);
+        HBITMAP b5 = CreateCompatibleBitmap(dc, rw, ch);
+        HGDIOBJ o5 = SelectObject(m5, b5);
+        SetBrushOrgEx(m5, -(w - rw), -(cap + tb), nullptr);
+        RailDraw(m5, rw, ch);
+        BitBlt(dc, w - rw, cap + tb, rw, ch, m5, 0, 0, SRCCOPY);
+        SelectObject(m5, o5); DeleteObject(b5); DeleteDC(m5);
     }
     if (!g.full && sh > 0) {                   // the footer strip
         HDC m3 = CreateCompatibleDC(dc);
@@ -4255,6 +4879,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     bc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     bc.lpszClassName = L"DocsyBar";
     RegisterClassExW(&bc);
+
+    WNDCLASSEXW rc{ sizeof rc };                    // the right rail: Pages / Split / Info
+    rc.lpfnWndProc = RailProc; rc.hInstance = hi;
+    rc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    rc.lpszClassName = L"DocsyRail";
+    RegisterClassExW(&rc);
 
     WNDCLASSEXW zc{ sizeof zc };                    // the zoom dropdown popup
     zc.style = CS_SAVEBITS | CS_DROPSHADOW;         // menu-like: saved bits + a soft shadow
