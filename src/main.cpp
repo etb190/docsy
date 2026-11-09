@@ -4341,6 +4341,7 @@ static void AbCheckLabel(HDC dc, const RECT& r, const wchar_t* lab) {
 
 static double Phi(double z);   // the gaussian CDF, defined with the card's shadow
 static Gdiplus::TextureBrush* GrainTex(int which);   // the grain tile as a GDI+ brush
+static int g_grainPX = 0, g_grainPY = 0;   // GDI's brush-org phase, stashed by the paint
 
 static void AnnBarDraw(HDC dc, int ox, int oy) {
     if (!g.barOn) return;
@@ -5264,8 +5265,6 @@ static Gdiplus::GraphicsPath* CardPath(float x, float y, float w, float h, float
     p->CloseFigure();
     return p;
 }
-
-static int g_grainPX = 0, g_grainPY = 0;   // GDI's brush-org phase, stashed by the paint
 
 static Gdiplus::TextureBrush* GrainTex(int which) {   // a grain tile as a GDI+ brush,
     static Gdiplus::TextureBrush* tb[3] = { nullptr, nullptr, nullptr };   // phased like GDI's own
@@ -6314,9 +6313,10 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             // ever producing an inverted rect.
             DocState& ED = DV(g.tePaneB);
             int cardL = PaneX0(g.tePaneB) + CardX(g.tePaneB), cardR = cardL + CardW(g.tePaneB);
-            POINT q{ std::clamp(p.x, cardL, max(cardL, cardR)), std::clamp(p.y, 0, g.ch) };
-            int newW = max(minW, abs(q.x - g_teAnchor.x));
-            int newH = max(minH, abs(q.y - g_teAnchor.y));
+            int qx = std::clamp((int)p.x, cardL, max(cardL, cardR));   // the pointer in the card
+            int qy = std::clamp((int)p.y, 0, g.ch);
+            int newW = max(minW, abs(qx - g_teAnchor.x));
+            int newH = max(minH, abs(qy - g_teAnchor.y));
             int nx = (g_teHandle == 0 || g_teHandle == 3) ? g_teAnchor.x - newW : g_teAnchor.x;
             int ny = (g_teHandle == 0 || g_teHandle == 1) ? g_teAnchor.y - newH : g_teAnchor.y;
             if (nx != g_teStart.left || ny != g_teStart.top ||
