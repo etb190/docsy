@@ -991,7 +991,7 @@ static void TfMoveGlyph(HDC dc, const RECT& box, COLORREF c) {
                                ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
                                L"Segoe MDL2 Assets");
         g_tfInkOff = { 0, 0 };
-        int bw = max(1, box.right - box.left), bh = max(1, box.bottom - box.top);
+        int bw = max(1, (int)(box.right - box.left)), bh = max(1, (int)(box.bottom - box.top));
         HDC m = CreateCompatibleDC(dc);
         HBITMAP bm = CreateCompatibleBitmap(dc, bw, bh);
         HGDIOBJ ob = SelectObject(m, bm);
