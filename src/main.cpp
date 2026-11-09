@@ -140,6 +140,30 @@ struct TxtPage {
 };
 struct FRect { float x, y, w, h; };   // selection quad in page DIPs
 
+// ---- annotation model (KillerPDF's page annotations, the three primitives ----
+// the six tool buttons commit). Coordinates are PAGE DIPs (PDF points) so an
+// annotation rides its page through zoom and scroll exactly like the selection
+// quads do. KillerPDF reduces every editing tool to these: the Highlight tool
+// commits one HighlightAnnotation per selected line (CommitFlowingHighlight),
+// and Draw / Line / Shapes all commit InkAnnotation strokes - a straight line
+// is a 2-point stroke, a rectangle a closed 4-corner stroke, an ellipse a
+// closed 64-segment stroke (Shell/Shapes.cs CommitShapeDrag) - and the Text
+// tool commits a TextAnnotation (24pt, Segoe UI, 165pt box). Session state:
+// KillerPDF writes annotations into the saved PDF; docsy's engine is the
+// read-only Windows renderer, so they live with the open document.
+enum { AT_HIGHLIGHT, AT_INK, AT_TEXT };
+struct Annot {
+    int type = AT_INK;
+    float x = 0, y = 0, w = 0, h = 0;      // text: box pos+width (DIPs); highlight: line-quad union
+    std::vector<FRect> lines;              // highlight: one quad per selected line
+    std::vector<float> ix, iy;             // ink: the polyline (DIPs)
+    float width = 3;                       // ink stroke width (DIPs) - KillerPDF's _drawWidth 3
+    float fsize = 24;                      // text: KillerPDF's _textFontSize 24
+    COLORREF color = RGB(0xff, 0x00, 0x00);
+    BYTE alpha = 255;
+    std::wstring text;                     // AT_TEXT content
+};
+
 // Everything one open document owns: its engine handle, its page geometry, its
 // layout at the pane's own card width, its zoom/scroll/view-mode state, its
 // rendered-page cache, its OCR text geometry and its flowing selection. The
@@ -182,7 +206,14 @@ struct DocState {
     // so pane A's classic fields and pane B's old "2" twins both live here now
     bool vHot = false, vDrag = false, hHot = false, hDrag = false;   // overlay bar states
     int vGrab = 0, hGrab = 0;
+    // the pane's annotations and its own current tool - KillerPDF keeps the
+    // editing state per viewer instance (PdfViewer.Bridge2: "Annotations, ...
+    // and the current tool remain independent between panes"), so each pane
+    // draws with the tool the reader left IT on
+    std::unordered_map<int, std::vector<Annot>> annos;
+    int tool = 0;                       // TOOL_SELECT .. TOOL_DRAW (the rail's top stack)
 };
+enum { TOOL_SELECT, TOOL_TEXT, TOOL_HIGHLIGHT, TOOL_LINE, TOOL_SHAPE, TOOL_DRAW, TOOL_COUNT };
 
 struct App {
     HWND main = nullptr, view = nullptr, side = nullptr, status = nullptr;
@@ -239,6 +270,31 @@ struct App {
     bool lineHot = false;               // the divider is hovered
     int splitGrow = 0;                  // how much OpenSplit grew the window, so CloseSplit
                                         // hands back exactly that (0: an even split, closes in place)
+    // annotation gestures (KillerPDF's _isDrawing / _activeInk / drag group):
+    // one live gesture at a time, pinned to the pane and page it armed on, in
+    // that page's DIP space at the press-time scroll - a scroll during a stroke
+    // cannot skew it (KillerPDF pins the gesture to its canvas the same way)
+    bool annInk = false;                // Draw/Line/Shapes stroke is live
+    int annKind = 0;                    // TOOL_LINE / TOOL_SHAPE / TOOL_DRAW of the live stroke
+    bool annArm = false;                // press landed, waiting for movement (line/shape)
+    bool annMove = false;               // Select tool: dragging a selected annotation
+    int annPaneB = 0, annPage = -1;     // the gesture's pane and page
+    int annSX = 0, annSY = 0;           // the pane's scroll at press time
+    POINT annStart{}, annLast{};        // press / last pointer, view pixels
+    float annFX = 0, annFY = 0;         // press point, page DIPs
+    std::vector<float> annIX, annIY;    // the stroke so far (page DIPs)
+    int annSelB = 0, annSelPage = -1, annSelIdx = -1;   // Select tool's chosen annotation
+    int selCommit = 0;                  // flowing selection's tool: 0 copy, TOOL_HIGHLIGHT commits
+    // the Draw tool's brush ring (KillerPDF's ShowBrushPreview): a circle the
+    // size of the brush at the cursor, so the footprint shows before a stroke
+    bool brushOn = false;
+    POINT brushPt{};
+    // the Text tool's edit box: a real child EDIT (the Find query's contract),
+    // committed into an AT_TEXT annotation when it loses focus or the view moves
+    HWND tedit = nullptr;
+    WNDPROC teditDef = nullptr;
+    int tePaneB = 0, tePage = -1;       // the box's pane and page
+    float teX = 0, teY = 0, teW = 0;    // box origin + width, page DIPs
 };
 static App g;
 
@@ -329,6 +385,24 @@ static int FocusSy() { return DVF().sy; }                   // its vertical scro
 static int& PaneSx(bool b) { return DV(b).sx; }
 static int& PaneSy(bool b) { return DV(b).sy; }
 
+// ---- the content viewport (KillerPDF's ScrollViewer contract) ----
+// A visible overlay bar is RESERVED, not overlaid: the WPF ScrollViewer lays
+// the content out in what is left after the 12px bar column (and the 12px bar
+// row), and clamps the scroll so the content's edge stops at the bar - pages
+// never flow under the thumb. docsy's old math only reserved the column while
+// centering; on any horizontal overflow the pages ran under the bar and the
+// third-alpha thumb washed out over the page - the "transparent" split
+// scrollbar. ViewW/ViewH are the one source of truth for the viewport every
+// clamp, thumb map, hit test and centering term shares.
+static int ViewW(const DocState& D, bool b) {
+    int gut = (D.n && D.docH > g.ch) ? SBar() : 0;   // the vertical bar's reserved column
+    return max(0, CardW(b) - gut);
+}
+static int ViewH(const DocState& D, bool b) {
+    int gut = (D.n && D.docW > ViewW(D, b)) ? SBar() : 0;   // the horizontal bar's reserved row
+    return max(0, g.ch - gut);
+}
+
 // the sidebar rail's three buttons and the Document Info dialog, defined with
 // the rail section below
 static int RW();                        // the rail's column width (0 in full screen)
@@ -337,6 +411,9 @@ static void ToggleSplit();
 static void ToggleSide();               // defined with the main window (the Pages button)
 static void InfoOpen();
 static bool InfoIsOpen();
+static void SetStatusHold(const std::wstring& t, unsigned ms = 2500);   // the footer's held line
+static void SetTool(int t, bool b);     // the rail's tool stack (KillerPDF's SetTool)
+static void CommitTextEdit(bool commit = true);   // the Text tool's box (defined with the tools)
 
 static HBRUSH GrainBrush(int which);   // defined with the grain tile below
 
@@ -1429,7 +1506,8 @@ static void SelClear(DocState& D) {
     D.selAPage = D.selFPage = -1;
     D.selACaret = D.selFCaret = 0;
     D.selText.clear();
-    if (had && g.view) InvalidateRect(g.view, nullptr, FALSE);
+    g.selCommit = 0;                       // the flowing highlight's tool dies with the
+    if (had && g.view) InvalidateRect(g.view, nullptr, FALSE);   // selection it rode
 }
 
 // The anchor->focus pair in reading order.
@@ -1565,10 +1643,10 @@ static void UpdateTitle() {   // the sidebar highlight follows the focused pane'
 }
 
 static void UpdateScroll(DocState& D, bool b) {   // one pane's scroll clamps into ITS
-    g.busy = true;                                // document's layout at ITS card width
-    D.sy = std::clamp(D.sy, 0, max(0, D.docH - g.ch));
-    D.sx = std::clamp(D.sx, 0, max(0, D.docW - CardW(b)));
-    g.busy = false;
+    g.busy = true;                                // document's layout at ITS viewport: the
+    D.sy = std::clamp(D.sy, 0, max(0, D.docH - ViewH(D, b)));   // reserved bar rows are part
+    D.sx = std::clamp(D.sx, 0, max(0, D.docW - ViewW(D, b)));   // of the viewport now, so the
+    g.busy = false;                               // content stops AT the bar, never under it
     D.scrollTick = GetTickCount64();
 }
 
@@ -1608,6 +1686,7 @@ static void Layout(DocState& D, bool b) {   // one pane's document at the pane's
 
 static void SetZoomAt(double z, int ax, int ay, bool b) {
     DocState& D = DV(b);                          // the anchor names its pane: pane B zooms
+    CommitTextEdit();                             // a zoom lands the open text box
     int& sxr = D.sx; int& syr = D.sy;             // around its own viewport point, in its
     z = std::clamp(z, 0.1, 4.0);                  // own document's layout
     double ry = D.docH ? (double)(syr + ay) / D.docH : 0, rx = D.docW ? (double)(sxr + ax) / D.docW : 0;
@@ -1663,9 +1742,10 @@ static void ApplyFit(bool pageFit, bool b) {   // one pane's fit, at that pane's
 // pane's pixels only, and the sidebar/status follow just the focused pane (a
 // background pane may scroll without dragging the page ring along).
 static void ScrollPane(bool b, int x, int y) {
-    DocState& D = DV(b);                        // this pane's own document and card width
-    x = std::clamp(x, 0, max(0, D.docW - CardW(b)));
-    y = std::clamp(y, 0, max(0, D.docH - g.ch));
+    DocState& D = DV(b);                        // this pane's own document and viewport: the
+    CommitTextEdit();                           // the box rides nothing: a scroll lands it
+    x = std::clamp(x, 0, max(0, D.docW - ViewW(D, b)));   // clamps stop the content AT the
+    y = std::clamp(y, 0, max(0, D.docH - ViewH(D, b)));   // reserved bars, KillerPDF's ScrollViewer
     if (x == D.sx && y == D.sy) return;
     D.sx = x; D.sy = y;
     D.scrollTick = GetTickCount64();
@@ -1734,6 +1814,11 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
                                                       // at 100%; -1 so LayoutMain's UpdateTitle
                                                       // sees the change and syncs the sidebar highlight
         D.txt.clear();               // the new document's text geometry starts fresh
+        D.annos.clear();             // the tools' marks die with their document - KillerPDF's
+                                     // annotations live in the PDF; docsy's live with it
+        D.tool = TOOL_SELECT;        // the pane's tool re-lands on Select, like KillerPDF's
+                                     // open path restores the toolbar
+        g.annSelPage = -1; g.annSelIdx = -1;   // and the Select tool's ring has nothing to hold
         SelClear(D);
         bool mine = fd.pane == (&D == &g.dB);        // the find dies only when ITS document
         if (mine && fd.open) {                       // dies; the other pane's scan keeps going
@@ -2098,6 +2183,323 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
+// ---------------- annotation tools (the rail's top stack) ----------------
+// KillerPDF's editing tools, in docsy's pane language. The Text tool commits
+// through a real child EDIT (the Find query's WS_CLIPCHILDREN contract, at
+// KillerPDF's 165pt box and 24pt Segoe UI); the Draw / Line / Shapes tools
+// drag in page-DIP space and commit on release with KillerPDF's own discard
+// rules (a line needs >3pt of length, a shape >3pt of both dimensions, a
+// one-point Draw commits as a round dot); the Highlight tool reuses the
+// flowing selection and converts the swept lines on release
+// (CommitFlowingHighlight). Each pane keeps its own tool, exactly like
+// KillerPDF keeps the editing state per viewer instance.
+
+// The text box commits on focus loss, on any view motion, or on Escape -
+// Escape discards, everything else lands as an AT_TEXT annotation in the
+// pane's own document.
+static void CommitTextEdit(bool commit = true) {
+    if (!g.tedit) return;
+    HWND e = g.tedit;
+    int len = GetWindowTextLengthW(e);
+    std::wstring s;
+    if (commit && len > 0) {
+        s.resize(len);
+        GetWindowTextW(e, s.data(), len + 1);
+        if (s.find_first_not_of(L" \t\r\n") == std::wstring::npos) s.clear();
+    }
+    g.tedit = nullptr;
+    if (GetFocus() == e) SetFocus(g.view);
+    DestroyWindow(e);
+    if (!s.empty()) {
+        DocState& D = DV(g.tePaneB);
+        Annot a;
+        a.type = AT_TEXT;
+        a.x = g.teX; a.y = g.teY; a.w = g.teW;
+        a.fsize = 24; a.color = RGB(0, 0, 0); a.alpha = 255; a.text = s;
+        // the box's height, measured at the CURRENT scale (the wrapped line
+        // count is what the box showed while editing)
+        float k = (float)(D.zoom * g.dpi);
+        HDC m = GetDC(g.view);
+        int hpx = (int)std::lround(24 * k);
+        HFONT f = CreateFontW(-hpx, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+        HGDIOBJ of = SelectObject(m, f);
+        RECT mr{ 0, 0, (int)(g.teW * k), 10000 };
+        DrawTextW(m, s.c_str(), -1, &mr, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+        SelectObject(m, of); DeleteObject(f); ReleaseDC(g.view, m);
+        a.h = max(24.0f, (mr.bottom - mr.top) / max(0.01f, k));
+        D.annos[g.tePage].push_back(a);
+    }
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+}
+
+static LRESULT CALLBACK TextEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_KEYDOWN && wp == VK_ESCAPE) { CommitTextEdit(false); return 0; }
+    return CallWindowProcW(g.teditDef, h, m, wp, lp);
+}
+
+// The Text tool's press: re-edit a placed text annotation under the click
+// (it leaves the list and comes back when the box closes), or open a fresh
+// box centered on the hotspot (KillerPDF's PlaceTextBox).
+static void TextEditOpen(bool b, int pg, float tx, float ty, float tw, const wchar_t* text);
+static void TextPlace(bool b, POINT p) {
+    DocState& D = DV(b);
+    POINT q{ p.x - PaneX0(b) - CardX(b), p.y };
+    int pg; float fx, fy;
+    if (!ViewToPageAt(D, q, CardW(b), g.ch, D.sx, D.sy, pg, fx, fy)) return;
+    auto it = D.annos.find(pg);
+    float k = (float)(D.zoom * g.dpi);
+    if (it != D.annos.end()) {
+        for (int ai = (int)it->second.size() - 1; ai >= 0; ai--) {
+            Annot& a = it->second[ai];
+            if (a.type != AT_TEXT) continue;
+            if (fx >= a.x && fx <= a.x + a.w && fy >= a.y && fy <= a.y + a.h) {
+                std::wstring text = a.text;
+                float tx = a.x, ty = a.y, tw = a.w;
+                it->second.erase(it->second.begin() + ai);
+                TextEditOpen(b, pg, tx, ty, tw, text.c_str());   // defined below
+                return;
+            }
+        }
+    }
+    // a fresh box: 165pt wide, the first line's center on the I-beam hotspot
+    int lineH = (int)std::lround(24 * k * 4.0 / 3.0);
+    float half = (lineH / 2.0f) / max(0.01f, k);
+    TextEditOpen(b, pg, fx, max(0.0f, fy - half), 165.0f, nullptr);
+}
+
+// Opens the box: a real child EDIT over its page position, one dark ring
+// painted by the composite around it, KillerPDF's PrimaryBrush border.
+static void TextEditOpen(bool b, int pg, float tx, float ty, float tw, const wchar_t* text) {
+    CommitTextEdit();                       // one editor at a time (KillerPDF's _activeTextBox)
+    DocState& D = DV(b);
+    if (!D.n || pg < 0 || pg >= D.n) return;
+    g.tePaneB = b; g.tePage = pg; g.teX = tx; g.teY = ty; g.teW = tw;
+    float k = (float)(D.zoom * g.dpi);
+    int ox, oy;
+    if (!PageOrigin(D, b, pg, ox, oy)) return;
+    int fontPx = max(8, (int)std::lround(24 * k));
+    int lineH = (int)std::lround(fontPx * 4.0 / 3.0);
+    int boxW = max(24, (int)std::lround(tw * k));
+    int x = PaneX0(b) + ox + (int)std::lround(tx * k);
+    int y = oy + (int)std::lround(ty * k);
+    int boxH = lineH * 3;                   // room for three lines; ES_AUTOVSCROLL beyond
+    // clamp into the pane's card so the editor never hides under the chrome
+    int cardL = PaneX0(b) + CardX(b), cardR = cardL + CardW(b);
+    x = std::clamp(x, cardL, max(cardL, cardR - boxW));
+    y = std::clamp(y, 0, max(0, g.ch - boxH));
+    HFONT f = CreateFontW(-fontPx, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                          OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                          DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g.tedit = CreateWindowExW(0, L"EDIT", text ? text : L"",
+                              WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                              ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+                              x, y, boxW, boxH, g.view, nullptr, g.hinst, nullptr);
+    if (!g.tedit) return;
+    SendMessageW(g.tedit, WM_SETFONT, (WPARAM)f, TRUE);   // the font slot rides the edit
+    g.teditDef = (WNDPROC)SetWindowLongPtrW(g.tedit, GWLP_WNDPROC, (LONG_PTR)TextEditProc);
+    SetFocus(g.tedit);
+    InvalidateRect(g.view, nullptr, FALSE);   // the composite paints the ring the edit's
+                                              // punch-out exposes (WS_CLIPCHILDREN owns
+                                              // the box's pixels from here)
+}
+
+// A stroke's invalidation: the gesture's footprint so far, in view pixels -
+// the drag path never recomposites anything beyond its own ink (call it
+// before and after a mutation; the invalid regions accumulate into one paint).
+static void AnnInval(HWND h) {
+    DocState& D = DV(g.annPaneB);
+    int ox, oy;
+    if (!PageOrigin(D, g.annPaneB, g.annPage, ox, oy)) { InvalidateRect(h, nullptr, FALSE); return; }
+    float k = (float)(D.zoom * g.dpi);
+    float x0, y0, x1, y1;
+    Annot a;                                  // bounds of the live points
+    a.type = AT_INK; a.width = 3;
+    a.ix = g.annIX; a.iy = g.annIY;
+    AnnotBounds(a, x0, y0, x1, y1);
+    RECT r{ PaneX0(g.annPaneB) + ox + (int)floorf(x0 * k) - 3, oy + (int)floorf(y0 * k) - 3,
+            PaneX0(g.annPaneB) + ox + (int)ceilf(x1 * k) + 4, oy + (int)ceilf(y1 * k) + 4 };
+    InvalidateRect(h, &r, FALSE);
+}
+
+// The press under a drawing tool. Returns true when the tool consumed it.
+static bool ToolDown(bool b, POINT p) {
+    DocState& D = DV(b);
+    if (!D.n) return false;
+    int tool = D.tool;
+    if (tool == TOOL_SELECT) return false;    // the classic selection path owns Select
+    POINT q{ p.x - PaneX0(b) - CardX(b), p.y };
+    int pg; float fx, fy;
+    bool onPage = ViewToPageAt(D, q, CardW(b), g.ch, D.sx, D.sy, pg, fx, fy);
+    if (tool == TOOL_HIGHLIGHT) {
+        // KillerPDF #127 Phase 2: on text the highlight FLOWS along the runs
+        // exactly like text selection; the release turns the lines into
+        // per-line annotations. A press with no text under it hints instead
+        // of silently laying down a rect.
+        TxtPage* pt = onPage ? TtFor(D, pg) : nullptr;
+        if (pt && TtOverText(*pt, fx, fy)) {
+            SelClear(D);
+            g.selCommit = TOOL_HIGHLIGHT;
+            D.selArm = true; D.selDrag = false;
+            D.selAPage = D.selFPage = pg;
+            D.selACaret = D.selFCaret = TtCaret(*pt, fx, fy);
+            D.selDownPos = p;
+        } else {
+            if (D.selRange || D.selArm) SelClear(D);
+            SetStatusHold(L"No text here - drag over text to highlight it");
+        }
+        return true;
+    }
+    if (!onPage) return true;                 // a drawing press off the page does nothing
+    if (tool == TOOL_TEXT) { TextPlace(b, p); return true; }
+    g.annInk = true; g.annKind = tool; g.annArm = true;
+    g.annPaneB = b; g.annPage = pg; g.annSX = D.sx; g.annSY = D.sy;
+    g.annStart = g.annLast = p; g.annFX = fx; g.annFY = fy;
+    g.annIX.clear(); g.annIY.clear();
+    g.annIX.push_back(fx); g.annIY.push_back(fy);
+    if (tool != TOOL_DRAW) { g.annIX.push_back(fx); g.annIY.push_back(fy); }   // the tracked end
+    return true;
+}
+
+// The drag under a stroke or a move gesture. p is view pixels; the stroke
+// lives in the press-time scroll's DIP space (a scroll mid-stroke cannot skew
+// it, KillerPDF pins the gesture to its canvas the same way).
+static void ToolMove(HWND h, POINT p) {
+    DocState& D = DV(g.annPaneB);
+    float k = (float)(D.zoom * g.dpi);
+    if (g.annMove) {                          // the Select tool drags the chosen annotation
+        auto it = D.annos.find(g.annPage);
+        if (it != D.annos.end() && g.annSelIdx >= 0 && g.annSelIdx < (int)it->second.size()) {
+            Annot& a = it->second[g.annSelIdx];
+            float bx0, by0, bx1, by1; AnnotBounds(a, bx0, by0, bx1, by1);
+            float ddx = (p.x - g.annLast.x) / max(0.01f, k);
+            float ddy = (p.y - g.annLast.y) / max(0.01f, k);
+            if (ddx != 0 || ddy != 0) {
+                // clamp the drag into the page (KillerPDF's ClampAnnotPos)
+                float pw = g.annPage < (int)D.pw.size() ? D.pw[g.annPage] : 0;
+                float phh = g.annPage < (int)D.ph.size() ? D.ph[g.annPage] : 0;
+                float nx0 = bx0 + ddx, ny0 = by0 + ddy;
+                float w = bx1 - bx0, hh = by1 - by0;
+                nx0 = std::clamp(nx0, 0.0f, max(0.0f, pw - w));
+                ny0 = std::clamp(ny0, 0.0f, max(0.0f, phh - hh));
+                ddx = nx0 - bx0; ddy = ny0 - by0;
+                if (a.type == AT_HIGHLIGHT) {
+                    for (FRect& r : a.lines) { r.x += ddx; r.y += ddy; }
+                    a.x = nx0; a.y = ny0;
+                } else if (a.type == AT_INK) {
+                    for (size_t i = 0; i < a.ix.size(); i++) { a.ix[i] += ddx; a.iy[i] += ddy; }
+                } else { a.x = nx0; a.y = ny0; }
+                g.annLast = p;
+                RECT now{ 0, 0, 0, 0 };
+                float ax0, ay0, ax1, ay1; AnnotBounds(a, ax0, ay0, ax1, ay1);
+                int ox, oy;
+                if (PageOrigin(D, g.annPaneB, g.annPage, ox, oy)) {
+                    now = RECT{ PaneX0(g.annPaneB) + ox + (int)(ax0 * k) - 3, oy + (int)(ay0 * k) - 3,
+                                PaneX0(g.annPaneB) + ox + (int)(ax1 * k) + 4, oy + (int)(ay1 * k) + 4 };
+                }
+                InvalidateRect(h, &now, FALSE);   // the bounds ride the annotation: one rect
+                                                  // covers the pixels it left and entered
+            }
+        }
+        return;
+    }
+    if (!g.annInk) return;
+    POINT q{ p.x - PaneX0(g.annPaneB) - CardX(g.annPaneB), p.y };
+    int pg; float fx, fy;
+    if (!ViewToPageAt(D, q, CardW(g.annPaneB), g.ch, g.annSX, g.annSY, pg, fx, fy)) return;
+    if (g.annKind == TOOL_DRAW) {
+        size_t ln = g.annIX.size();
+        if (!ln || fabsf(fx - g.annIX[ln - 1]) > 0.01f || fabsf(fy - g.annIY[ln - 1]) > 0.01f) {
+            AnnInval(h);                      // old footprint first: bounds BEFORE the append
+            g.annIX.push_back(fx); g.annIY.push_back(fy);
+            AnnInval(h);                      // then the new one - the two regions join in
+        }                                     // one paint, so the stroke never trails ghosts
+        return;
+    }
+    // line / shape: the second point tracks the pointer (KillerPDF's preview)
+    g.annArm = false;
+    if (g.annIX.size() < 2) { g.annIX.push_back(fx); g.annIY.push_back(fy); }
+    else { g.annIX[1] = fx; g.annIY[1] = fy; }
+    AnnInval(h);
+}
+
+// The release: KillerPDF's commit rules, verbatim. A line needs >3pt of
+// length, a shape >3pt of both dimensions, a one-point Draw commits as a dot
+// (two points 0.25 apart meeting in the round caps).
+static void ToolUp(HWND h) {
+    DocState& D = DV(g.annPaneB);
+    if (g.annMove) {
+        g.annMove = false;
+        return;
+    }
+    if (!g.annInk) return;
+    g.annInk = false;
+    int kind = g.annKind;
+    auto& v = D.annos[g.annPage];
+    if (kind == TOOL_LINE) {
+        if (g.annIX.size() >= 2 && (fabsf(g.annIX[1] - g.annIX[0]) > 3 || fabsf(g.annIY[1] - g.annIY[0]) > 3)) {
+            Annot a; a.type = AT_INK; a.width = 3; a.color = RGB(0xff, 0x00, 0x00);
+            a.ix = g.annIX; a.iy = g.annIY;
+            v.push_back(a);
+        }
+    } else if (kind == TOOL_SHAPE) {
+        float x0 = min(g.annIX[0], g.annIX[1]), x1 = max(g.annIX[0], g.annIX[1]);
+        float y0 = min(g.annIY[0], g.annIY[1]), y1 = max(g.annIY[0], g.annIY[1]);
+        if (x1 - x0 > 3 && y1 - y0 > 3) {     // the filled rectangle: KillerPDF's default
+            Annot a; a.type = AT_HIGHLIGHT; a.color = RGB(0xff, 0x00, 0x00); a.alpha = 80;
+            a.lines.push_back(FRect{ x0, y0, x1 - x0, y1 - y0 });
+            a.x = x0; a.y = y0; a.w = x1 - x0; a.h = y1 - y0;
+            v.push_back(a);
+        }
+    } else {                                  // TOOL_DRAW
+        if (!g.annIX.empty()) {
+            if (g.annIX.size() == 1) {        // the dot: 0.25pt to the right, caps meet
+                g.annIX.push_back(g.annIX[0] + 0.25f); g.annIY.push_back(g.annIY[0]);
+            }
+            Annot a; a.type = AT_INK; a.width = 3; a.color = RGB(0xff, 0x00, 0x00);
+            a.ix = g.annIX; a.iy = g.annIY;
+            v.push_back(a);
+        }
+    }
+    g.annIX.clear(); g.annIY.clear();
+    InvalidateRect(h, nullptr, FALSE);        // the commit repaints the page's overlay
+}
+
+// The Select tool's press: the topmost annotation under the pointer is chosen
+// (KillerPDF hit-tests top-down) and armed for the drag; a miss drops the
+// selection and lets the flowing text path arm. Returns true on a hit.
+static bool SelectAnnotAt(HWND h, bool b, POINT p) {
+    DocState& D = DV(b);
+    POINT q{ p.x - PaneX0(b) - CardX(b), p.y };
+    int pg; float fx, fy;
+    if (!ViewToPageAt(D, q, CardW(b), g.ch, D.sx, D.sy, pg, fx, fy)) return false;
+    auto it = D.annos.find(pg);
+    if (it == D.annos.end()) {
+        if (g.annSelPage >= 0) {
+            g.annSelPage = -1; g.annSelIdx = -1;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return false;
+    }
+    float k = (float)(D.zoom * g.dpi);
+    for (int ai = (int)it->second.size() - 1; ai >= 0; ai--) {
+        if (AnnotHit(it->second[ai], fx, fy, k)) {
+            g.annSelB = b; g.annSelPage = pg; g.annSelIdx = ai;
+            g.annMove = true; g.annPaneB = b; g.annPage = pg;
+            g.annSX = D.sx; g.annSY = D.sy;
+            g.annStart = g.annLast = p;
+            InvalidateRect(h, nullptr, FALSE);   // the ring lands
+            return true;
+        }
+    }
+    if (g.annSelPage >= 0) {
+        g.annSelPage = -1; g.annSelIdx = -1;
+        InvalidateRect(h, nullptr, FALSE);
+    }
+    return false;
+}
+
 // ---------------- page view ----------------
 
 // KillerPDF's document card: the shared dark field fills the window and the
@@ -2383,6 +2785,167 @@ static void FindPaintPage(HDC dc, const DocState& D, int page, int px, int py) {
     }
 }
 
+// ---- annotation geometry + paint (the six tools' committed state) ----
+
+// The content's x inside the card: centered in the viewport when it fits,
+// scrolled otherwise - the exact term Draw lays pages out with, shared with the
+// gesture code so a stroke's invalidation rect lands where the paint will.
+static int DocOffX(const DocState& D, int cw) {
+    int gut = (D.n && D.docH > g.ch) ? SBar() : 0;   // the v-bar's reserved column
+    return D.docW < cw - gut ? (cw - gut - D.docW) / 2 : -D.sx;
+}
+
+// A page's top-left in VIEW pixels (pass-relative for pane B; callers add
+// PaneX0). Mirrors Draw's placement so events and paint agree per pixel.
+static bool PageOrigin(const DocState& D, bool b, int i, int& ox, int& oy) {
+    if (i < 0 || i >= D.n || (int)D.px.size() < D.n || D.top.empty() || D.rh.empty()) return false;
+    int row = D.vm == 1 ? 0 : i / PerRow(D);
+    if (row >= (int)D.rh.size()) return false;
+    int cw = CardW(b);
+    ox = CardX(b) + DocOffX(D, cw) + D.px[i];
+    oy = D.top[row] - D.sy + (D.rh[row] - PH(D, i)) / 2;
+    return true;
+}
+
+// An annotation's bounds in page DIPs: the line-quad union, the stroke's bbox
+// widened by half the width, or the text box. One source for hit tests, the
+// move gesture's old-∪-new invalidation and the commit paint.
+static void AnnotBounds(const Annot& a, float& x0, float& y0, float& x1, float& y1) {
+    x0 = y0 = 1e9f; x1 = y1 = -1e9f;
+    if (a.type == AT_HIGHLIGHT) {
+        for (const FRect& r : a.lines) {
+            x0 = min(x0, r.x); y0 = min(y0, r.y);
+            x1 = max(x1, r.x + r.w); y1 = max(y1, r.y + r.h);
+        }
+    } else if (a.type == AT_INK) {
+        for (size_t i = 0; i < a.ix.size(); i++) {
+            x0 = min(x0, a.ix[i]); x1 = max(x1, a.ix[i]);
+            y0 = min(y0, a.iy[i]); y1 = max(y1, a.iy[i]);
+        }
+        float hw = a.width * 0.5f;
+        x0 -= hw; y0 -= hw; x1 += hw; y1 += hw;
+    } else {
+        x0 = a.x; y0 = a.y; x1 = a.x + a.w; y1 = a.y + a.h;
+    }
+    if (x1 < x0) { x0 = x1 = 0; y0 = y1 = 0; }
+}
+
+// Point-to-segment distance (KillerPDF's DistPointToSegment): an ink stroke is
+// hit along its path, not inside its bbox.
+static float PtSegDist(float px, float py, float ax, float ay, float bx, float by) {
+    float dx = bx - ax, dy = by - ay;
+    float l2 = dx * dx + dy * dy;
+    float t = l2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / l2 : 0;
+    t = std::clamp(t, 0.0f, 1.0f);
+    float qx = ax + t * dx - px, qy = ay + t * dy - py;
+    return sqrtf(qx * qx + qy * qy);
+}
+
+// Does the page point hit the annotation? Padding is 2px worth of DIPs so a
+// thin stroke is grabbable (KillerPDF's HitTestAnnotation pads the same way).
+static bool AnnotHit(const Annot& a, float fx, float fy, float k) {
+    float pad = 2.0f / max(0.01f, k);
+    if (a.type == AT_HIGHLIGHT) {
+        for (const FRect& r : a.lines)
+            if (fx >= r.x - pad && fx <= r.x + r.w + pad && fy >= r.y - pad && fy <= r.y + r.h + pad) return true;
+        return false;
+    }
+    if (a.type == AT_INK) {
+        float reach = a.width * 0.5f + pad;
+        if (a.ix.size() == 1) {
+            float dx = fx - a.ix[0], dy = fy - a.iy[0];
+            return dx * dx + dy * dy <= reach * reach;
+        }
+        for (size_t i = 0; i + 1 < a.ix.size(); i++)
+            if (PtSegDist(fx, fy, a.ix[i], a.iy[i], a.ix[i + 1], a.iy[i + 1]) <= reach) return true;
+        return false;
+    }
+    return fx >= a.x - pad && fx <= a.x + a.w + pad && fy >= a.y - pad && fy <= a.y + a.h + pad;
+}
+
+static HFONT g_tafont = nullptr; static int g_tapx = 0;   // the text annotation's Segoe UI, cached per px
+
+// One page's annotations, above the page and below the selection quads -
+// KillerPDF's overlay order. Highlights are translucent line fills, ink rides
+// GDI+ round caps at the stroke's own width, text wraps in the annotation's
+// box, and the Select tool's chosen annotation wears the accent ring.
+static void PaintAnnots(HDC dc, const DocState& D, int page, int px, int py, float k) {
+    auto it = D.annos.find(page);
+    if (it == D.annos.end() || it->second.empty()) return;
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    for (size_t ai = 0; ai < it->second.size(); ai++) {
+        const Annot& a = it->second[ai];
+        Gdiplus::Color c(a.alpha, GetRValue(a.color), GetGValue(a.color), GetBValue(a.color));
+        if (a.type == AT_HIGHLIGHT) {
+            Gdiplus::SolidBrush br(c);
+            for (const FRect& r : a.lines)
+                gs.FillRectangle(&br, px + r.x * k, py + r.y * k, max(r.w * k, 2.0f), max(r.h * k, 2.0f));
+        } else if (a.type == AT_INK) {
+            if (a.ix.empty()) continue;
+            std::vector<Gdiplus::PointF> pts;
+            pts.reserve(a.ix.size());
+            for (size_t i = 0; i < a.ix.size(); i++)
+                pts.push_back(Gdiplus::PointF(px + a.ix[i] * k, py + a.iy[i] * k));
+            Gdiplus::Pen pen(c, max(1.0f, a.width * k));
+            pen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+            gs.DrawLines(&pen, pts.data(), (INT)pts.size());   // a dot: two points 0.25 apart,
+                                                               // round caps meet as a disc
+        } else {
+            int hpx = (int)std::lround(a.fsize * k);
+            if (hpx > 0) {
+                if (!g_tafont || g_tapx != hpx) {
+                    if (g_tafont) DeleteObject(g_tafont);
+                    g_tafont = CreateFontW(-hpx, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
+                                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                           DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                    g_tapx = hpx;
+                }
+                HGDIOBJ of = SelectObject(dc, g_tafont);
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, RGB(0, 0, 0));
+                RECT tr{ px + (int)(a.x * k), py + (int)(a.y * k),
+                         px + (int)((a.x + a.w) * k), py + (int)((a.y + a.h) * k) };
+                DrawTextW(dc, a.text.c_str(), -1, &tr, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+                SelectObject(dc, of);
+            }
+        }
+        if (D.tool == TOOL_SELECT && g.annSelPage == page && g.annSelIdx == (int)ai &&
+            g.annSelB == (&D == &g.dB)) {
+            float x0, y0, x1, y1; AnnotBounds(a, x0, y0, x1, y1);
+            Gdiplus::Pen sel(Gdiplus::Color(255, 0x22, 0xbb, 0x56), 1.0f * (float)g.dpi);
+            gs.DrawRectangle(&sel, Gdiplus::RectF(px + x0 * k, py + y0 * k,
+                                                  max(1.0f, (x1 - x0) * k), max(1.0f, (y1 - y0) * k)));
+        }
+    }
+}
+
+// The live gesture's preview, painted exactly like the commit will read:
+// Draw/Line ride the red round-cap stroke, Shapes drags a translucent fill
+// (KillerPDF's filled-rectangle look, committed as a highlight-style fill).
+static void PaintLiveStroke(HDC dc, const DocState& D, int page, int px, int py, float k) {
+    if (!g.annInk || g.annPage != page || g.annPaneB != (&D == &g.dB)) return;
+    if (g.annIX.empty()) return;
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    if (g.annKind == TOOL_SHAPE && g.annIX.size() >= 2) {
+        float x0 = min(g.annIX[0], g.annIX[1]), x1 = max(g.annIX[0], g.annIX[1]);
+        float y0 = min(g.annIY[0], g.annIY[1]), y1 = max(g.annIY[0], g.annIY[1]);
+        Gdiplus::SolidBrush br(Gdiplus::Color(80, 0xff, 0x00, 0x00));
+        gs.FillRectangle(&br, px + x0 * k, py + y0 * k, (x1 - x0) * k, (y1 - y0) * k);
+        return;
+    }
+    size_t n = g.annKind == TOOL_DRAW ? g.annIX.size() : 2;
+    if (n < 2) n = min<size_t>(2, g.annIX.size());
+    if (n < 2) return;
+    std::vector<Gdiplus::PointF> pts;
+    for (size_t i = 0; i < n; i++)
+        pts.push_back(Gdiplus::PointF(px + g.annIX[i] * k, py + g.annIY[i] * k));
+    Gdiplus::Pen pen(Gdiplus::Color(255, 0xff, 0x00, 0x00), max(1.0f, 3.0f * k));
+    pen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+    gs.DrawLines(&pen, pts.data(), (INT)pts.size());
+}
+
 // One pass paints ONE pane's document into the back buffer: its own backdrop
 // card, its own layout, its own scroll. `extra` (optional) intersects the card
 // clip with that pane's region, so the split's second pass reveals only its
@@ -2416,9 +2979,10 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
         return;
     }
     HDC m = CreateCompatibleDC(dc);
-    int gut = D.docH > h ? SBar() : 0;   // the reserved bar column, like KillerPDF's Grid layout
-    int offx = D.docW < cw - gut ? (cw - gut - D.docW) / 2 : -D.sx;
+    int offx = DocOffX(D, cw);           // the shared centering/scroll term: the v-bar's
+                                         // reserved column keeps pages clear of the thumb
     bool selOn = D.selRange || (D.selArm && D.selDrag);   // quads paint live during the drag
+    float k = (float)(D.zoom * g.dpi);
     int r0 = RowAt(D, D.sy), r1 = RowAt(D, D.sy + h - 1);
     int first = RowPage(D, r0, 0), last = first;
     int per = PerRow(D);
@@ -2444,6 +3008,10 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
                 RECT pr{ x, y, x + pw, y + ph };
                 FillRect(dc, &pr, (HBRUSH)GetStockObject(WHITE_BRUSH));
             }
+            // the tools' committed annotations, above the page and below the
+            // selection quads - KillerPDF's overlay order
+            PaintAnnots(dc, D, i, x, y, k);
+            PaintLiveStroke(dc, D, i, x, y, k);
             // flowing selection quads: KillerPDF paints one rect per selected line on an
             // overlay above the page - 60/255 of the dark theme's SelectionAccent #22bb56
             if (selOn) {
@@ -2452,7 +3020,6 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
                     TxtPage* pt = TtFor(D, i);
                     if (pt) {
                         std::vector<FRect> rs; TtRects(*pt, s, e, rs);
-                        float k = (float)(D.zoom * g.dpi);
                         Gdiplus::Graphics gs(dc);
                         Gdiplus::SolidBrush br(Gdiplus::Color(60, 0x22, 0xbb, 0x56));
                         for (const FRect& q : rs)
@@ -2499,23 +3066,26 @@ static void EnsureBack(HDC ref, int w, int h) {
 }
 
 // The page view's overlay bars. Like KillerPDF's document pane they live in a
-// reserved 12px gutter (the vertical one spans the full height, the horizontal
-// one stops short of it), the track paints nothing, and the thumb is the only
-// visible part: 4px and a third alpha at rest, 8px and solid under the cursor.
+// reserved 12px gutter (each bar's track stops short of the other's reserved
+// strip, the WPF ScrollViewer's cross reservation), the track paints nothing,
+// and the thumb is the only visible part: 4px and a third alpha at rest, 8px
+// and solid under the cursor.
 static void PaintViewBars(HDC dc, int w, int h, int xoff) {
     DocState& D = g.d;                   // the unsplit card is pane A's document surface
     if (!D.n) return;
     int gb = SBar(), r = (int)(3 * g.dpi);
     int cw = min(w, CardW(false));       // the bars ride inside the card, not on the window gutter
     bool vshow = D.docH > h;
+    int track = cw - (vshow ? gb : 0);   // the content viewport: the v-bar's column is reserved
+    bool hshow = D.docW > track;         // out of it, and the h-bar answers to THAT width
+    int gutH = hshow ? gb : 0;
     if (vshow) {
-        int tl, tp; BarThumb(D.docH, h, D.sy, tl, tp);
-        bool hot = D.vHot || D.vDrag;
+        int tl, tp; BarThumb(D.docH, h - gutH, D.sy, tl, tp);   // the v-track stops short of
+        bool hot = D.vHot || D.vDrag;                           // the h-bar's reserved row
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, xoff + cw - gb + (gb - bw) / 2, tp, bw, tl, r, hot);
     }
-    if (D.docW > cw) {
-        int track = cw - (vshow ? gb : 0);
+    if (hshow) {
         int tl, tp; BarThumb(D.docW, track, D.sx, tl, tp);
         bool hot = D.hHot || D.hDrag;
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
@@ -2533,13 +3103,15 @@ static void PaintPaneBars(HDC dc, DocState& D, bool b, bool vhot, bool hhot) {
     int x0 = PaneX0(b) + CardX(b), x1 = x0 + CardW(b);   // the bars ride the CARD's own span -
     if (x1 - x0 <= SBar() * 2) return;                   // the same edges the clicks hit, so a
     bool vshow = D.docH > g.ch;                          // thumb is never 8px away from its zone
+    int track = (x1 - x0) - (vshow ? gb : 0);            // the content viewport: the v-bar's
+    bool hshow = D.docW > track;                         // column comes out of it first
+    int gutH = hshow ? gb : 0;
     if (vshow) {
-        int tl, tp; BarThumb(D.docH, g.ch, D.sy, tl, tp);
-        int bw = vhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
+        int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp);   // the v-track stops short
+        int bw = vhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);       // of the h-bar's reserved row
         RoundRectFill(dc, x1 - gb + (gb - bw) / 2, tp, bw, tl, r, vhot);
     }
-    if (D.docW > CardW(b)) {
-        int track = (x1 - x0) - (vshow ? gb : 0);
+    if (hshow) {
         int tl, tp; BarThumb(D.docW, track, D.sx, tl, tp);
         int bw = hhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, x0 + tp, g.ch - gb + (gb - bw) / 2, tl, bw, r, hhot);
@@ -2612,11 +3184,37 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                         PaintPaneBars(g.bdc, g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
                     }
                 }
+                RECT band{ g.splitX + 1, 0, min(g.cw, g.splitX + SplitHalf()), g.ch };
+                FillRect(g.bdc, &band, GrainBrush(1));   // the gutter's own 3px: pane A's pass
+                                                         // ends at the line, pane B's starts 4px
+                                                         // past it - without this fill the strip
+                                                         // between them never repaints and stale
+                                                         // fragments pile up as ghosts on a drag
                 RECT dl{ g.splitX, 2, g.splitX + 1, g.ch - 2 };   // the divider: one pixel of
                 FillRect(g.bdc, &dl, SplitLineBrush(g.lineHot || g.splitDrag));   // chrome that turns
             } else {                                // green when it means "grab me"
                 Draw(g.bdc, g.cw, g.ch, 0, g.d);                    // card floats on never shows a
                 PaintViewBars(g.bdc, g.cw, g.ch, 0);                // seam at a pane boundary
+            }
+            if (g.brushOn) {                        // the Draw tool's brush ring: the ink
+                DocState& DC = DV(PaneB(g.brushPt.x));   // color at the brush's own size,
+                float k = (float)(DC.zoom * g.dpi);      // KillerPDF's ShowBrushPreview
+                Gdiplus::Graphics gs(g.bdc);
+                gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                float d = max(4.0f, 3.0f * k);
+                Gdiplus::Pen pen(Gdiplus::Color(255, 0xff, 0x00, 0x00), 1.0f * (float)g.dpi);
+                gs.DrawEllipse(&pen, g.brushPt.x - d / 2, g.brushPt.y - d / 2, d, d);
+            }
+            if (g.tedit) {                          // the text box's ring: the one pixel the
+                RECT er; GetWindowRect(g.tedit, &er);   // WS_CLIPCHILDREN punch-out exposes,
+                ScreenToClient(h, (POINT*)&er);         // KillerPDF's PrimaryBrush border
+                ScreenToClient(h, ((POINT*)&er) + 1);
+                HPEN gp = CreatePen(PS_SOLID, 1, RGB(0x22, 0xbb, 0x56));
+                HGDIOBJ og = SelectObject(g.bdc, gp);
+                HGDIOBJ ob = SelectObject(g.bdc, GetStockObject(NULL_BRUSH));
+                RECT er2{ er.left - 1, er.top - 1, er.right + 1, er.bottom + 1 };
+                Rectangle(g.bdc, er2.left, er2.top, er2.right, er2.bottom);
+                SelectObject(g.bdc, ob); SelectObject(g.bdc, og); DeleteObject(gp);
             }
             if (fd.open) {                          // the Find bar is composite pixels, not a
                 int bx, by; FdOrigin(bx, by);       // window: pages, highlights, overlay bars,
@@ -2695,45 +3293,61 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             FocusPane(inB);                      // pane's own overlay bars answer there
             DocState& D = DV(inB);
             bool vshow = D.n && D.docH > g.ch;
+            int track = ViewW(D, inB);           // the content viewport: the h-bar answers to it
+            bool hshow = D.n && D.docW > track;
+            int gutH = hshow ? gb : 0;
             int cardR = PaneX0(inB) + CardX(inB) + CardW(inB);   // this pane's card's right edge
             int cardL = PaneX0(inB) + CardX(inB);
             if (vshow && p.x >= cardR - gb && p.x < cardR) { // the v-bar hugs the card's edge
-                int tl, tp; BarThumb(D.docH, g.ch, D.sy, tl, tp);
-                if (p.y >= tp && p.y < tp + tl) { D.vDrag = true; D.vGrab = p.y - tp; }
+                int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp);   // the track stops
+                if (p.y >= tp && p.y < tp + tl) { D.vDrag = true; D.vGrab = p.y - tp; }   // short
                 else ScrollPane(inB, D.sx, D.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
                 return 0;
             }
-            if (D.n && D.docW > CardW(inB) && p.y >= g.ch - gb && p.x >= cardL && p.x < cardR - (vshow ? gb : 0)) {
-                int track = CardW(inB) - (vshow ? gb : 0);
+            if (hshow && p.y >= g.ch - gb && p.x >= cardL && p.x < cardR - (vshow ? gb : 0)) {
                 int tl, tp; BarThumb(D.docW, track, D.sx, tl, tp);
                 if (p.x >= cardL + tp && p.x < cardL + tp + tl) { D.hDrag = true; D.hGrab = p.x - (cardL + tp); }
-                else ScrollPane(inB, D.sx + (p.x < cardL + tp ? -(int)(CardW(inB) * 0.9) : (int)(CardW(inB) * 0.9)), D.sy);
+                else ScrollPane(inB, D.sx + (p.x < cardL + tp ? -(int)(track * 0.9) : (int)(track * 0.9)), D.sy);
                 return 0;
             }
         } else {
         DocState& D = g.d;
         int cw = CardW(false);
         bool vshow = D.n && D.docH > g.ch;
+        int track = cw - (vshow ? gb : 0);
+        bool hshow = D.n && D.docW > track;
+        int gutH = hshow ? gb : 0;
         if (vshow && p.x >= cw - gb && p.x < cw) {   // the vertical bar: inside the card's edge
-            int tl, tp; BarThumb(D.docH, g.ch, D.sy, tl, tp);
+            int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp);
             if (p.y >= tp && p.y < tp + tl) { D.vDrag = true; D.vGrab = p.y - tp; }
             else ScrollTo(D.sx, D.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
             return 0;
         }
-        if (D.n && D.docW > cw && p.y >= g.ch - gb && p.x < cw - (vshow ? gb : 0)) {
-            int tl, tp; BarThumb(D.docW, cw - (vshow ? gb : 0), D.sx, tl, tp);
+        if (hshow && p.y >= g.ch - gb && p.x < cw - (vshow ? gb : 0)) {
+            int tl, tp; BarThumb(D.docW, track, D.sx, tl, tp);
             if (p.x >= tp && p.x < tp + tl) { D.hDrag = true; D.hGrab = p.x - tp; }
-            else ScrollTo(D.sx + (p.x < tp ? -(int)(cw * 0.9) : (int)(cw * 0.9)), D.sy);
+            else ScrollTo(D.sx + (p.x < tp ? -(int)(track * 0.9) : (int)(track * 0.9)), D.sy);
             return 0;
         }
+        }
+        // the tools: every press but Select's own routes here first (KillerPDF's
+        // Canvas_MouseLeftButtonDown dispatch). A tool press also commits a live
+        // text box first, exactly like its CommitActiveTextBox.
+        bool pbT = PaneB(p.x);
+        if (DV(pbT).tool != TOOL_SELECT) {
+            CommitTextEdit();
+            if (ToolDown(pbT, p)) return 0;
         }
         // flowing text selection: a press ON text starts KillerPDF's caret drag. A press
         // anywhere else starts nothing - the wheel and the keys own scrolling, so the
         // old grab-and-pan gesture (which fought the selection drag) is gone. The press
         // maps through the pane it landed in, so each pane selects in its own document.
+        // With the Select tool an annotation under the press wins first: it is chosen,
+        // armed for the drag, and the text path never sees the press.
         int pg; float fx, fy;
         bool pb = PaneB(p.x);
         DocState& D = DV(pb);
+        if (D.tool == TOOL_SELECT && SelectAnnotAt(h, pb, p)) return 0;
         POINT q{ p.x - PaneX0(pb) - CardX(pb), p.y };    // the press in the pane's own card coords
         if (ViewToPageAt(D, q, CardW(pb), g.ch, D.sx, D.sy, pg, fx, fy)) {
             TxtPage* pt = TtFor(D, pg);   // builds once if the pre-warm has not reached it yet
@@ -2825,6 +3439,10 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             ScrollTo((int)((long long)(p.x - g.d.hGrab) * max(0, g.d.docW - cw) / max(1, cw - (g.d.docH > g.ch ? SBar() : 0) - tl)), g.d.sy);
             return 0;
         }
+        // the tools' live gestures: a stroke tracks its own footprint (old ∪ new
+        // per frame, no full-view recomposite), and the Select tool's drag moves
+        // the chosen annotation inside its page.
+        if (g.annMove || g.annInk) { ToolMove(h, p); return 0; }
         // live selection drag: the focus caret tracks the pointer (cross-page, like
         // KillerPDF's Continuous mode); ViewToPage clamps into the page so dragging
         // past an edge parks the caret at the nearest line's start/end. The pane
@@ -2851,6 +3469,22 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             }
             return 0;
         }
+        // the Draw tool's brush ring follows the cursor while no gesture holds
+        // the capture (KillerPDF's ShowBrushPreview): the ring's old ∪ new moves,
+        // never the whole view
+        if (!g.annInk && !g.annMove && !g.d.selArm && !g.dB.selArm &&
+            !g.d.vDrag && !g.d.hDrag && !g.dB.vDrag && !g.dB.hDrag && !g.splitDrag && !g.resizing) {
+            bool bNow = PaneB(p.x);
+            DocState& DC = DV(bNow);
+            bool ring = DC.n && DC.tool == TOOL_DRAW;
+            if (ring != g.brushOn || (ring && (p.x != g.brushPt.x || p.y != g.brushPt.y))) {
+                RECT u{ min(p.x, g.brushPt.x) - 12, min(p.y, g.brushPt.y) - 12,
+                        max(p.x, g.brushPt.x) + 12, max(p.y, g.brushPt.y) + 12 };
+                if (!g.brushOn) u = RECT{ p.x - 12, p.y - 12, p.x + 12, p.y + 12 };
+                g.brushOn = ring; g.brushPt = p;
+                InvalidateRect(h, &u, FALSE);
+            }
+        }
         if (g.split) {                           // the split's hover work: the divider's hot
             bool lineHot = abs(p.x - g.splitX) <= SplitHalf();   // flip, then each pane's bars
             if (lineHot != g.lineHot) {          // over their own tracks
@@ -2868,9 +3502,10 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int cardL = PaneX0(inB) + CardX(inB);
             if (lineHot) return 0;               // the grab zone: no bar hover underneath
             if (D.n && D.docH > g.ch && p.x >= cardR - gb && p.x < cardR) {
-                int tl, tp; BarThumb(D.docH, g.ch, D.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl;
+                int gutH = (D.n && D.docW > ViewW(D, inB)) ? gb : 0;
+                int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl;
             }
-            if (D.n && D.docW > CardW(inB) && p.y >= g.ch - gb && p.x >= cardL && p.x < cardR - ((D.docH > g.ch) ? gb : 0)) {
+            if (D.n && D.docW > ViewW(D, inB) && p.y >= g.ch - gb && p.x >= cardL && p.x < cardR - ((D.docH > g.ch) ? gb : 0)) {
                 int track = CardW(inB) - ((D.docH > g.ch) ? gb : 0);
                 int tl, tp; BarThumb(D.docW, track, D.sx, tl, tp); hhot = p.x >= cardL + tp && p.x < cardL + tp + tl;
             }
@@ -2885,8 +3520,11 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         DocState& D = g.d;
         int cw = CardW(false);
         bool vhot = D.n && D.docH > g.ch && p.x >= cw - SBar() && p.x < cw;
-        if (vhot) { int tl, tp; BarThumb(D.docH, g.ch, D.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl; }
-        bool hhot = !vhot && D.n && D.docW > cw && p.y >= g.ch - SBar() && p.x < cw - (vhot ? SBar() : 0);
+        if (vhot) {
+            int gutH = (D.n && D.docW > cw - SBar()) ? SBar() : 0;
+            int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl;
+        }
+        bool hhot = !vhot && D.n && D.docW > cw - (D.docH > g.ch ? SBar() : 0) && p.y >= g.ch - SBar() && p.x < cw - (vhot ? SBar() : 0);
         if (hhot) { int tl, tp; BarThumb(D.docW, cw - (vhot ? SBar() : 0), D.sx, tl, tp); hhot = p.x >= tp && p.x < tp + tl; }
         if (vhot != D.vHot || hhot != D.hHot) {
             D.vHot = vhot; D.hHot = hhot;
@@ -2901,10 +3539,20 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             InvalidateRect(h, nullptr, FALSE);
         }
         if (g.lineHot) { g.lineHot = false; InvalidateRect(h, nullptr, FALSE); }
+        if (g.brushOn) {                    // the brush ring dies with the hover
+            RECT u{ g.brushPt.x - 12, g.brushPt.y - 12, g.brushPt.x + 12, g.brushPt.y + 12 };
+            g.brushOn = false;
+            InvalidateRect(h, &u, FALSE);
+        }
         return 0;
     case WM_LBUTTONUP:
         if (fd.drag) { fd.drag = false; fd.hot = -1; }   // the grip releases; capture goes below
         if (g.resizing) { g.resizing = false; ReleaseCapture(); LayoutMain(); return 0; }
+        if (g.annMove || g.annInk) {        // the tool gesture releases: commit or discard
+            ToolUp(h);
+            ReleaseCapture();
+            return 0;
+        }
         if (g.d.selArm || g.dB.selArm) {         // whichever pane's press armed the drag owns it
             DocState& D = g.d.selArm ? g.d : g.dB;
             D.selArm = false;
@@ -2913,6 +3561,34 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             ReleaseCapture();
             if (!dragged || (D.selAPage == D.selFPage && D.selACaret == D.selFCaret)) {
                 SelClear(D);                      // plain click collapses the selection
+            } else if (g.selCommit == TOOL_HIGHLIGHT) {
+                // KillerPDF's CommitFlowingHighlight: the swept lines leave as
+                // one per-line highlight annotation set in the drag's own color
+                int sp, sc, ep, ec; SelOrdered(D, sp, sc, ep, ec);
+                int total = 0;
+                for (int pg = sp; pg <= ep && pg < D.n; pg++) {
+                    int s, e; SelSliceForPage(D, pg, s, e);
+                    if (s >= e) continue;
+                    TxtPage* pt = TtFor(D, pg);
+                    if (!pt) continue;
+                    std::vector<FRect> rs; TtRects(*pt, s, e, rs);
+                    if (rs.empty()) continue;
+                    Annot a;
+                    a.type = AT_HIGHLIGHT;
+                    a.color = RGB(0xff, 0xff, 0x00); a.alpha = 80;   // _highlightColor
+                    a.lines = rs;
+                    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                    for (const FRect& r : rs) {
+                        x0 = min(x0, r.x); y0 = min(y0, r.y);
+                        x1 = max(x1, r.x + r.w); y1 = max(y1, r.y + r.h);
+                    }
+                    a.x = x0; a.y = y0; a.w = x1 - x0; a.h = y1 - y0;
+                    D.annos[pg].push_back(a);
+                    total += (int)rs.size();
+                }
+                SelClear(D);
+                if (total) SetStatusHold(std::wstring(L"Highlighted ") + std::to_wstring(total) + L" line(s)");
+                InvalidateRect(h, nullptr, FALSE);
             } else {
                 D.selRange = true;
                 D.selText = SelBuildText(D, nullptr);
@@ -2976,6 +3652,18 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (g.split && abs(p.x - g.splitX) <= SplitHalf()) {   // the divider drags horizontally:
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE;   // the cursor says so
             }
+            // the tools' cursors (KillerPDF's CursorForTool): Text I-beam, the
+            // drag tools the cross (Draw pairs it with the brush ring for the
+            // pen WPF shows; GDI has no stock pen cursor). Select keeps the
+            // I-beam-over-text peek below.
+            {
+                bool pbT = PaneB(p.x);
+                int tool = DV(pbT).tool;
+                if (DV(pbT).n && tool == TOOL_TEXT) { SetCursor(LoadCursorW(nullptr, IDC_IBEAM)); return TRUE; }
+                if (DV(pbT).n && (tool == TOOL_HIGHLIGHT || tool == TOOL_LINE || tool == TOOL_SHAPE || tool == TOOL_DRAW)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_CROSS)); return TRUE;
+                }
+            }
             // I-beam over selectable text (KillerPDF's SelectableTextCursor), peeked
             // without building: the cursor advertises text only once the page's OCR
             // pass has landed, and the arrow elsewhere says a press does nothing
@@ -2992,11 +3680,18 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;
-    case WM_COMMAND:                           // the query edit's EN_CHANGE (its parent now)
-        if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g_fedit) FindChanged();
-        return 0;
-    case WM_CTLCOLOREDIT: {                    // the dark query edit: light text on chrome
-        HDC dc = (HDC)wp;
+    case WM_COMMAND:
+        if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g_fedit) FindChanged();   // the query edit
+        if (HIWORD(wp) == EN_KILLFOCUS && (HWND)lp == g.tedit) CommitTextEdit();   // the text
+        return 0;                                // tool's box lands when the focus leaves it
+    case WM_CTLCOLOREDIT: {                    // the dark query edit; the text tool's box is
+        HDC dc = (HDC)wp;                      // white over the page, KillerPDF's editor
+        if ((HWND)lp == g.tedit) {
+            SetTextColor(dc, RGB(0, 0, 0));
+            SetBkColor(dc, RGB(0xff, 0xff, 0xff));
+            static HBRUSH w = CreateSolidBrush(RGB(0xff, 0xff, 0xff));
+            return (LRESULT)w;
+        }
         SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
         SetBkColor(dc, RGB(0x1c, 0x1c, 0x1c));
         static HBRUSH b = CreateSolidBrush(RGB(0x1c, 0x1c, 0x1c));
@@ -3088,8 +3783,8 @@ static std::wstring StatusRoutine() {   // the FOCUSED pane's page and zoom: the
 
 static void StatusRepaint() { if (g.status) InvalidateRect(g.status, nullptr, FALSE); }
 
-static void SetStatusHold(const std::wstring& t, unsigned ms = 2500) {
-    g.statusHoldText = t;
+static void SetStatusHold(const std::wstring& t, unsigned ms) {   // the default rides the
+    g.statusHoldText = t;                                         // forward declaration above
     g.statusHoldUntil = GetTickCount64() + ms;
     if (g.status) SetTimer(g.status, 1, 250, nullptr);
     StatusRepaint();
@@ -4278,17 +4973,24 @@ static void FindClampDrag() {
     fd.dy = std::clamp(fd.dy, min(loY, hiY), max(loY, hiY));
 }
 
-// ---------------- the sidebar rail: Split pane / Pages / Document Info ----------------
+// ---------------- the sidebar rail: tools + Split pane / Pages / Document Info ----------------
 // KillerPDF's SidebarToggleStrip, in docsy's container language: a 24px strip
 // that always sits between the sidebar and the page (the sidebar collapses TO
 // it, so a closed sidebar comes back from the same place), the shared grain
-// field, a 1px seam against the view, and a bottom-anchored button stack in
-// the reference's locked order - Split pane, Pages, Document Info. Exactly the
-// three buttons asked for, with their logic and nothing else: no outline,
-// comments, attachments or theme buttons come over. Each vector icon reads at
-// 16px and never depends on a glyph being present in the OS font.
+// field, a 1px seam against the view, a TOP-anchored tool stack and a
+// bottom-anchored reference stack. The tools are the six edit buttons the
+// screenshot asked for, in KillerPDF's own toolbar order - Select, Text,
+// Highlight, Line, Shapes, Draw - with their ToolbarButton styling: hover
+// paints the RowHoverBrush #404040 rounded face, the active tool wears the
+// SelectionBg gradient with the white glyph, the rest ride the shadowed glyph
+// at rest. The reference trio keeps the locked bottom order - Split pane,
+// Pages, Document Info. Each vector icon reads at 16px and never depends on a
+// glyph being present in the OS font.
 
 enum { RB_SPLIT, RB_PAGES, RB_INFO, RB_COUNT };
+enum { RT_SELECT = 100, RT_TEXT, RT_HIGHLIGHT, RT_LINE, RT_SHAPE, RT_DRAW, RT_COUNT_ };
+static int RailId(int tool) { return RT_SELECT + tool; }   // tool index -> rail id
+static int RailTool(int id) { return id >= RT_SELECT ? id - RT_SELECT : -1; }
 
 static int RW() { return g.full ? 0 : (int)(24 * g.dpi); }   // full screen gives the column to the page
 
@@ -4302,6 +5004,19 @@ static void RailRects(RECT r[RB_COUNT], int h) {   // 24px cells, 6px gaps, 6px 
     }
 }
 
+// The tool stack hangs from the TOP edge (6px in), one 24px cell per tool in
+// the toolbar's order, so the pointer reaches Select - the resting tool -
+// without crossing the reference trio's zone.
+static void ToolRects(RECT r[TOOL_COUNT], int h) {
+    int bw = (int)(24 * g.dpi), gap = (int)(6 * g.dpi);
+    int x = max(0, (RW() - bw) / 2);
+    int y = (int)(6 * g.dpi);
+    for (int i = 0; i < TOOL_COUNT; i++) {
+        r[i] = { x, y, x + bw, y + bw };
+        y += bw + gap;
+    }
+}
+
 // The green state: the feature a button toggles is on - the split, the
 // sidebar (KillerPDF lights a panel tab only while its sidebar shows it). The
 // info button never lights: KillerPDF's DocInfoRailBtn has no "on" trigger,
@@ -4309,13 +5024,18 @@ static void RailRects(RECT r[RB_COUNT], int h) {   // 24px cells, 6px gaps, 6px 
 // not (KillerPDF's split acts on the WINDOW - pane B simply opens on its start
 // screen).
 static bool RailOn(int id) {
+    if (id >= RT_SELECT) {                              // a tool is lit while ITS pane is the
+        if (!DVF().n) return false;                     // focused one and holds the tool -
+        return DVF().tool == RailTool(id);              // KillerPDF's toolbar mirrors the
+    }                                                   // active viewer's CurrentTool
     return id == RB_SPLIT ? g.split
          : id == RB_PAGES ? (g.sideOn && DVF().n)
          : false;
 }
 static bool RailEnabled(int id) {
-    return id == RB_SPLIT ? true : (DVF().n > 0);
-}
+    if (id >= RT_SELECT) return true;                   // KillerPDF's tool buttons are always
+    return id == RB_SPLIT ? true : (DVF().n > 0);       // live; a no-document click re-lands
+}                                                       // on Select inside SetTool
 
 // KillerPDF centers the rail glyphs with GlyphInk.Center (Controls/GlyphInk.cs):
 // icon fonts draw glyphs off-center inside their advance box, so the text is
@@ -4351,7 +5071,7 @@ static void InkCenterRect(HDC dc, const RECT& cell, const wchar_t* glyph, RECT& 
 // shadow - black, ShadowDepth 2, Direction 270 (straight down), 0.9 in the
 // dark theme - which GDI speaks as the app's one dark copy under the light
 // pass, the same treatment the toolbar's E721 and the caption glyphs get.
-static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c) {
+static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c, bool shadow = true) {
     struct Spec { const wchar_t* closed; const wchar_t* open; HFONT* font; };
     static HFONT f14 = nullptr, f15 = nullptr;
     static const Spec specs[RB_COUNT] = {
@@ -4359,15 +5079,33 @@ static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c) {
         { L"\uE8A9", L"\uE8A9", &f15 },   // Pages (RailPanelBtn), FontSize 15
         { L"\uE946", L"\uE946", &f15 },   // Document Info, FontSize 15
     };
-    const Spec& sp = specs[id];
-    const wchar_t* glyph = (id == RB_SPLIT && g.split) ? sp.open : sp.closed;
+    // the tools: the toolbar's own glyphs at the ToolbarButton's FontSize 14
+    static const wchar_t* tools[TOOL_COUNT] = {
+        L"\uE8B0",   // Select  (ToolSelectBtn)
+        L"\uE8D2",   // Text    (ToolTextBtn)
+        L"\uE7E6",   // Highlight (ToolHighlightBtn)
+        L"\uE738",   // Line    (ToolUnderlineBtn - the old Underline button IS the Line tool)
+        L"\uE739",   // Shapes  (ToolShapeBtn)
+        L"\uED63",   // Draw    (ToolDrawBtn)
+    };
+    int tool = RailTool(id);
+    const wchar_t* glyph;
+    int px;
+    if (tool >= 0) { glyph = tools[tool]; px = 14; }
+    else {
+        const Spec& sp = specs[id];
+        glyph = (id == RB_SPLIT && g.split) ? sp.open : sp.closed;
+        px = id == RB_SPLIT ? 14 : 15;
+    }
     SetBkMode(dc, TRANSPARENT);
-    SelectObject(dc, CaptionFont(*sp.font, id == RB_SPLIT ? 14 : 15, false, L"Segoe MDL2 Assets"));
+    SelectObject(dc, CaptionFont(px == 14 ? f14 : f15, px, false, L"Segoe MDL2 Assets"));
     RECT in; InkCenterRect(dc, rc, glyph, in);   // GlyphInk.Center's shift, both passes
-    RECT sh = in;                           // the shadow pass: depth 2, straight down
-    OffsetRect(&sh, 0, (int)std::lround(2 * g.dpi));
-    SetTextColor(dc, RGB(16, 16, 16));
-    DrawTextW(dc, glyph, -1, &sh, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (shadow) {                           // the shadow pass: depth 2, straight down -
+        RECT sh = in;                       // the selected tool drops it (ToolbarButton's
+        OffsetRect(&sh, 0, (int)std::lround(2 * g.dpi));   // Tag=selected trigger clears
+        SetTextColor(dc, RGB(16, 16, 16));                 // the ContentPresenter effect)
+        DrawTextW(dc, glyph, -1, &sh, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
     SetTextColor(dc, c);
     DrawTextW(dc, glyph, -1, &in, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
@@ -4382,6 +5120,43 @@ static void RailDraw(HDC dc, int w, int h) {
                                             // line there, the same one every other boundary
                                             // shows, and the page shadow paints over the field
                                             // exactly like it does on the sidebar and footer.
+    RECT ts[TOOL_COUNT]; ToolRects(ts, h);
+    for (int t = 0; t < TOOL_COUNT; t++) {
+        int id = RailId(t);
+        bool en = RailEnabled(id), on = en && RailOn(id), hot = en && g.railHot == id;
+        if (on) {
+            // the active tool wears KillerPDF's ToolbarButton selected state:
+            // the SelectionBg gradient face and the white glyph, the icon
+            // shadow dropped (the Tag=selected trigger clears the effect)
+            Gdiplus::Graphics gs(dc);
+            Gdiplus::LinearGradientBrush gb(Gdiplus::Rect(ts[t].left, ts[t].top - 1, ts[t].right - ts[t].left, ts[t].bottom - ts[t].top + 2),
+                                            Gdiplus::Color(255, 0x38, 0x75, 0x52),
+                                            Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
+            Gdiplus::GraphicsPath p;
+            int rad = (int)(4 * g.dpi);
+            p.AddArc((REAL)ts[t].left, (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
+            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
+            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
+            p.AddArc((REAL)ts[t].left, (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
+            p.CloseFigure();
+            gs.FillPath(&gb, &p);
+            RailIcon(dc, id, ts[t], RGB(0xff, 0xff, 0xff), false);   // white, no shadow pass
+            continue;
+        }
+        if (hot) {                          // ToolbarButton's IsMouseOver trigger: the
+            Gdiplus::Graphics gs(dc);       // RowHoverBrush #404040 rounded face under
+            Gdiplus::GraphicsPath p;        // the unlit glyph
+            int rad = (int)(4 * g.dpi);
+            p.AddArc((REAL)ts[t].left, (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
+            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
+            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
+            p.AddArc((REAL)ts[t].left, (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
+            p.CloseFigure();
+            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            gs.FillPath(&hb, &p);
+        }
+        RailIcon(dc, id, ts[t], RGB(0xe0, 0xe0, 0xe0));
+    }
     RECT bs[RB_COUNT]; RailRects(bs, h);
     for (int i = 0; i < RB_COUNT; i++) {
         bool en = RailEnabled(i), on = en && RailOn(i), hot = en && g.railHot == i;
@@ -4399,11 +5174,39 @@ static void RailDraw(HDC dc, int w, int h) {
 
 static void RailRepaint() { if (g.rail) InvalidateRect(g.rail, nullptr, FALSE); }
 
+// One hover/click map for both stacks: the tool group first, the reference
+// trio second (their zones never overlap - one hangs from the top, one from
+// the bottom). Returns the coded rail id, -1 for nothing.
+static int RailHitAt(POINT p, int hh) {
+    RECT ts[TOOL_COUNT]; ToolRects(ts, hh);
+    for (int t = 0; t < TOOL_COUNT; t++) if (PtInRect(&ts[t], p)) return RailId(t);
+    RECT bs[RB_COUNT]; RailRects(bs, hh);
+    for (int i = 0; i < RB_COUNT; i++) if (PtInRect(&bs[i], p)) return i;
+    return -1;
+}
+
 static void RailActivate(int id) {
-    if (id == RB_SPLIT) ToggleSplit();
-    else if (id == RB_PAGES) ToggleSide();
+    if (id >= RT_SELECT) { SetTool(RailTool(id), FocusB()); return; }   // KillerPDF's ToolX_Click
+    if (id == RB_SPLIT) ToggleSplit();      // = SetTool on the ACTIVE viewer; docsy's rail
+    else if (id == RB_PAGES) ToggleSide();  // serves the focused pane
     else InfoOpen();                        // KillerPDF's DocInfo_Click: the button stays
 }                                           // enabled; a no-document click is told to the reader
+
+// the SetTool behind the tool stack: the tool lands on ONE pane's document
+// state (KillerPDF keeps the editing state per viewer instance), a no-document
+// pane re-lands on Select, a live text box commits first, and the view's
+// cursor + brush ring follow on the repaint.
+static void SetTool(int t, bool b) {
+    if (t < 0 || t >= TOOL_COUNT) return;
+    DocState& D = DV(b);
+    if (!D.n) t = TOOL_SELECT;              // KillerPDF's SetTool: no document, no editing
+    CommitTextEdit();                       // an open box lands with the tool switch
+    if (D.tool == t) { RailRepaint(); return; }   // re-click: the tool stays (its bar-tuck
+    D.tool = t;                             // toggle rides the settings bar we don't carry)
+    if (g.annSelPage >= 0) { g.annSelPage = -1; g.annSelIdx = -1; }   // the ring belongs to Select
+    RailRepaint();
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);   // cursors and ring states ride the
+}                                                         // tool; the switch is a rare click
 
 static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
@@ -4438,9 +5241,7 @@ static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         }
         RECT rr; GetClientRect(h, &rr);
-        RECT bs[RB_COUNT]; RailRects(bs, rr.bottom);
-        int hot = -1;
-        for (int i = 0; i < RB_COUNT; i++) if (PtInRect(&bs[i], p)) hot = i;
+        int hot = RailHitAt(p, rr.bottom);
         if (hot != g.railHot) {                 // repaint on a hover flip, never per move
             g.railHot = hot;
             if (hot >= 0) TrackLeave(h);
@@ -4468,14 +5269,11 @@ static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         }
         RECT rr; GetClientRect(h, &rr);
-        RECT bs[RB_COUNT]; RailRects(bs, rr.bottom);
-        for (int i = 0; i < RB_COUNT; i++)
-            if (RailEnabled(i) && PtInRect(&bs[i], p)) {
-                g.railPressed = true;
-                SetCapture(h);
-                InvalidateRect(h, nullptr, FALSE);
-                break;
-            }
+        if (RailEnabled(RailHitAt(p, rr.bottom)) && RailHitAt(p, rr.bottom) >= 0) {
+            g.railPressed = true;
+            SetCapture(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
     }
     case WM_LBUTTONUP: {
@@ -4490,9 +5288,7 @@ static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (GetCapture() == h) ReleaseCapture();
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT rr; GetClientRect(h, &rr);
-        RECT bs[RB_COUNT]; RailRects(bs, rr.bottom);
-        int hit = -1;
-        for (int i = 0; i < RB_COUNT; i++) if (PtInRect(&bs[i], p)) hit = i;
+        int hit = RailHitAt(p, rr.bottom);
         if (hit >= 0 && g.railHot == hit) RailActivate(hit);   // press + release on one button
         InvalidateRect(h, nullptr, FALSE);
         return 0;
@@ -4507,11 +5303,10 @@ static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEWE)); return TRUE;   // the sidebar's edge
             }
             RECT rr; GetClientRect(h, &rr);
-            RECT bs[RB_COUNT]; RailRects(bs, rr.bottom);
-            for (int i = 0; i < RB_COUNT; i++)
-                if (RailEnabled(i) && PtInRect(&bs[i], p)) {
-                    SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE;
-                }
+            int hit = RailHitAt(p, rr.bottom);
+            if (hit >= 0 && RailEnabled(hit)) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE;   // ToolbarButton's Cursor=Hand
+            }
         }
         break;
     }
@@ -5388,6 +6183,8 @@ static void LayoutMain() {
         }
     }
     if (g_fedit && fd.open) FindPlace();        // the edit tracks the focused card's top-right corner
+    if (g.tedit) CommitTextEdit();              // the text box rides nothing: a relayout lands it,
+                                                // its pixels belong to a page position, not a screen one
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
     if (g.split) {   // a resize re-normalizes the split: the divider keeps KillerPDF's
@@ -5670,13 +6467,34 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         case 'F': if (ctrl) FindToggle(); else ApplyFit(false, FocusB()); break;   // Ctrl+F find, plain F fit
         case 'C': if (ctrl && !DVF().selText.empty()) CopyClipboard(DVF().selText); break;
         case 'A': if (ctrl) SelAll(DVF()); break;
+        case VK_DELETE:
+            // KillerPDF's DeleteSelected: the Select tool's chosen annotation
+            // leaves its pane's document, topmost index last-in first-out safe
+            if (g.annSelPage >= 0 && g.annSelIdx >= 0) {
+                DocState& D2 = DV(g.annSelB);
+                auto it = D2.annos.find(g.annSelPage);
+                if (it != D2.annos.end() && g.annSelIdx < (int)it->second.size()) {
+                    it->second.erase(it->second.begin() + g.annSelIdx);
+                    if (it->second.empty()) D2.annos.erase(it);
+                }
+                g.annSelPage = -1; g.annSelIdx = -1;
+                InvalidateRect(g.view, nullptr, FALSE);
+            }
+            break;
         case VK_F3:                                // Find next / previous; closed, F3 opens
             if (!fd.open) FindOpen();
             else if (!fd.hits.empty()) FindStep(shift ? -1 : 1);
             break;
         case VK_ESCAPE:
-            if (fd.open) FindClose();              // the bar leaves first
+            if (g.tedit) CommitTextEdit(false);    // the open text box discards first
+            else if (fd.open) FindClose();         // the bar leaves next
             else if (g.full) ToggleFull(h);        // full screen leaves next
+            else if (g.annSelPage >= 0) {          // then the annotation selection
+                g.annSelPage = -1; g.annSelIdx = -1;
+                InvalidateRect(g.view, nullptr, FALSE);
+            }
+            // and KillerPDF's Escape: an editing tool goes back to Select
+            else if (DVF().n && DVF().tool != TOOL_SELECT) SetTool(TOOL_SELECT, FocusB());
             else SelClear(DVF());                  // then the focused pane's selection
             break;
         case VK_F5: SetViewMode(0); break;       // KillerPDF's mode keys
@@ -5747,6 +6565,9 @@ static int Shot(const wchar_t* out, int w, int h) {
                     PaintPaneBars(m2, g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
                 }
             }
+            RECT band{ g.splitX + 1, 0, min(vw, g.splitX + SplitHalf()), ch };
+            FillRect(m2, &band, GrainBrush(1));   // the gutter's own 3px, exactly like the
+                                                  // live composite - never a stale strip
             RECT dl{ g.splitX, 2, g.splitX + 1, ch - 2 };
             FillRect(m2, &dl, SplitLineBrush(g.lineHot || g.splitDrag));
         } else {
@@ -5984,6 +6805,46 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 g_idlg.bytes = GetFileAttributesExW(DVF().path.c_str(), GetFileExInfoStandard, &fa)
                              ? (long long)(((long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) : 0;
                 g_idlgShots = true;
+            }
+        // CI preview seed 6: fileB=<path> loads pane B so the split's scrollbar
+        // math can be verified against a REAL second document - pane B's own
+        // pair of overlay bars rides its own card edges, pane A's hugs the
+        // divider, and neither thumb may wash out over a page or a stale strip
+        for (int a = 3; a < argc; a++)
+            if (!wcsncmp(argv[a], L"fileB=", 6)) Open(g.dB, argv[a] + 6);
+        // CI preview seed 7: tool=N switches the focused pane's tool through the
+        // real SetTool, so the rail's selected-state face and the tool's cursor
+        // state are what the shot shows
+        for (int a = 3; a < argc; a++)
+            if (!wcsncmp(argv[a], L"tool=", 5)) SetTool(_wtoi(argv[a] + 5), FocusB());
+        // CI preview seed 8: annot=demo seeds one committed annotation of each
+        // primitive KillerPDF's tools produce - a yellow per-line highlight, a
+        // red ink stroke (Draw/Line's commit) and a filled red rectangle
+        // (Shapes' commit) - over page 1's own DIP space, so the render path
+        // and its overlay order are pixel-verifiable
+        for (int a = 3; a < argc; a++)
+            if (!wcscmp(argv[a], L"annot=demo")) {
+                DocState& D = DVF();
+                if (D.n) {
+                    TtFor(D, 0);   // the OCR layer warms the same way a live drag would
+                    Annot hl; hl.type = AT_HIGHLIGHT;
+                    hl.color = RGB(0xff, 0xff, 0x00); hl.alpha = 80;
+                    hl.lines.push_back(FRect{ 60, 60, 200, 16 });
+                    hl.x = 60; hl.y = 60; hl.w = 200; hl.h = 16;
+                    D.annos[0].push_back(hl);
+                    Annot ink; ink.type = AT_INK; ink.width = 3;
+                    ink.color = RGB(0xff, 0x00, 0x00);
+                    ink.ix = { 60, 120, 180, 240 }; ink.iy = { 110, 90, 130, 100 };
+                    D.annos[0].push_back(ink);
+                    Annot sh; sh.type = AT_HIGHLIGHT; sh.color = RGB(0xff, 0x00, 0x00); sh.alpha = 80;
+                    sh.lines.push_back(FRect{ 60, 150, 180, 60 });
+                    sh.x = 60; sh.y = 150; sh.w = 180; sh.h = 60;
+                    D.annos[0].push_back(sh);
+                    Annot tx; tx.type = AT_TEXT; tx.fsize = 24;
+                    tx.x = 60; tx.y = 230; tx.w = 165; tx.h = 30;
+                    tx.color = RGB(0, 0, 0); tx.text = L"Docsy";
+                    D.annos[0].push_back(tx);
+                }
             }
         GetClientRect(g.main, &c);             // the seeds may have resized (split=on grows
         for (int k = 0; k <= DVF().n; k++) if (!SidePump()) break;   // the window like the real
