@@ -3438,7 +3438,7 @@ static void SetTool(int t, bool b) {
 // paragraph. Redact carries the mark count plus Clear and Redact.
 
 enum { AB_OUT = -2, AB_NONE = -1, AB_GRIP = 0,
-       AB_SWC_DRAW = 100, AB_RW_DRAW = 90,          // 100..108 swatches, 90 rainbow
+       AB_RW_DRAW = 109, AB_SWC_DRAW = 100,        // 100..108 swatches, 109 rainbow
        AB_SWC_TEXT = 200, AB_RW_TEXT = 290,         // 200..208, 290 rainbow
        AB_SWC_FILL = 300, AB_RW_FILL = 390, AB_FILL_NONE = 399,
        AB_SIZE = 10, AB_OPACITY = 11, AB_LEVEL = 12, AB_ERASE = 13, AB_HLERASE = 14,
@@ -3448,7 +3448,7 @@ enum { AB_OUT = -2, AB_NONE = -1, AB_GRIP = 0,
        AB_TOACITY = 29, AB_FOACITY = 30, AB_PARA = 31, AB_TSIZE = 32,
        AB_R_CLEAR = 40, AB_R_APPLY = 41 };
 
-struct AbCell { int id; RECT r; };
+struct AbCell { int id; RECT r; const wchar_t* lab = nullptr; };   // lab: a -1 label cell's text
 static std::vector<AbCell> g_ab;
 static int g_abW = 0, g_abH = 0;
 static int g_abKey = -1, g_abKeyW = -1;
@@ -3498,7 +3498,12 @@ static void AbLayout() {
         g_ab.push_back({ id, { x, y + (rowH - (int)(2 * g.dpi) - h) / 2, x + w, y + (rowH - (int)(2 * g.dpi) - h) / 2 + h } });
         x += w;
     };
-    auto label = [&](const wchar_t* s) { int w = AbTextW(dc, s) + (int)(6 * g.dpi); put(-1, w, (int)(16 * g.dpi)); };
+    auto label = [&](const wchar_t* s) {
+        int w = AbTextW(dc, s) + (int)(6 * g.dpi);
+        g_ab.push_back({ -1, { x, y + (rowH - (int)(2 * g.dpi) - (int)(16 * g.dpi)) / 2,
+                               x + w, y + (rowH - (int)(2 * g.dpi) + (int)(16 * g.dpi)) / 2 }, s });
+        x += w;
+    };
     auto swatchRow = [&](int base) {
         int w = 10 * (int)(20 * g.dpi);
         need((int)(42 * g.dpi) + w);
@@ -3556,7 +3561,8 @@ static void AbLayout() {
         std::wstring st = marks ? (L"Marked areas: " + std::to_wstring(marks) + L", on " + std::to_wstring(pgs) + L" page(s)")
                                 : L"Drag over the page to mark areas";
         int w = AbTextW(dc, st.c_str()) + (int)(6 * g.dpi);
-        put(-1, w, (int)(16 * g.dpi));
+        g_ab.push_back({ -1, { x, y + 1, x + w, y + 1 + (int)(16 * g.dpi) }, nullptr });   // painted by the redact branch below
+        x += w;
         int w1 = AbTextW(dc, L"Clear") + (int)(20 * g.dpi);
         put(AB_R_CLEAR, w1, (int)(22 * g.dpi));
         int w2 = AbTextW(dc, L"Redact") + (int)(20 * g.dpi);
@@ -3806,7 +3812,15 @@ static void AnnBarDraw(HDC dc, int ox, int oy) {
         Gdiplus::Graphics gs(dc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         int id = c.id;
-        if (id == -1) continue;
+        if (id == -1) {                          // the group's label: KillerPDF's DimLabel
+            if (c.lab) {
+                SelectObject(dc, AbFont11());
+                SetBkMode(dc, TRANSPARENT);
+                SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+                DrawTextW(dc, c.lab, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+            continue;
+        }
         if ((id >= AB_SWC_DRAW && id < AB_RW_DRAW) || (id >= AB_SWC_TEXT && id < AB_RW_TEXT) ||
             (id >= AB_SWC_FILL && id < AB_RW_FILL)) {
             COLORREF col = AbCellColor(id);
