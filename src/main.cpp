@@ -3511,29 +3511,32 @@ static void AbLayout() {
         for (int i = 0; i < 9; i++) put(base + i, (int)(20 * g.dpi), (int)(18 * g.dpi));
         put(base == AB_SWC_DRAW ? AB_RW_DRAW : base == AB_SWC_TEXT ? AB_RW_TEXT : AB_RW_FILL,
             (int)(20 * g.dpi), (int)(18 * g.dpi));
+        x += (int)(16 * g.dpi);              // the groups' Margin (0,2,16,2)
     };
     auto slider = [&](int id, const wchar_t* lab, int labW) {
         int w = (int)(90 * g.dpi) + (int)(4 * g.dpi) + labW;
         need(w + (int)(40 * g.dpi));
         label(lab);
         put(id, (int)(90 * g.dpi) + (int)(4 * g.dpi) + labW, (int)(20 * g.dpi));
+        x += (int)(16 * g.dpi);
     };
     auto check = [&](int id, const wchar_t* lab) {
         int w = (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, lab) + (int)(14 * g.dpi);
         need(w);
         g_ab.push_back({ id, { x, y + 1, x + w, y + 1 + (int)(15 * g.dpi) + (int)(6 * g.dpi) } });
-        x += w;
+        x += w + (int)(16 * g.dpi);
     };
     wchar_t tmp[32];
     if (tool == TOOL_TEXT) {
         {   int w = AbTextW(dc, L"Font:") + (int)(6 * g.dpi) + (int)(132 * g.dpi);
-            need(w); label(L"Font:"); put(AB_FONT, (int)(132 * g.dpi), (int)(22 * g.dpi)); }
+            need(w); label(L"Font:"); put(AB_FONT, (int)(132 * g.dpi), (int)(22 * g.dpi)); x += (int)(10 * g.dpi); }
         const wchar_t* styles[4] = { L"B", L"I", L"S", L"U" };
         int sids[4] = { AB_BOLD, AB_ITALIC, AB_STRIKE, AB_UNDER };
         for (int i = 0; i < 4; i++) {
             int w = AbTextW(dc, styles[i]) + (int)(8 * g.dpi);
             need(w); put(sids[i], max((int)(22 * g.dpi), w), (int)(20 * g.dpi));
         }
+        x += (int)(8 * g.dpi);
         swatchRow(AB_SWC_TEXT);
         {   int w = (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, L"Fill:") + (int)(6 * g.dpi) + 11 * (int)(20 * g.dpi);
             need(w);
