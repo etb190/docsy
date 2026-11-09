@@ -438,6 +438,7 @@ static int CardW(bool b);                         // a pane's card width: its co
                                                   // inset on the edge that faces away (the window
                                                   // edge for B, the divider for A - the unsplit
                                                   // card keeps its classic right-edge inset)
+static int PaneW(bool b);                         // a pane's full pass width (the bar's wrap cap)
 
 // ---- split-view pane helpers ----
 // Two documents side by side (KillerPDF's split pane): pane A is the classic
@@ -498,6 +499,13 @@ static bool InfoIsOpen();
 static void SetStatusHold(const std::wstring& t, unsigned ms = 2500);   // the footer's held line
 static void SetTool(int t, bool b);     // the toolbar's tool buttons (KillerPDF's SetTool)
 static void CommitTextEdit(bool commit = true);   // the Text tool's box (defined with the tools)
+static void NewBlank();                 // the New button: a blank document into the focused pane
+static void CloseDoc();                 // the Close button: the focused pane's document leaves
+static void SaveDoc(bool saveAs);       // the Save button + the chevron's Save As
+static void RecentsPopup();             // the Open chevron's recent-files menu
+static void SaveMenuPopup();            // the Save chevron's Save / Save As menu
+static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err);
+static void RememberRecent(const std::wstring& p);   // the Open chevron's MRU (registry)
 // ---- edit tools, the bar and its popups (defined with their sections) ----
 static void UndoPush(bool b);           // snapshot the pane's annotations + marks before a change
 static void UndoOp();                   // toolbar Undo / Ctrl+Z
@@ -514,6 +522,7 @@ static RECT AnnBarRect();               // the bar's on-screen rect in view coor
 static void PolyCancel(HWND h);         // abandon the polygon session
 static void PolyCommit(HWND h);         // close the polygon (repeat first point)
 static void FieldEditOpen(bool b, int pg, int idx);   // the Select tool types into a field
+static void ListPopOpen(HWND owner, POINT p, std::vector<std::wstring> items, int who, int selRow);
 // the footer's shared fills (defined with the status bar, used by the bars)
 static HBRUSH PopBrush();
 static HBRUSH PopHoverBrush();
@@ -877,29 +886,37 @@ static void EnsureInfoBack(HDC ref, int w, int h) {
 }
 
 // The row's buttons, laid out exactly like the reference toolbar the user
-// showed: a LEFT cluster (Flatten, Print, Undo, Redo - ToolbarLayout's default
-// Left list ends ...flatten, print, undo, redo) and the RIGHT cluster (the six
-// tools, Transform, Redact, Forms (F), Clear All, then the search unit).
+// showed: a LEFT cluster (New, Close, Open+chevron, Save+chevron, Flatten,
+// Print, Undo, Redo - ToolbarLayout's default Left list is new, close, open,
+// save, ... flatten, print, undo, redo) and the RIGHT cluster (the six tools,
+// Transform, Redact, Forms (F), Clear All, then the search unit).
 // Labels are the reference's own strings (Str_Lbl_*); glyphs are the buttons'
-// own MDL2 codepoints from MainWindow.xaml - Transform and Forms (F) draw
-// composed icons (a frame + a glyph / a frame + "T"), like their XAML.
-enum { TB_FLATTEN, TB_PRINT, TB_UNDO, TB_REDO,              // the left cluster
+// own MDL2 codepoints from MainWindow.xaml - Open and Save are split buttons
+// (main half + \uE70D chevron, the OpenRecent / SaveMenu dropdowns), Transform
+// and Forms (F) draw composed icons (a frame + four move arrows / a frame +
+// "T"), like their XAML and DrawToolbarGlyph.
+enum { TB_NEW, TB_CLOSE, TB_OPEN, TB_OPENM, TB_SAVE, TB_SAVEM,   // the file cluster
+       TB_FLATTEN, TB_PRINT, TB_UNDO, TB_REDO,
        TB_SELECT, TB_TEXT, TB_HIGHLIGHT, TB_LINE, TB_SHAPE, TB_DRAW,
        TB_TRANSFORM, TB_REDACT, TB_FORMS, TB_CLEAR, TB_FIND, TB_COUNT };
 static const wchar_t* const TbLabel[TB_COUNT] = {
+    L"New", L"Close", L"Open", L"", L"Save", L"",
     L"Flatten", L"Print", L"Undo", L"Redo",
     L"Select", L"Text", L"Highlight", L"Line", L"Shapes", L"Draw",
     L"Transform", L"Redact", L"Forms (F)", L"Clear All", L"Find Text"
 };
 static const wchar_t* const TbGlyph[TB_COUNT] = {
+    L"\uE7C3", L"\uE711", L"\uE8DA", L"\uE70D", L"\uE74E", L"\uE70D",
     L"\uE8B9", L"\uE749", L"\uE7A7", L"\uE7A6",
     L"\uE8B0", L"\uE8D2", L"\uE7E6", L"\uE738", L"\uE739", L"\uED63",
     L"", L"\uED1A", L"", L"\uED62", L"\uE721"
 };   // Transform and Forms (F) carry composed icons, drawn in BarDraw
 
-// ToolbarAvailability: Flatten/Print/tools/Transform/Redact/Forms/Search arm
-// with a document; Undo/Redo follow their stacks; Clear All arms when there is
-// anything to clear. Narrow windows shed RIGHT-cluster middle buttons first
+// ToolbarAvailability: New and Open arm always (KillerPDF's XAML leaves them
+// enabled with no document), Close/Save/Flatten/Print/tools/Transform/Redact/
+// Forms/Search arm with a document; Undo/Redo follow their stacks; Clear All
+// arms when there is anything to clear. The chevrons follow their split
+// buttons. Narrow windows shed RIGHT-cluster middle buttons first
 // (ReflowToolbar's shed order, adapted) - Select and Find Text always stay.
 static bool TbShed[TB_COUNT] = {};
 static int TbToolOf(int i) {
@@ -910,6 +927,7 @@ static int TbToolOf(int i) {
 }
 static bool TbEnabled(int i) {
     bool doc = DVF().n != 0;
+    if (i == TB_NEW || i == TB_OPEN || i == TB_OPENM) return true;
     if (i == TB_UNDO) return doc && !g.undo.empty();
     if (i == TB_REDO) return doc && !g.redo.empty();
     if (i == TB_CLEAR) {
@@ -922,7 +940,9 @@ static bool TbEnabled(int i) {
 
 // A button's auto width in Under mode: the wider of the glyph's 24px MDL2 line
 // box (FontSize 20) and the caption, plus Padding 6,4's 12 horizontal pixels.
+// The split chevrons carry no caption: their box is the XAML's Width 13.
 static int TbBtnW(HDC dc, int i) {
+    if (i == TB_OPENM || i == TB_SAVEM) return (int)(13 * g.dpi);
     RECT rc{ 0, 0, 0, 0 };
     HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
     DrawTextW(dc, TbLabel[i], -1, &rc, DT_CALCRECT | DT_SINGLELINE);
@@ -935,7 +955,8 @@ static int TbBtnW(HDC dc, int i) {
 // (a StackPanel has no spacing; each button's own padding makes the gap).
 // The LEFT cluster anchors to the left edge, the RIGHT cluster to the right;
 // when the window is too narrow for both, right-cluster middle buttons shed
-// (ReflowToolbar) until the two fit.
+// (ReflowToolbar) until the two fit. A split chevron overlaps its main half's
+// right edge by 6px (Margin -6), exactly the XAML's joined look.
 static void TbRects(int w, RECT out[TB_COUNT]) {
     HDC dc = GetDC(g.bar);
     int bh = TbBtnH();
@@ -948,13 +969,15 @@ static void TbRects(int w, RECT out[TB_COUNT]) {
         x -= bw;
         out[i] = { x, y0, x + bw, y0 + bh };
     }
-    // left cluster, left to right; shed until no overlap (Flatten/Print/Undo/
-    // Redo stay - they are the user's own left cluster)
+    // left cluster, left to right; shed until no overlap (the file basics stay
+    // - they are KillerPDF's own left cluster)
     static const int shedOrder[] = { TB_TRANSFORM, TB_REDACT, TB_FORMS, TB_CLEAR,
                                      TB_DRAW, TB_SHAPE, TB_LINE, TB_HIGHLIGHT, TB_TEXT };
     int lx = (int)(4 * g.dpi);
-    for (int i = TB_FLATTEN; i < TB_SELECT; i++) {
+    for (int i = TB_NEW; i < TB_SELECT; i++) {
         int bw = TbBtnW(dc, i);
+        if ((i == TB_OPENM || i == TB_SAVEM) && out[i - 1].right > 0)
+            lx -= (int)(6 * g.dpi);        // the chevron slides 6px over the main half
         out[i] = { lx, y0, lx + bw, y0 + bh };
         lx += bw;
     }
@@ -1033,9 +1056,13 @@ static void BarDraw(HDC dc, int w, int h) {
         // the active tool (SelectionFg), TextBrush otherwise, the 0.4 dim over
         // #1c1c1c with no document - and the icon shadow's dark copy under the
         // light pass except on the active tool (Tag="selected" clears the
-        // ContentPresenter effect).
+        // ContentPresenter effect). The chevrons draw their 10px glyph only
+        // (FontSize 10, Width 13, no caption); Save's main half rides the
+        // ToolbarSplitMainAccent's AccentLogo #1ea54c.
+        bool chev = i == TB_OPENM || i == TB_SAVEM;
+        bool accent = i == TB_SAVE;
         int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);   // the MDL2 line box at FontSize 20:
-        int colH = gh + gap + capH;                            // a 20px cell would clip the glyph
+        int colH = gh + (chev ? 0 : gap + capH);               // a 20px cell would clip the glyph
         int avail = (int)(b.bottom - b.top) - colH;            // MSVC: RECT members are LONG - cast
         int y0 = b.top + max(0, avail) / 2;                    // before the std::max deduction
         RECT gr{ b.left, y0, b.right, y0 + gh };
@@ -1045,41 +1072,78 @@ static void BarDraw(HDC dc, int w, int h) {
         // disabled buttons bake Opacity 0.4 over #1c1c1c -> #6a6a6a-class text
         bool danger = i == TB_CLEAR;
         COLORREF fg = sel ? RGB(0xff, 0xff, 0xff)
-                   : en ? (danger ? RGB(0xef, 0x44, 0x44) : RGB(0xe0, 0xe0, 0xe0))
-                        : (danger ? RGB(0x77, 0x33, 0x33) : RGB(0x6a, 0x6a, 0x6a));
-        if (!TbGlyph[i][0]) {                // the composed icons: Transform = a 14x14 frame
-                                             // plus the move glyph, Forms (F) = a frame + "T"
+                   : en ? (danger ? RGB(0xef, 0x44, 0x44)
+                                  : accent ? RGB(0x1e, 0xa5, 0x4c) : RGB(0xe0, 0xe0, 0xe0))
+                        : (danger ? RGB(0x77, 0x33, 0x33)
+                                  : accent ? RGB(0x18, 0x63, 0x2e) : RGB(0x6a, 0x6a, 0x6a));
+        if (chev) {                          // the split chevron: FontSize 10 in its 13px cell
+            if (!sel) {
+                SelectObject(dc, CaptionFont(g_tbglyph, 10, false, L"Segoe MDL2 Assets"));
+                SetTextColor(dc, RGB(16, 16, 16));
+                RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
+                DrawTextW(dc, TbGlyph[i], -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+            SelectObject(dc, CaptionFont(g_tbglyph, 10, false, L"Segoe MDL2 Assets"));
+            SetTextColor(dc, fg);
+            DrawTextW(dc, TbGlyph[i], -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            continue;
+        }
+        if (!TbGlyph[i][0]) {                // the composed icons. Transform = DrawToolbarGlyph's
+                                             // TransformBoxMove: a 14x14 1px frame with the four
+                                             // move arrows inside (70% of the box, square caps,
+                                             // miter joins); Forms (F) = a frame + "T"
             int fw2 = (int)(14 * g.dpi), fh2 = (int)(14 * g.dpi);
             if (i == TB_FORMS) { fw2 = (int)(18 * g.dpi); fh2 = (int)(16 * g.dpi); }
             int gx = b.left + (b.right - b.left - fw2) / 2;
             int gy = gr.top + (gh - fh2) / 2;
-            if (!sel) {
-                HPEN sh = CreatePen(PS_SOLID, 1, RGB(16, 16, 16));
-                HGDIOBJ og = SelectObject(dc, sh);
-                RECT sr{ gx + 1, gy + 1, gx + fw2 + 1, gy + fh2 + 1 };
-                if (i == TB_FORMS) {
-                    MoveToEx(dc, sr.left, sr.top, nullptr);
-                    LineTo(dc, sr.right - 1, sr.top); LineTo(dc, sr.right - 1, sr.bottom - 1);
-                    LineTo(dc, sr.left, sr.bottom - 1); LineTo(dc, sr.left, sr.top);
-                } else Rectangle(dc, sr.left, sr.top, sr.right, sr.bottom);
-                SelectObject(dc, og); DeleteObject(sh);
-            }
-            HPEN fr = CreatePen(PS_SOLID, 1, fg);
-            HGDIOBJ og = SelectObject(dc, fr);
+            auto drawFormsFrame = [&](COLORREF c, int ox, int oy) {
+                HPEN fr = CreatePen(PS_SOLID, 1, c);
+                HGDIOBJ og = SelectObject(dc, fr);
+                MoveToEx(dc, gx + ox, gy + oy, nullptr);
+                LineTo(dc, gx + fw2 - 1 + ox, gy + oy);
+                LineTo(dc, gx + fw2 - 1 + ox, gy + fh2 - 1 + oy);
+                LineTo(dc, gx + ox, gy + fh2 - 1 + oy);
+                LineTo(dc, gx + ox, gy + oy);
+                SelectObject(dc, og); DeleteObject(fr);
+            };
             if (i == TB_FORMS) {
-                MoveToEx(dc, gx, gy, nullptr);
-                LineTo(dc, gx + fw2 - 1, gy); LineTo(dc, gx + fw2 - 1, gy + fh2 - 1);
-                LineTo(dc, gx, gy + fh2 - 1); LineTo(dc, gx, gy);
-            } else Rectangle(dc, gx, gy, gx + fw2, gy + fh2);
-            SelectObject(dc, og); DeleteObject(fr);
-            HFONT gf = i == TB_FORMS
-                ? CaptionFont(g_tbcap, 10, true, L"Segoe UI")
-                : CaptionFont(g_tbglyph, 9, false, L"Segoe MDL2 Assets");
-            HGDIOBJ of2 = SelectObject(dc, gf);
-            RECT tr2{ gx, gy, gx + fw2, gy + fh2 };
-            DrawTextW(dc, i == TB_FORMS ? L"T" : L"\uE7C2", -1, &tr2,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(dc, of2);
+                if (!sel) drawFormsFrame(RGB(16, 16, 16), 1, 1);
+                drawFormsFrame(fg, 0, 0);
+                HFONT gf = CaptionFont(g_tbcap, 10, true, L"Segoe UI");
+                HGDIOBJ of2 = SelectObject(dc, gf);
+                RECT tr2{ gx, gy, gx + fw2, gy + fh2 };
+                SetTextColor(dc, fg);
+                DrawTextW(dc, L"T", -1, &tr2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(dc, of2);
+            } else {
+                // the frame, then the arrows as four stroked lines + four miter
+                // chevrons, scaled from the 16-unit path to 70% of the box
+                auto drawTf = [&](COLORREF c, int ox, int oy) {
+                    Gdiplus::Graphics gs2(dc);
+                    gs2.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+                    HPEN fr = CreatePen(PS_SOLID, 1, c);
+                    HGDIOBJ og = SelectObject(dc, fr);
+                    Rectangle(dc, gx + ox, gy + oy, gx + fw2 + ox, gy + fh2 + oy);
+                    SelectObject(dc, og); DeleteObject(fr);
+                    float u = fw2 * 0.7f / 16.0f;         // the path's unit in pixels
+                    float cx = gx + ox + fw2 / 2.0f, cy = gy + oy + fh2 / 2.0f;
+                    auto P = [&](float ux, float uy) { return Gdiplus::PointF(
+                        cx + (ux - 8.0f) * u, cy + (uy - 8.0f) * u); };
+                    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.0f);
+                    pen.SetStartCap(Gdiplus::LineCapSquare); pen.SetEndCap(Gdiplus::LineCapSquare);
+                    pen.SetLineJoin(Gdiplus::LineJoinMiter);
+                    Gdiplus::PointF seg[4][2] = { { P(8, 2.5f), P(8, 6) }, { P(8, 10), P(8, 13.5f) },
+                                                  { P(2.5f, 8), P(6, 8) }, { P(10, 8), P(13.5f, 8) } };
+                    for (auto& s2 : seg) gs2.DrawLines(&pen, s2, 2);
+                    Gdiplus::PointF hd[4][3] = { { P(6, 4.5f), P(8, 2.5f), P(10, 4.5f) },
+                                                 { P(6, 11.5f), P(8, 13.5f), P(10, 11.5f) },
+                                                 { P(4.5f, 6), P(2.5f, 8), P(4.5f, 10) },
+                                                 { P(11.5f, 6), P(13.5f, 8), P(11.5f, 10) } };
+                    for (auto& h3 : hd) gs2.DrawLines(&pen, h3, 3);
+                };
+                if (!sel) drawTf(RGB(16, 16, 16), 1, 1);
+                drawTf(fg, 0, 0);
+            }
         } else {
         if (!sel) {                                            // the shadow copy
             SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
@@ -1091,6 +1155,7 @@ static void BarDraw(HDC dc, int w, int h) {
         SetTextColor(dc, fg);
         DrawTextW(dc, TbGlyph[i], -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
+        if (TbLabel[i][0]) {
         SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
         if (!sel) {                                            // the caption's shadow copy
             SetTextColor(dc, RGB(16, 16, 16));
@@ -1099,6 +1164,7 @@ static void BarDraw(HDC dc, int w, int h) {
         }
         SetTextColor(dc, fg);
         DrawTextW(dc, TbLabel[i], -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
     }
 }
 
@@ -1164,6 +1230,12 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int hit = BarHit(p, r.right);
             if (hit >= 0 && hit == was && TbEnabled(hit)) {    // click on release inside one
                 switch (hit) {                                 // button, KillerPDF's handlers
+                case TB_NEW: NewBlank(); break;
+                case TB_CLOSE: CloseDoc(); break;
+                case TB_OPEN: OpenDlg(); break;
+                case TB_OPENM: RecentsPopup(); break;
+                case TB_SAVE: SaveDoc(false); break;
+                case TB_SAVEM: SaveMenuPopup(); break;
                 case TB_FLATTEN: FlattenSave(); break;
                 case TB_PRINT: PrintDoc(); break;
                 case TB_UNDO: UndoOp(); break;
@@ -2159,6 +2231,7 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         D.prot.clear(); D.pflip.clear();
         D.tool = TOOL_SELECT;        // the pane's tool re-lands on Select, like KillerPDF's
                                      // open path restores the toolbar
+        RememberRecent(full);        // the Open chevron's MRU rides every open
         g.annSelPage = -1; g.annSelIdx = -1;   // and the Select tool's ring has nothing to hold
         SelClear(D);
         bool mine = fd.pane == (&D == &g.dB);        // the find dies only when ITS document
@@ -2203,6 +2276,268 @@ static void HandleDrop(HDROP d, HWND h) {        // the pane under the drop take
         Open(DV(b), f);
     }
     DragFinish(d);
+}
+
+// ---------------- file cluster (KillerPDF's FileOperations.cs) ----------------
+// New / Close / Open / Save with their split-button chevrons, reduced to
+// docsy's single-document model: a pane IS KillerPDF's tab.
+
+// The Open chevron's MRU: KillerPDF persists App.GetRecentFiles() in its
+// settings store; docsy keeps the same list under HKCU\Software\Docsy\Recents,
+// newest first, capped at 8. Open() remembers every file it opens.
+static void RememberRecent(const std::wstring& p) {
+    wchar_t full[MAX_PATH * 4];
+    if (!GetFullPathNameW(p.c_str(), (DWORD)_countof(full), full, nullptr)) return;
+    HKEY k;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Docsy\\Recents", 0, nullptr,
+                        0, KEY_READ | KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+    // read the old list, drop duplicates of this file, re-write newest-first
+    wchar_t items[8][MAX_PATH * 4] = {}; int n = 0;
+    for (int i = 0; i < 8; i++) {
+        wchar_t name[8]; swprintf(name, 8, L"%d", i);
+        DWORD sz = sizeof(items[0]), type = 0;
+        if (RegQueryValueExW(k, name, nullptr, &type, (BYTE*)items[n], &sz) == ERROR_SUCCESS &&
+            type == REG_SZ && items[n][0]) {
+            if (!_wcsicmp(items[n], full)) continue;   // the reopened file moves to the front
+            if (++n >= 8) break;
+        }
+    }
+    for (int i = min(n, 7); i > 0; i--) wcscpy(items[i], items[i - 1]);   // shift, front slot free
+    wcscpy(items[0], full); n = min(8, n + 1);
+    for (int i = 0; i < n; i++) {
+        wchar_t name[8]; swprintf(name, 8, L"%d", i);
+        RegSetValueExW(k, name, 0, REG_SZ, (BYTE*)items[i], (DWORD)((wcslen(items[i]) + 1) * sizeof(wchar_t)));
+    }
+    for (int i = n; i < 8; i++) {                  // clear the stale tail
+        wchar_t name[8]; swprintf(name, 8, L"%d", i);
+        RegDeleteValueW(k, name);
+    }
+    RegCloseKey(k);
+}
+static std::vector<std::wstring> RecentList() {
+    std::vector<std::wstring> out;
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Docsy\\Recents", 0, KEY_READ, &k) != ERROR_SUCCESS) return out;
+    for (int i = 0; i < 8 && out.size() < 8; i++) {
+        wchar_t name[8]; swprintf(name, 8, L"%d", i);
+        wchar_t v[MAX_PATH * 4] = {}; DWORD sz = sizeof v, type = 0;
+        if (RegQueryValueExW(k, name, nullptr, &type, (BYTE*)v, &sz) == ERROR_SUCCESS &&
+            type == REG_SZ && v[0] && GetFileAttributesW(v) != INVALID_FILE_ATTRIBUTES)
+            out.push_back(v);                      // dead paths leave the menu (KillerPDF warns
+    }                                              // on click; a clean list reads better here)
+    RegCloseKey(k);
+    return out;
+}
+
+// New_Click -> NewDocument: a blank one-page PDF opens temp-backed with the
+// suggested name "Untitled.pdf" - the first Save asks where to keep it, which
+// is SaveDoc's no-real-home -> Save As branch. The writer is the same minimal
+// PDF the Flatten path emits; a blank page is its MediaBox and nothing else.
+static void NewBlank() {
+    static int seq = 0;
+    wchar_t tmp[MAX_PATH * 2];
+    GetTempPathW((DWORD)_countof(tmp), tmp);
+    wchar_t file[MAX_PATH * 2];
+    swprintf(file, MAX_PATH * 2, L"%sUntitled%d.pdf", tmp, ++seq);
+    HANDLE f = CreateFileW(file, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) { SetStatusHold(L"New document failed: the file could not be written"); return; }
+    std::string head = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+    DWORD wr = 0;
+    WriteFile(f, head.data(), (DWORD)head.size(), &wr, nullptr);
+    long long pos = (long long)head.size();
+    auto emit = [&](const std::string& s) { WriteFile(f, s.data(), (DWORD)s.size(), &wr, nullptr); pos += (long long)s.size(); };
+    long long catOff = pos;
+    emit("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    long long pagesOff = pos;
+    emit("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    long long pageOff = pos;
+    emit("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n");
+    long long xref = pos;
+    std::string xr = "xref\n0 4\n0000000000 65535 f \n";
+    auto off10 = [](long long v) { char b[16]; snprintf(b, 16, "%010lld", v); return std::string(b); };
+    xr += off10(catOff) + " 00000 n \n" + off10(pagesOff) + " 00000 n \n" + off10(pageOff) + " 00000 n \n";
+    xr += "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+    emit(xr);
+    CloseHandle(f);
+    if (Open(DVF(), file)) SetStatusHold(L"New blank document");
+}
+
+// CloseFile_Click -> CloseTab: the focused pane's document leaves, its
+// annotations, marks and find results die with it - the same teardown Open()
+// gives a replaced document, landing on KillerPDF's empty state.
+static void CloseDoc() {
+    DocState& D = DVF();
+    if (!D.n) return;
+    if (g.tedit) CommitTextEdit();
+    ClearCache(D);
+    D.doc = nullptr; D.n = 0; D.pw.clear(); D.ph.clear();
+    D.name.clear(); D.path.clear();
+    D.sx = D.sy = 0; D.zoom = 1.0; D.fitMode = 2; D.cur = -1;
+    D.txt.clear(); D.annos.clear(); D.reds.clear(); D.prot.clear(); D.pflip.clear();
+    D.tool = TOOL_SELECT;
+    g.annSelPage = -1; g.annSelIdx = -1;
+    SelClear(D);
+    bool mine = fd.pane == (&D == &g.dB);
+    if (mine && fd.open) {
+        if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
+        if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
+        fd = Find{};
+    }
+    {                                          // the sidebar shows the focused pane: empty now
+        for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
+        sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;
+        sd.cw = 0; sd.ch = 0; sd.docH = 0;
+    }
+    LayoutMain();
+    InvalidateRect(g.main, nullptr, FALSE);
+    if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);
+    RailRepaint();
+    SetStatusHold(L"Document closed");
+}
+
+// The shared write-out: every page renders at ~150dpi with the annotations,
+// fields and applied marks composited - the same paint the screen shows - and
+// lands as JPEG pages in a minimal PDF. FlattenSave and SaveDoc share it.
+static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err) {
+    HANDLE f = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) { err = L"the file could not be written"; return false; }
+    auto pageJpeg = [&](int i, std::vector<BYTE>& out) -> bool {
+        int w = std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400);
+        int h = max(1, (int)std::lround((float)w * D.ph[i] / max(1.f, D.pw[i])));
+        HBITMAP b = GetBmp(D, i, w, h);
+        if (!b) return false;
+        HDC mdc = CreateCompatibleDC(nullptr);
+        HGDIOBJ ob = SelectObject(mdc, b);
+        float k = (float)w / max(1.f, D.pw[i]);
+        PaintAnnots(mdc, D, i, 0, 0, k);   // annotations + fields + applied marks burn in
+        CLSID jpg{}; UINT cnt = 0, bytes = 0;
+        Gdiplus::GetImageEncodersSize(&cnt, &bytes);
+        std::vector<BYTE> buf(bytes);
+        auto* enc = (Gdiplus::ImageCodecInfo*)buf.data();
+        Gdiplus::GetImageEncoders(cnt, bytes, enc);
+        for (UINT e = 0; e < cnt; e++) if (!lstrcmpW(enc[e].MimeType, L"image/jpeg")) jpg = enc[e].Clsid;
+        Gdiplus::Bitmap bm(b, nullptr);
+        IStream* os = nullptr;
+        if (CreateStreamOnHGlobal(nullptr, TRUE, &os) != S_OK) { SelectObject(mdc, ob); DeleteDC(mdc); return false; }
+        bool ok = false;
+        if (bm.Save(os, &jpg, nullptr) == Gdiplus::Ok) {
+            LARGE_INTEGER z1{}; z1.QuadPart = 0;
+            os->Seek(z1, STREAM_SEEK_SET, nullptr);
+            STATSTG st2{};
+            os->Stat(&st2, STATFLAG_NONAME);
+            ULARGE_INTEGER sz = st2.cbSize;
+            out.resize((size_t)sz.QuadPart);
+            ULONG rd = 0;
+            ok = os->Read(out.data(), (ULONG)out.size(), &rd) == S_OK && rd == out.size();
+        }
+        os->Release();
+        SelectObject(mdc, ob); DeleteDC(mdc);
+        return ok && !out.empty();
+    };
+    std::string head = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+    DWORD wr = 0;
+    WriteFile(f, head.data(), (DWORD)head.size(), &wr, nullptr);
+    long long pos = (long long)head.size();
+    auto emit = [&](const std::string& s) { WriteFile(f, s.data(), (DWORD)s.size(), &wr, nullptr); pos += (long long)s.size(); };
+    long long catOff = pos;
+    emit("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    long long pagesOff = pos;
+    std::string kids;
+    for (int i = 0; i < D.n; i++) kids += std::to_string(3 + i * 2) + " 0 R ";
+    emit("2 0 obj\n<< /Type /Pages /Kids [ " + kids + "] /Count " + std::to_string(D.n) + " >>\nendobj\n");
+    std::vector<long long> pageOff(D.n), contOff(D.n), imgOff(D.n);
+    bool failed = false;
+    for (int i = 0; i < D.n && !failed; i++) {
+        std::vector<BYTE> jpg;
+        if (!pageJpeg(i, jpg)) { failed = true; break; }
+        float wpt = D.pw[i] * 2.0f, hpt = D.ph[i] * 2.0f;   // the 2x raster's DIP size, PDF points
+        char hb2[256];
+        pageOff[i] = pos;
+        snprintf(hb2, 256, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents %d 0 R /Resources << /XObject << /Im %d 0 R >> >> >>\nendobj\n",
+                 3 + i * 2, wpt, hpt, 4 + i * 2, 5 + i * 2);
+        emit(hb2);
+        contOff[i] = pos;
+        std::string cs = "q\n" + std::to_string(wpt).substr(0, 8) + " 0 0 " + std::to_string(hpt).substr(0, 8) + " 0 0 cm\n/Im Do\nQ\n";
+        emit(std::to_string(4 + i * 2) + " 0 obj\n<< /Length " + std::to_string(cs.size()) + " >>\nstream\n" + cs + "endstream\nendobj\n");
+        imgOff[i] = pos;
+        std::string ih = std::to_string(5 + i * 2) + " 0 obj\n<< /Type /XObject /Subtype /Image /Width " +
+            std::to_string(std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400)) +
+            " /Height " + std::to_string(max(1, (int)std::lround((float)std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400) * D.ph[i] / max(1.f, D.pw[i])))) +
+            " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + std::to_string(jpg.size()) + " >>\nstream\n";
+        emit(ih);
+        WriteFile(f, jpg.data(), (DWORD)jpg.size(), &wr, nullptr);
+        pos += (long long)jpg.size();
+        emit("\nendstream\nendobj\n");
+    }
+    if (failed) {
+        CloseHandle(f);
+        err = L"a page could not be rendered";
+        return false;
+    }
+    long long xref = pos;
+    std::string xr = "xref\n0 " + std::to_string(3 + D.n * 2) + "\n0000000000 65535 f \n";
+    auto off10 = [](long long v) { char b[16]; snprintf(b, 16, "%010lld", v); return std::string(b); };
+    xr += off10(catOff) + " 00000 n \n" + off10(pagesOff) + " 00000 n \n";
+    for (int i = 0; i < D.n; i++)
+        xr += off10(pageOff[i]) + " 00000 n \n" + off10(contOff[i]) + " 00000 n \n" + off10(imgOff[i]) + " 00000 n \n";
+    xr += "trailer\n<< /Size " + std::to_string(3 + D.n * 2) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+    emit(xr);
+    CloseHandle(f);
+    return true;
+}
+
+// Save_Click: no document -> "Open a file first"; a real path -> the same
+// Yes/No/Cancel overwrite confirm (Yes saves in place, No falls to Save As);
+// Save As (Ctrl+Shift+S or the chevron) always asks, and adopts the new path.
+static void SaveDoc(bool saveAs) {
+    DocState& D = DVF();
+    if (!D.n) { SetStatusHold(L"Open a file first"); return; }
+    if (g.tedit) CommitTextEdit();
+    std::wstring file = D.path;
+    if (saveAs || file.empty()) {
+        wchar_t buf[MAX_PATH * 2] = L"";
+        wcsncpy(buf, D.name.c_str(), MAX_PATH * 2 - 1);
+        OPENFILENAMEW o{}; o.lStructSize = sizeof o; o.hwndOwner = g.main;
+        o.lpstrFilter = L"PDF files (*.pdf)\0*.pdf\0All files\0*.*\0";
+        o.lpstrFile = buf; o.nMaxFile = (DWORD)_countof(buf);
+        o.lpstrTitle = L"Save PDF As"; o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+        o.lpstrDefExt = L"pdf";
+        if (!GetSaveFileNameW(&o)) { SetStatusHold(L"Save canceled (no file written)"); return; }
+        file = buf;
+    } else {
+        int choice = MessageBoxW(g.main, (std::wstring(L"Overwrite ") + D.name + L"?").c_str(),
+                                 L"Save", MB_YESNOCANCEL | MB_ICONQUESTION);
+        if (choice == IDCANCEL) { SetStatusHold(L"Save canceled"); return; }
+        if (choice == IDNO) { SaveDoc(true); return; }
+    }
+    std::wstring err;
+    if (!WriteAnnotatedPdf(D, file, err)) { SetStatusHold(std::wstring(L"Save failed: ") + err); return; }
+    if (file != D.path) {                          // Save As adopts its file (KillerPDF's
+        D.path = file;                             // SaveAsWithName lands the doc on it)
+        size_t sl = file.find_last_of(L"\\/");
+        D.name = sl == std::wstring::npos ? file : file.substr(sl + 1);
+        UpdateTitle();
+    }
+    RememberRecent(file);
+    SetStatusHold(std::wstring(L"Saved to ") + file);
+}
+
+// OpenRecent_Click: the Open chevron drops the recents menu; a row opens into
+// the focused pane. Empty shows KillerPDF's disabled "No recent files" row.
+static void RecentsPopup() {
+    auto items = RecentList();
+    if (items.empty()) { SetStatusHold(L"No recent files"); return; }
+    RECT r; GetWindowRect(g.bar, &r);
+    RECT bs[TB_COUNT]; TbRects(r.right - r.left, bs);
+    ListPopOpen(g.main, { r.left + bs[TB_OPENM].left, r.bottom + 2 }, items, 2, -1);
+}
+
+// SaveMenu_Click: the Save chevron's explicit Save / Save As rows.
+static void SaveMenuPopup() {
+    RECT r; GetWindowRect(g.bar, &r);
+    RECT bs[TB_COUNT]; TbRects(r.right - r.left, bs);
+    ListPopOpen(g.main, { r.left + bs[TB_SAVEM].left, r.bottom + 2 },
+                { L"Save", L"Save As..." }, 3, -1);
 }
 
 // ---------------- sidebar ----------------
@@ -2598,6 +2933,28 @@ static void CommitTextEdit(bool commit) {
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
 }
 
+// The box's height contract: KillerPDF's TextBox starts one line tall
+// (MinHeight 24) and auto-grows as lines wrap, until a corner handle drag
+// makes the height free-form. The edit reports its wrapped line count through
+// EM_GETLINECOUNT; the fit moves the child and repaints the composite's ring
+// band (old ∪ new footprint, the FindPlace contract).
+static int g_teLineH = 0;      // one line's px at the box's font
+static int g_teMinH = 0;       // KillerPDF's MinHeight 24, scaled
+static bool g_teFixedH = false;   // a handle drag made the height free-form
+static void TextEditFit() {
+    if (!g.tedit || g_teFixedH || g_teLineH <= 0) return;
+    int lines = (int)SendMessageW(g.tedit, EM_GETLINECOUNT, 0, 0);
+    int wantH = max(g_teMinH, lines * g_teLineH + (int)(4 * g.dpi));
+    RECT r; GetWindowRect(g.tedit, &r);
+    POINT p0{ r.left, r.top }, p1{ r.right, r.bottom };
+    ScreenToClient(g.view, &p0); ScreenToClient(g.view, &p1);
+    int curH = p1.y - p0.y;
+    if (wantH == curH) return;
+    RECT u{ p0.x - 8, p0.y - 8, p1.x + 8, max(p0.y + wantH, p1.y) + 8 };
+    MoveWindow(g.tedit, p0.x, p0.y, p1.x - p0.x, wantH, TRUE);
+    InvalidateRect(g.view, &u, FALSE);   // the ring + handles ride the composite
+}
+
 static LRESULT CALLBACK TextEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_KEYDOWN) {
         if (wp == VK_ESCAPE) { CommitTextEdit(false); return 0; }
@@ -2716,7 +3073,13 @@ static void TextEditOpen(bool b, int pg, float tx, float ty, float tw, const wch
     int boxW = max(24, (int)std::lround(tw * k));
     int x = PaneX0(b) + ox + (int)std::lround(tx * k);
     int y = oy + (int)std::lround(ty * k);
-    int boxH = lineH * 3;                   // room for three lines; ES_AUTOVSCROLL beyond
+    // KillerPDF's box: MinHeight 24, ONE line tall at open, auto-grown by
+    // TextEditFit as lines wrap - until a corner handle makes the height
+    // free-form. ES_AUTOVSCROLL stays as the overflow safety net.
+    g_teLineH = lineH;
+    g_teMinH = max((int)(24 * g.dpi), lineH);
+    g_teFixedH = false;
+    int boxH = g_teMinH;
     // clamp into the pane's card so the editor never hides under the chrome
     int cardL = PaneX0(b) + CardX(b), cardR = cardL + CardW(b);
     x = std::clamp(x, cardL, max(cardL, cardR - boxW));
@@ -2767,6 +3130,7 @@ static void FieldEditOpen(bool b, int pg, int idx) {
                               ES_LEFT | ES_MULTILINE | ES_AUTOVSCROLL,
                               x, y, boxW, boxH, g.view, nullptr, g.hinst, nullptr);
     if (!g.tedit) { g.teField = -1; return; }
+    g_teLineH = 0; g_teFixedH = false;       // the field's height is the field's own
     if (g.teBg) DeleteObject(g.teBg);
     g_teTone = a.fillA > 0 ? a.fill : RGB(255, 255, 255);
     g.teBg = CreateSolidBrush(g_teTone);
@@ -2884,9 +3248,24 @@ static void PolyCommit(HWND h) {
 }
 
 // ---- the erasers ----
-// The Draw bar's brush eraser: ink strokes SPLIT at covered runs (pieces keep
-// their look), highlights the brush touches drop whole (KillerPDF carves via
-// stroke geometry; the split is the same user-visible delete, one pass).
+// Rectangle subtraction, KillerPDF's SubtractRect: the parts of a NOT covered
+// by b, as up to four strips; [a] when they miss, empty when b swallows a.
+static void SubtractRect(const FRect& a, const FRect& bx, std::vector<FRect>& out) {
+    float l = max(a.x, bx.x), r2 = min(a.x + a.w, bx.x + bx.w);
+    float t = max(a.y, bx.y), b2 = min(a.y + a.h, bx.y + bx.h);
+    if (r2 <= l || b2 <= t) { out.push_back(a); return; }
+    if (t > a.y) out.push_back({ a.x, a.y, a.w, t - a.y });
+    if (b2 < a.y + a.h) out.push_back({ a.x, b2, a.w, a.y + a.h - b2 });
+    if (l > a.x) out.push_back({ a.x, t, l - a.x, b2 - t });
+    if (r2 < a.x + a.w) out.push_back({ r2, t, a.x + a.w - r2, b2 - t });
+}
+
+// The Draw bar's brush eraser (KillerPDF's ErasePartial with a brush path):
+// ink strokes SPLIT at the covered points (pieces keep their look, runs under
+// two points drop), and highlights CARVE - the brush's circular footprint,
+// widened around every gesture sample, is subtracted from the covered rects
+// (HighlightErase's own smooth-hole mechanic, blocky at rect granularity).
+// rad is the brush radius in page points.
 static void EraseBrushAt(DocState& D, int page, float x, float y, float rad) {
     auto it = D.annos.find(page);
     if (it == D.annos.end()) return;
@@ -2912,8 +3291,42 @@ static void EraseBrushAt(DocState& D, int page, float x, float y, float rad) {
             bool touch = false;
             for (const FRect& r : a.lines)
                 if (x >= r.x - rad && x <= r.x + r.w + rad && y >= r.y - rad && y <= r.y + r.h + rad) { touch = true; break; }
-            if (touch) { changed = true; continue; }
-            out.push_back(a);
+            if (!touch) { out.push_back(a); continue; }
+            changed = true;
+            std::vector<FRect> pieces;
+            for (const FRect& r : a.lines) {
+                std::vector<FRect> cur{ r };
+                // subtract this gesture's own footprint box first (the sample
+                // that just landed), then the recent samples the stroke
+                // passed - older ones were already carved out of this rect by
+                // their own moves, so a bounded window keeps every pass O(1)
+                std::vector<FRect> boxes;
+                boxes.push_back({ x - rad, y - rad, rad * 2, rad * 2 });
+                size_t n = g.annIX.size(), lo = n > 65 ? n - 65 : 0;
+                for (size_t s2 = lo; s2 + 1 < n; s2++) {
+                    FRect bx{ g.annIX[s2] - rad, g.annIY[s2] - rad, rad * 2, rad * 2 };
+                    if (bx.x < r.x + r.w && bx.x + bx.w > r.x &&
+                        bx.y < r.y + r.h && bx.y + bx.h > r.y) boxes.push_back(bx);
+                }
+                for (const FRect& bx : boxes) {
+                    std::vector<FRect> next;
+                    for (const FRect& c : cur) SubtractRect(c, bx, next);
+                    cur = std::move(next);
+                    if (cur.empty()) break;
+                }
+                for (const FRect& pc : cur)
+                    if (pc.w >= 1 && pc.h >= 1) pieces.push_back(pc);
+            }
+            if (!pieces.empty()) {
+                Annot n = a; n.lines = pieces;
+                float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                for (const FRect& r : pieces) {
+                    x0 = min(x0, r.x); y0 = min(y0, r.y);
+                    x1 = max(x1, r.x + r.w); y1 = max(y1, r.y + r.h);
+                }
+                n.x = x0; n.y = y0; n.w = x1 - x0; n.h = y1 - y0;
+                out.push_back(n);
+            }
         } else out.push_back(a);
     }
     if (changed) {
@@ -2922,38 +3335,47 @@ static void EraseBrushAt(DocState& D, int page, float x, float y, float rad) {
     }
 }
 
-// The Highlight bar's Annotation eraser: the drag box subtracts from every
-// highlight it covers (up to four strips per line, pieces under 1x1 dropped).
+// The Highlight bar's Annotation eraser (the drag box): highlights subtract
+// the box (up to four strips per rect, pieces under 1x1 dropped) and ink
+// strokes SPLIT at the covered points - KillerPDF's ErasePartial hands the
+// region to both vector families.
 static void EraseBox(HWND h, DocState& D, int page, FRect box) {
     auto it = D.annos.find(page);
     if (it == D.annos.end()) return;
     bool changed = false;
     std::vector<Annot> out;
     for (const Annot& a : it->second) {
-        if (a.type != AT_HIGHLIGHT) { out.push_back(a); continue; }
-        std::vector<FRect> pieces;
-        for (const FRect& r : a.lines) {
-            float l = max(r.x, box.x), r2 = min(r.x + r.w, box.x + box.w);
-            float t = max(r.y, box.y), b2 = min(r.y + r.h, box.y + box.h);
-            if (r2 <= l || b2 <= t) { pieces.push_back(r); continue; }
-            if (t > r.y) pieces.push_back({ r.x, r.y, r.w, t - r.y });
-            if (b2 < r.y + r.h) pieces.push_back({ r.x, b2, r.w, r.y + r.h - b2 });
-            if (l > r.x) pieces.push_back({ r.x, t, l - r.x, b2 - t });
-            if (r2 < r.x + r.w) pieces.push_back({ r2, t, r.x + r.w - r2, b2 - t });
-        }
-        pieces.erase(std::remove_if(pieces.begin(), pieces.end(),
-                     [](const FRect& q) { return q.w < 1 || q.h < 1; }), pieces.end());
-        if (pieces.size() != a.lines.size()) changed = true;
-        if (!pieces.empty()) {
-            Annot n = a; n.lines = pieces;
-            float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
-            for (const FRect& r : pieces) {
-                x0 = min(x0, r.x); y0 = min(y0, r.y);
-                x1 = max(x1, r.x + r.w); y1 = max(y1, r.y + r.h);
+        if (a.type == AT_HIGHLIGHT) {
+            std::vector<FRect> pieces;
+            for (const FRect& r : a.lines) SubtractRect(r, box, pieces);
+            pieces.erase(std::remove_if(pieces.begin(), pieces.end(),
+                         [](const FRect& q) { return q.w < 1 || q.h < 1; }), pieces.end());
+            if (pieces.size() != a.lines.size()) changed = true;
+            if (!pieces.empty()) {
+                Annot n = a; n.lines = pieces;
+                float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+                for (const FRect& r : pieces) {
+                    x0 = min(x0, r.x); y0 = min(y0, r.y);
+                    x1 = max(x1, r.x + r.w); y1 = max(y1, r.y + r.h);
+                }
+                n.x = x0; n.y = y0; n.w = x1 - x0; n.h = y1 - y0;
+                out.push_back(n);
             }
-            n.x = x0; n.y = y0; n.w = x1 - x0; n.h = y1 - y0;
-            out.push_back(n);
-        }
+        } else if (a.type == AT_INK) {
+            std::vector<float> rx, ry;
+            auto flush = [&]() {
+                if (rx.size() >= 2) { Annot n = a; n.ix = rx; n.iy = ry; out.push_back(n); }
+                else if (!rx.empty()) changed = true;   // a lone survivor point drops
+                rx.clear(); ry.clear();
+            };
+            for (size_t i = 0; i < a.ix.size(); i++) {
+                bool in = a.ix[i] >= box.x && a.ix[i] <= box.x + box.w &&
+                          a.iy[i] >= box.y && a.iy[i] <= box.y + box.h;
+                if (in) { changed = true; flush(); }
+                else { rx.push_back(a.ix[i]); ry.push_back(a.iy[i]); }
+            }
+            flush();
+        } else out.push_back(a);
     }
     if (changed) {
         it->second = std::move(out);
@@ -3155,8 +3577,18 @@ static void ToolMove(HWND h, POINT p) {
     if (g.annKind == -2) {                    // the brush eraser erases as it moves
         if (g.annArm) { UndoPush(g.annPaneB); g.annArm = false; }   // one entry per gesture
         AnnInval(h);
+        // Densify the segment KillerPDF's DensifyPolyline covers: the eraser
+        // works on the PATH, not its samples, so a fast drag leaves no gaps.
+        float rad = g.drawWidth * 0.5f;
+        float lx = g.annIX.back(), ly = g.annIY.back();
+        float dx = fx - lx, dy = fy - ly;
+        float dist = sqrtf(dx * dx + dy * dy);
+        float step = max(1.0f, rad * 0.5f);
+        int steps = (int)(dist / step);
+        for (int s2 = 1; s2 <= steps; s2++)
+            EraseBrushAt(D, g.annPage, lx + dx * s2 / steps, ly + dy * s2 / steps, rad);
         g.annIX.push_back(fx); g.annIY.push_back(fy);
-        EraseBrushAt(D, g.annPage, fx, fy, g.drawWidth * 0.5f);
+        EraseBrushAt(D, g.annPage, fx, fy, rad);
         InvalidateRect(h, nullptr, FALSE);
         return;
     }
@@ -3231,7 +3663,15 @@ static void ToolUp(HWND h) {
     g.annInk = false;
     int kind = g.annKind;
     auto& v = D.annos[g.annPage];
-    if (kind == -1) {                         // the highlight eraser's carve box
+    if (kind == -2) {                         // the brush eraser: a click is a dot erase -
+                                              // KillerPDF's Covered() with a one-point path
+        if (g.annArm) {                       // no move fired: the drag path never erased
+            UndoPush(g.annPaneB);
+            g.annArm = false;
+            EraseBrushAt(D, g.annPage, g.annIX[0], g.annIY[0], g.drawWidth * 0.5f);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+    } else if (kind == -1) {                  // the highlight eraser's carve box
         if (g.annIX.size() >= 2) {
             float x0 = min(g.annIX[0], g.annIX[1]), x1 = max(g.annIX[0], g.annIX[1]);
             float y0 = min(g.annIY[0], g.annIY[1]), y1 = max(g.annIY[0], g.annIY[1]);
@@ -3473,12 +3913,16 @@ static int AbTextW(HDC dc, const wchar_t* s) {
 static bool AbBarTool(int t) { return BarToolOwns(t); }
 
 // One pass lays the tool's groups into g_ab (bar-local rects), wrapping when
-// the card's width runs out - WrapPanel's line breaking.
+// the pane's width runs out - WrapPanel's line breaking. The wrap cap is the
+// document area's width less the bar chrome (KillerPDF's _barWidthInset: area
+// - 28), not the page card's, and the Opacity group owns its Level/Eraser
+// toggle the way AnnotationBars.cs packs it into one dOpacityUnit - the toggle
+// can never drop onto a row by itself.
 static void AbLayout() {
     bool b = FocusB();
     DocState& D = DV(b);
     int tool = g.barTool;
-    int avail = max(160, CardW(b) - (int)(16 * g.dpi));
+    int avail = max(160, PaneW(b) - (int)(28 * g.dpi));
     int key = (tool + 2) * 2 + (g.barMini ? 1 : 0) * 7 + (int)(g.dpi * 4) * 1000;
     if (key == g_abKey && g_abKeyW == avail) return;
     g_abKey = key; g_abKeyW = avail;
@@ -3520,44 +3964,95 @@ static void AbLayout() {
         put(id, (int)(90 * g.dpi) + (int)(4 * g.dpi) + labW, (int)(20 * g.dpi));
         x += (int)(16 * g.dpi);
     };
+    // BarCheck: a 15px box (radius 3, accent fill + white check when on) and
+    // the 11px label, the whole unit VerticalAlignment.Center - the box rides
+    // the row's center line exactly like the sliders and swatches beside it,
+    // and the trailing margin is Margin(2,0,18,0).
     auto check = [&](int id, const wchar_t* lab) {
-        int w = (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, lab) + (int)(14 * g.dpi);
+        int bw = (int)(15 * g.dpi);
+        int w = bw + (int)(5 * g.dpi) + AbTextW(dc, lab);
         need(w);
-        g_ab.push_back({ id, { x, y + 1, x + w, y + 1 + (int)(15 * g.dpi) + (int)(6 * g.dpi) } });
-        x += w + (int)(16 * g.dpi);
+        int top = y + (rowH - (int)(2 * g.dpi) - bw) / 2;
+        g_ab.push_back({ id, { x, top, x + w, top + bw } });
+        x += w + (int)(18 * g.dpi);
     };
-    wchar_t tmp[32];
     if (tool == TOOL_TEXT) {
-        {   int w = AbTextW(dc, L"Font:") + (int)(6 * g.dpi) + (int)(132 * g.dpi);
-            need(w); label(L"Font:"); put(AB_FONT, (int)(132 * g.dpi), (int)(22 * g.dpi)); x += (int)(10 * g.dpi); }
+        // KillerPDF's deliberate 1.7.5 layout, assembled as three vertical
+        // pairs so related controls share an exact left edge: Font over Size
+        // over Spacing, Color over Fill over "Edit paragraph", and Opacity
+        // beside Fill Opacity. The outer WrapPanel moves a whole column at
+        // narrow widths instead of separating a label from its control.
         const wchar_t* styles[4] = { L"B", L"I", L"S", L"U" };
         int sids[4] = { AB_BOLD, AB_ITALIC, AB_STRIKE, AB_UNDER };
-        for (int i = 0; i < 4; i++) {
-            int w = AbTextW(dc, styles[i]) + (int)(8 * g.dpi);
-            need(w); put(sids[i], max((int)(22 * g.dpi), w), (int)(20 * g.dpi));
+        int x0v = (int)(16 * g.dpi);
+        // column A: Font / Size / Spacing - its width is the widest of the three rows
+        int fontRowW = AbTextW(dc, L"Font:") + (int)(6 * g.dpi) + (int)(132 * g.dpi) + 4 * (int)(24 * g.dpi);
+        int sizeRowW = AbTextW(dc, L"Size:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) +
+                       (int)(20 * g.dpi) + (int)(20 * g.dpi) + (int)(32 * g.dpi) + (int)(18 * g.dpi);
+        int spacRowW = AbTextW(dc, L"Spacing:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(48 * g.dpi);
+        int colA = max(fontRowW, max(sizeRowW, spacRowW));
+        int fillRowW = AbTextW(dc, L"Fill:") + (int)(6 * g.dpi) + (int)(15 * g.dpi) + (int)(5 * g.dpi) + 10 * (int)(20 * g.dpi);
+        int colB = max(AbTextW(dc, L"Color:") + (int)(6 * g.dpi) + 10 * (int)(20 * g.dpi), fillRowW);
+        int colC = 2 * (AbTextW(dc, L"Opacity:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi)) + (int)(16 * g.dpi);
+        int yBase = y;
+        x = x0v; y = yBase;
+        {   // Font row
+            int w = AbTextW(dc, L"Font:") + (int)(6 * g.dpi) + (int)(132 * g.dpi);
+            label(L"Font:"); put(AB_FONT, (int)(132 * g.dpi), (int)(22 * g.dpi));
+            for (int i = 0; i < 4; i++) { int s2 = max((int)(22 * g.dpi), AbTextW(dc, styles[i]) + (int)(8 * g.dpi)); put(sids[i], s2, (int)(20 * g.dpi)); }
+            (void)w;
         }
-        x += (int)(8 * g.dpi);
-        swatchRow(AB_SWC_TEXT);
-        {   int w = (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, L"Fill:") + (int)(6 * g.dpi) + 11 * (int)(20 * g.dpi);
-            need(w);
-            g_ab.push_back({ AB_FILL_NONE, { x, y + 1, x + (int)(15 * g.dpi), y + 1 + (int)(15 * g.dpi) } });
+        x = x0v; y = yBase + rowH;
+        {   // Size row: slider + - / + steppers + the editable pt box (TextSettingsBar's sizeStack)
+            label(L"Size:"); put(AB_TSIZE, (int)(90 * g.dpi) + (int)(4 * g.dpi), (int)(20 * g.dpi));
+            AbCell& sc = g_ab.back();
+            x = sc.r.right + (int)(0 * g.dpi);
+            g_ab.push_back({ AB_TMINUS, { x, sc.r.top, x + (int)(18 * g.dpi), sc.r.bottom } }); x += (int)(20 * g.dpi);
+            g_ab.push_back({ AB_TPLUS, { x, sc.r.top, x + (int)(18 * g.dpi), sc.r.bottom } }); x += (int)(22 * g.dpi);
+            g_ab.push_back({ AB_TBOX, { x, sc.r.top, x + (int)(32 * g.dpi), sc.r.bottom } }); x += (int)(36 * g.dpi);
+            g_ab.push_back({ -1, { x, sc.r.top, x + (int)(14 * g.dpi), sc.r.bottom }, L"pt" }); x += (int)(14 * g.dpi); }
+        x = x0v; y = yBase + 2 * rowH;
+        {   // Spacing row
+            label(L"Spacing:"); put(AB_SPACING, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(48 * g.dpi), (int)(20 * g.dpi));
+        }
+        int colAright = x0v + colA;
+        // column B: Color / Fill / Edit paragraph - beside A while both fit,
+        // below A when the pane is too narrow (the whole column wraps)
+        int colBx;
+        if (colAright + (int)(16 * g.dpi) + colB > avail) {
+            x = x0v; y = yBase + 3 * rowH; maxW = max(maxW, colAright); colBx = x0v;
+        } else {
+            x = colAright + (int)(16 * g.dpi); y = yBase; colBx = x;
+        }
+        {   swatchRow(AB_SWC_TEXT); }
+        x = colBx; y += rowH;                // the fill row keeps the column's left edge
+        {   int w = (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, L"Fill:") + (int)(6 * g.dpi) + 10 * (int)(20 * g.dpi);
+            if (x + w > avail) { maxW = max(maxW, x); x = x0v; colBx = x0v; }
+            label(L"Fill:");
+            g_ab.push_back({ AB_FILL_NONE, { x, y + (rowH - (int)(2 * g.dpi) - (int)(15 * g.dpi)) / 2,
+                                             x + (int)(15 * g.dpi), y + (rowH - (int)(2 * g.dpi) + (int)(15 * g.dpi)) / 2 } });
             x += (int)(20 * g.dpi);
             for (int i = 0; i < 9; i++) put(AB_SWC_FILL + i, (int)(20 * g.dpi), (int)(18 * g.dpi));
             put(AB_RW_FILL, (int)(20 * g.dpi), (int)(18 * g.dpi));
             x += (int)(2 * g.dpi); }
-        slider(AB_TSIZE, L"Size:", 0);            // the slider cell; -/+ and the box follow on
-        {   // the same row: KillerPDF's - / + steppers and the editable pt box
-            AbCell& sc = g_ab.back();
-            x = sc.r.right + (int)(4 * g.dpi);
-            g_ab.push_back({ AB_TMINUS, { x, sc.r.top, x + (int)(18 * g.dpi), sc.r.bottom } }); x += (int)(20 * g.dpi);
-            g_ab.push_back({ AB_TPLUS, { x, sc.r.top, x + (int)(18 * g.dpi), sc.r.bottom } }); x += (int)(22 * g.dpi);
-            g_ab.push_back({ AB_TBOX, { x, sc.r.top, x + (int)(32 * g.dpi), sc.r.bottom } }); x += (int)(36 * g.dpi);
-            g_ab.push_back({ -1, { x, sc.r.top, x + (int)(14 * g.dpi), sc.r.bottom } }); x += (int)(14 * g.dpi); }
-        slider(AB_SPACING, L"Spacing:", (int)(48 * g.dpi));
-        slider(AB_TOACITY, L"Opacity:", (int)(40 * g.dpi));
-        slider(AB_FOACITY, L"Fill Opacity:", (int)(40 * g.dpi));
+        x = colBx; y += rowH;
         {   int w = AbTextW(dc, L"Edit paragraph") + (int)(20 * g.dpi);
-            need(w); put(AB_PARA, w, (int)(22 * g.dpi)); }
+            if (x + w > avail) { maxW = max(maxW, x); x = x0v; }
+            put(AB_PARA, w, (int)(22 * g.dpi)); }
+        int colBright = max(x, colBx + colB);
+        // column C: Opacity beside Fill Opacity (the pair's WrapPanel), below
+        // the first two columns when even that wrap cannot hold them
+        int colCx;
+        if (max(maxW, colBright) + (int)(16 * g.dpi) + colC > avail) {
+            x = x0v; y += rowH; maxW = max(maxW, colBright); colCx = x0v;
+        } else {
+            x = colBright + (int)(16 * g.dpi); y = yBase; colCx = x;
+        }
+        {   label(L"Opacity:"); put(AB_TOACITY, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi), (int)(20 * g.dpi)); }
+        x = colCx + AbTextW(dc, L"Opacity:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) +
+            (int)(40 * g.dpi) + (int)(16 * g.dpi);   // the pair's second group, 16 past the first
+        {   label(L"Fill Opacity:"); put(AB_FOACITY, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi), (int)(20 * g.dpi)); }
+        maxW = max(maxW, x);
     } else if (tool == TOOL_REDACT) {
         int marks = 0, pgs = 0;
         for (auto& kv : D.reds) { marks += (int)kv.second.size(); if (!kv.second.empty()) pgs++; }
@@ -3572,15 +4067,31 @@ static void AbLayout() {
         put(AB_R_APPLY, w2, (int)(22 * g.dpi));
     } else {
         swatchRow(AB_SWC_DRAW);
+        // KillerPDF's Width=34 size value and Width=40 opacity value, both
+        // right-aligned - the reserves keep the slider pitch constant as the
+        // number's digits change.
         if (tool != TOOL_HIGHLIGHT) {
-            swprintf(tmp, 32, L"%dpx", (int)g.drawWidth);
-            slider(AB_SIZE, L"Size:", AbTextW(dc, tmp) + (int)(4 * g.dpi));
+            slider(AB_SIZE, L"Size:", (int)(34 * g.dpi));
         }
-        slider(AB_OPACITY, L"Opacity:", (int)(40 * g.dpi));
-        if (tool == TOOL_DRAW) check(AB_ERASE, L"Eraser");
-        else if (tool == TOOL_LINE) check(AB_LEVEL, L"Level");
-        else if (tool == TOOL_HIGHLIGHT) check(AB_HLERASE, L"Annotation eraser");
-        else if (tool == TOOL_SHAPE) {
+        // Opacity and the Level/Eraser/Fill toggle share ONE wrap unit
+        // (AnnotationBars.cs's dOpacityUnit): the toggle rides at the end of
+        // the Opacity group, so it never lands on a row by itself.
+        {
+            const wchar_t* cl = tool == TOOL_DRAW ? L"Eraser" : tool == TOOL_LINE ? L"Level"
+                              : tool == TOOL_HIGHLIGHT ? L"Annotation eraser" : nullptr;
+            int clW = cl ? (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, cl) : 0;
+            int unit = AbTextW(dc, L"Opacity:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) +
+                       (int)(40 * g.dpi) + (int)(6 * g.dpi) + clW;
+            need(unit);
+            label(L"Opacity:");
+            put(AB_OPACITY, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi), (int)(20 * g.dpi));
+            x += (int)(6 * g.dpi);
+            if (tool == TOOL_DRAW) check(AB_ERASE, L"Eraser");
+            else if (tool == TOOL_LINE) check(AB_LEVEL, L"Level");
+            else if (tool == TOOL_HIGHLIGHT) check(AB_HLERASE, L"Annotation eraser");
+            else x += (int)(16 * g.dpi);
+        }
+        if (tool == TOOL_SHAPE) {
             int kw = 3 * (int)(26 * g.dpi) + (int)(4 * g.dpi);
             need(kw + (int)(60 * g.dpi));
             put(AB_KIND0, (int)(26 * g.dpi), (int)(20 * g.dpi));
@@ -3752,7 +4263,7 @@ static void AbCheckDraw(Gdiplus::Graphics& gs, HDC dc, const RECT& r, bool on) {
         SelectObject(dc, AbMdlFont(10));
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(255, 255, 255));
-        RECT cr{ box.left, box.top - (int)(2 * g.dpi), box.right, box.bottom };
+        RECT cr{ box.left, box.top, box.right, box.bottom };
         DrawTextW(dc, L"\uE73E", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);   // MDL2 CheckMark
     } else {
         Gdiplus::Pen pen(Gdiplus::Color(255, 0x44, 0x44, 0x44), 1.0f);
@@ -3761,15 +4272,14 @@ static void AbCheckDraw(Gdiplus::Graphics& gs, HDC dc, const RECT& r, bool on) {
     SelectObject(dc, AbFont11());
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
-    RECT lr{ box.right + (int)(5 * g.dpi), r.top, r.right, r.bottom };
-    DrawTextW(dc, L"", 0, &lr, DT_LEFT | DT_TOP);   // anchor the font
 }
-// The check's label rides in its cell: AbLayout stored label space; draw it here
+// The check's label rides its cell's band, vertically centered on the box -
+// the whole BarCheck StackPanel is one centered line (AnnotationBars.cs).
 static void AbCheckLabel(HDC dc, const RECT& r, const wchar_t* lab) {
     SelectObject(dc, AbFont11());
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
-    RECT lr{ r.left + (int)(20 * g.dpi), r.top - (int)(2 * g.dpi), r.right, r.bottom };
+    RECT lr{ r.left + (int)(20 * g.dpi), r.top, r.right, r.bottom };
     DrawTextW(dc, lab, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
@@ -4101,6 +4611,16 @@ static LRESULT CALLBACK ListPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_lp.who == 0) {
             g.textFont = g_lp.items[hot];
             ApplyTextStyleToSelection();
+        } else if (g_lp.who == 2) {          // the Open chevron's recents: open into the pane
+            std::wstring p = g_lp.items[hot];
+            ListPopClose();
+            Open(DVF(), p);
+            return;
+        } else if (g_lp.who == 3) {          // the Save chevron's Save / Save As rows
+            bool as2 = hot == 1;
+            ListPopClose();
+            SaveDoc(as2);
+            return;
         } else {
             bool b = FocusB();
             DocState& D = DV(b);
@@ -4123,7 +4643,8 @@ static void ListPopOpen(HWND owner, POINT p, std::vector<std::wstring> items, in
     g_lp.items = items; g_lp.hot = -1; g_lp.who = who;
     g_lp.scroll = std::clamp(selRow - 3, 0, max(0, (int)items.size() - 1));
     int rowH = (int)(22 * g.dpi);
-    int w = (int)(200 * g.dpi), rows = min(12, (int)items.size());
+    int w = who == 2 ? (int)(360 * g.dpi) : (int)(200 * g.dpi);   // recents carry full paths
+    int rows = min(12, (int)items.size());
     int h2 = (int)(8 * g.dpi) + rows * rowH;
     g.fontPop = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"DocsyListPop", nullptr,
                                 WS_POPUP | WS_BORDER, p.x, p.y, w, h2, owner, nullptr, g.hinst, nullptr);
@@ -4510,7 +5031,10 @@ static void AnnBarPress(HWND h, POINT p, int cell) {
         return;
     case AB_FONT: {
         RECT br = AnnBarRect();
-        ListPopOpen(g.main, { br.left + (int)(60 * g.dpi), br.bottom + 4 }, FontList(), 0, -1);
+        for (const AbCell& c : g_ab) if (c.id == AB_FONT) {
+            ListPopOpen(g.main, { br.left + c.r.left, br.bottom + 4 }, FontList(), 0, -1);
+            break;
+        }
         return;
     }
     case AB_BOLD: g.textBold = !g.textBold; ApplyTextStyleToSelection(); return;
@@ -5662,6 +6186,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 g_teStart = RECT{ nx0, ny0, nx1, ny1 };
                 float k = (float)(DV(g.tePaneB).zoom * g.dpi);
                 g.teW = max(24.0f, (nx1 - nx0) / max(0.01f, k));   // the commit takes the new width
+                g_teFixedH = true;   // a handle drag makes the height free-form (KillerPDF's rule)
             }
             InvalidateRect(h, nullptr, FALSE);
             return 0;
@@ -5981,6 +6506,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;
     case WM_COMMAND:
         if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g_fedit) FindChanged();   // the query edit
+        if (HIWORD(wp) == EN_CHANGE && (HWND)lp == g.tedit) TextEditFit();   // the text box grows with its lines
         if (HIWORD(wp) == EN_KILLFOCUS && (HWND)lp == g.tedit) CommitTextEdit();   // the text
         return 0;                                // tool's box lands when the focus leaves it
     case WM_CTLCOLOREDIT: {                    // the dark query edit; the text tool's box rides
@@ -8673,6 +9199,15 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (DVF().tool == TOOL_SHAPE) AnnBarSync(true);
             } else if (DVF().n) SetTool(TOOL_SHAPE, FocusB());
             break;
+        case 'N':                                  // KillerPDF's file cluster: Ctrl+N / Ctrl+W
+            if (ctrl && !shift) NewBlank();
+            break;
+        case 'W':
+            if (ctrl && !shift) CloseDoc();
+            break;
+        case 'S':
+            if (ctrl) SaveDoc(shift);              // Ctrl+S saves in place, Ctrl+Shift+S asks
+            break;
         // KillerPDF's one-letter tool keys (KeyboardShortcuts.cs TryToolShortcut):
         // one letter per tool, so a key keeps its tool however the bar grows -
         // Select is V (the Photoshop convention), Shapes O, Line also U. They
@@ -8901,92 +9436,8 @@ static void FlattenSave() {
     o.lpstrTitle = L"Save Flattened PDF"; o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
     o.lpstrDefExt = L"pdf";
     if (!GetSaveFileNameW(&o)) { SetStatusHold(L"Flatten canceled (no file written)"); return; }
-    HANDLE f = CreateFileW(file, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) { SetStatusHold(L"Flatten failed: the file could not be written"); return; }
-    // page pixels: ~150dpi at the page's own DIP size, annotations composited
-    auto pageJpeg = [&](int i, std::vector<BYTE>& out) -> bool {
-        int w = std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400);
-        int h = max(1, (int)std::lround((float)w * D.ph[i] / max(1.f, D.pw[i])));
-        HBITMAP b = GetBmp(D, i, w, h);
-        if (!b) return false;
-        HDC mdc = CreateCompatibleDC(nullptr);
-        HGDIOBJ ob = SelectObject(mdc, b);
-        float k = (float)w / max(1.f, D.pw[i]);
-        PaintAnnots(mdc, D, i, 0, 0, k);   // annotations + fields + applied marks burn in
-        // JPEG-encode via GDI+
-        CLSID jpg{}; UINT cnt = 0, bytes = 0;
-        Gdiplus::GetImageEncodersSize(&cnt, &bytes);
-        std::vector<BYTE> buf(bytes);
-        auto* enc = (Gdiplus::ImageCodecInfo*)buf.data();
-        Gdiplus::GetImageEncoders(cnt, bytes, enc);
-        for (UINT e = 0; e < cnt; e++) if (!lstrcmpW(enc[e].MimeType, L"image/jpeg")) jpg = enc[e].Clsid;
-        Gdiplus::Bitmap bm(b, nullptr);
-        IStream* os = nullptr;
-        if (CreateStreamOnHGlobal(nullptr, TRUE, &os) != S_OK) { SelectObject(mdc, ob); DeleteDC(mdc); return false; }
-        bool ok = false;
-        if (bm.Save(os, &jpg, nullptr) == Gdiplus::Ok) {
-            LARGE_INTEGER z1{}; z1.QuadPart = 0;
-            os->Seek(z1, STREAM_SEEK_SET, nullptr);
-            STATSTG st2{};
-            os->Stat(&st2, STATFLAG_NONAME);
-            ULARGE_INTEGER sz = st2.cbSize;
-            out.resize((size_t)sz.QuadPart);
-            ULONG rd = 0;
-            ok = os->Read(out.data(), (ULONG)out.size(), &rd) == S_OK && rd == out.size();
-        }
-        os->Release();
-        SelectObject(mdc, ob); DeleteDC(mdc);
-        return ok && !out.empty();
-    };
-    std::string head = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
-    DWORD wr = 0;
-    WriteFile(f, head.data(), (DWORD)head.size(), &wr, nullptr);
-    long long pos = (long long)head.size();
-    auto emit = [&](const std::string& s) { WriteFile(f, s.data(), (DWORD)s.size(), &wr, nullptr); pos += (long long)s.size(); };
-    long long catOff = pos;
-    emit("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-    long long pagesOff = pos;
-    std::string kids;
-    for (int i = 0; i < D.n; i++) kids += std::to_string(3 + i * 2) + " 0 R ";
-    emit("2 0 obj\n<< /Type /Pages /Kids [ " + kids + "] /Count " + std::to_string(D.n) + " >>\nendobj\n");
-    std::vector<long long> pageOff(D.n), contOff(D.n), imgOff(D.n);
-    bool failed = false;
-    for (int i = 0; i < D.n && !failed; i++) {
-        std::vector<BYTE> jpg;
-        if (!pageJpeg(i, jpg)) { failed = true; break; }
-        float wpt = D.pw[i] * 2.0f, hpt = D.ph[i] * 2.0f;   // the 2x raster's DIP size, PDF points
-        char hb2[256];
-        pageOff[i] = pos;
-        snprintf(hb2, 256, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents %d 0 R /Resources << /XObject << /Im %d 0 R >> >> >>\nendobj\n",
-                 3 + i * 2, wpt, hpt, 4 + i * 2, 5 + i * 2);
-        emit(hb2);
-        contOff[i] = pos;
-        std::string cs = "q\n" + std::to_string(wpt).substr(0, 8) + " 0 0 " + std::to_string(hpt).substr(0, 8) + " 0 0 cm\n/Im Do\nQ\n";
-        emit(std::to_string(4 + i * 2) + " 0 obj\n<< /Length " + std::to_string(cs.size()) + " >>\nstream\n" + cs + "endstream\nendobj\n");
-        imgOff[i] = pos;
-        std::string ih = std::to_string(5 + i * 2) + " 0 obj\n<< /Type /XObject /Subtype /Image /Width " +
-            std::to_string(std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400)) +
-            " /Height " + std::to_string(max(1, (int)std::lround((float)std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400) * D.ph[i] / max(1.f, D.pw[i])))) +
-            " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + std::to_string(jpg.size()) + " >>\nstream\n";
-        emit(ih);
-        WriteFile(f, jpg.data(), (DWORD)jpg.size(), &wr, nullptr);
-        pos += (long long)jpg.size();
-        emit("\nendstream\nendobj\n");
-    }
-    if (failed) {
-        CloseHandle(f);
-        SetStatusHold(L"Flatten failed: a page could not be rendered");
-        return;
-    }
-    long long xref = pos;
-    std::string xr = "xref\n0 " + std::to_string(3 + D.n * 2) + "\n0000000000 65535 f \n";
-    auto off10 = [](long long v) { char b[16]; snprintf(b, 16, "%010lld", v); return std::string(b); };
-    xr += off10(catOff) + " 00000 n \n" + off10(pagesOff) + " 00000 n \n";
-    for (int i = 0; i < D.n; i++)
-        xr += off10(pageOff[i]) + " 00000 n \n" + off10(contOff[i]) + " 00000 n \n" + off10(imgOff[i]) + " 00000 n \n";
-    xr += "trailer\n<< /Size " + std::to_string(3 + D.n * 2) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
-    emit(xr);
-    CloseHandle(f);
+    std::wstring err;
+    if (!WriteAnnotatedPdf(D, file, err)) { SetStatusHold(std::wstring(L"Flatten failed: ") + err); return; }
     SetStatusHold(std::wstring(L"Flattened PDF saved to ") + file);
 }
 
