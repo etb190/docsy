@@ -85,6 +85,18 @@ using std::min; using std::max;
 #include <winrt/Windows.UI.h>
 #include <winrt/Windows.Media.Ocr.h>
 
+// the info dialog's edit margins - the SDK's own value, guarded because some
+// header sets stop short of the edit-margin block
+#ifndef EM_SETMARGIN
+#define EM_SETMARGIN 0x00D3
+#endif
+#ifndef EC_LEFTMARGIN
+#define EC_LEFTMARGIN 0x0001
+#endif
+#ifndef EC_RIGHTMARGIN
+#define EC_RIGHTMARGIN 0x0002
+#endif
+
 #pragma comment(lib, "windowsapp")
 #pragma comment(lib, "shcore")
 #pragma comment(lib, "gdiplus")
