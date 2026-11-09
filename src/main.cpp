@@ -2990,7 +2990,8 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
     int offx = DocOffX(D, cw);           // the shared centering/scroll term: the v-bar's
                                          // reserved column keeps pages clear of the thumb
     bool selOn = D.selRange || (D.selArm && D.selDrag);   // quads paint live during the drag
-    float k = (float)(D.zoom * g.dpi);
+    float kz = (float)(D.zoom * g.dpi);  // the page-DIP -> pixel scale for the overlay paints
+                                         // (the loop below reuses k as its column index)
     int r0 = RowAt(D, D.sy), r1 = RowAt(D, D.sy + h - 1);
     int first = RowPage(D, r0, 0), last = first;
     int per = PerRow(D);
@@ -3018,8 +3019,8 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
             }
             // the tools' committed annotations, above the page and below the
             // selection quads - KillerPDF's overlay order
-            PaintAnnots(dc, D, i, x, y, k);
-            PaintLiveStroke(dc, D, i, x, y, k);
+            PaintAnnots(dc, D, i, x, y, kz);
+            PaintLiveStroke(dc, D, i, x, y, kz);
             // flowing selection quads: KillerPDF paints one rect per selected line on an
             // overlay above the page - 60/255 of the dark theme's SelectionAccent #22bb56
             if (selOn) {
@@ -3031,8 +3032,8 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
                         Gdiplus::Graphics gs(dc);
                         Gdiplus::SolidBrush br(Gdiplus::Color(60, 0x22, 0xbb, 0x56));
                         for (const FRect& q : rs)
-                            gs.FillRectangle(&br, Gdiplus::RectF(x + q.x * k, y + q.y * k,
-                                                                 max(q.w * k, 2.0f), max(q.h * k, 2.0f)));
+                            gs.FillRectangle(&br, Gdiplus::RectF(x + q.x * kz, y + q.y * kz,
+                                                                 max(q.w * kz, 2.0f), max(q.h * kz, 2.0f)));
                     }
                 }
             }
