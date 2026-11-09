@@ -1125,7 +1125,9 @@ static void BarDraw(HDC dc, int w, int h) {
                     gs2.SetSmoothingMode(Gdiplus::SmoothingModeNone);
                     HPEN fr = CreatePen(PS_SOLID, 1, c);
                     HGDIOBJ og = SelectObject(dc, fr);
+                    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));   // frame only
                     Rectangle(dc, gx + ox, gy + oy, gx + fw2 + ox, gy + fh2 + oy);
+                    SelectObject(dc, ob);
                     SelectObject(dc, og); DeleteObject(fr);
                     float u = fw2 * 0.7f / 16.0f;         // the path's unit in pixels
                     float cx = gx + ox + fw2 / 2.0f, cy = gy + oy + fh2 / 2.0f;
