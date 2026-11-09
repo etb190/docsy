@@ -1401,7 +1401,8 @@ static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D,
         winrt::check_hresult(CreateStreamOverRandomAccessStream(winrt::get_unknown(st2), winrt::guid_of<IStream>(), os.put_void()));
         out->Save(os.get(), &bmpCls, nullptr);
         delete out;
-        os->Seek(0, STREAM_SEEK_SET, nullptr);
+        LARGE_INTEGER z0{}; z0.QuadPart = 0;
+        os->Seek(z0, STREAM_SEEK_SET, nullptr);
         auto dec2 = winrt::Windows::Graphics::Imaging::BitmapDecoder::CreateAsync(st2).get();
         return dec2.GetSoftwareBitmapAsync().get();
     } catch (...) { return nullptr; }
@@ -2273,7 +2274,7 @@ static bool SidePump() {
     }
     if (pick < 0) return false;
     HBITMAP b = Render(D, pick, sd.tw, STH(pick));
-    sd.th[pick] = Ent{ b, sd.tw, STH(pick), ++sd.tick };   // b may be null: stays a placeholder, no retry spin
+    sd.th[pick] = Ent{ b, sd.tw, STH(pick), 0, ++sd.tick };   // b may be null: stays a placeholder, no retry spin
     while (sd.th.size() > 256) {                            // LRU: drop farthest off-screen, oldest first
         int k = -1; unsigned long long best = ~0ULL;
         for (auto& kv : sd.th)
@@ -3817,20 +3818,16 @@ static void AnnBarDraw(HDC dc, int ox, int oy) {
             AbRoundRect(gs, RECT{ r.left + 1, r.top + 1, r.right - 1, r.bottom - 1 }, 3.0f * (float)g.dpi, nullptr, &pen);
         } else if (id == AB_RW_DRAW || id == AB_RW_TEXT || id == AB_RW_FILL) {
             // the rainbow "More colors..." swatch: the picker's own gradient
-            Gdiplus::LinearGradientBrush rb(Gdiplus::Rect(r.left, r.top, r.right - r.left, r.bottom - r.top),
-                Gdiplus::Color(255, 255, 0, 0), Gdiplus::Color(255, 0, 0, 255), 0.0f, false);
             Gdiplus::Color cols[5] = { Gdiplus::Color(255, 255, 0, 0), Gdiplus::Color(255, 255, 255, 0),
                                        Gdiplus::Color(255, 0, 255, 0), Gdiplus::Color(255, 0, 255, 255),
                                        Gdiplus::Color(255, 0, 0, 255) };
-            Gdiplus::Color* oldc = new Gdiplus::Color[5];
-            for (int i = 0; i < 5; i++) oldc[i] = cols[i];
-            rb.SetInterpolationColors(oldc, 5);
-            delete[] oldc;
+            REAL pos[5] = { 0.0f, 0.25f, 0.5f, 0.7f, 1.0f };
+            Gdiplus::LinearGradientBrush rb(Gdiplus::Rect(r.left, r.top, r.right - r.left, r.bottom - r.top),
+                Gdiplus::Color(255, 255, 0, 0), Gdiplus::Color(255, 0, 0, 255), 0.0f, false);
+            rb.SetInterpolationColors(cols, pos, 5);
             AbRoundRect(gs, r, 3.0f * (float)g.dpi, &rb);
-            bool act = (id == AB_RW_DRAW && (g.barTool == TOOL_HIGHLIGHT ? false : false));
             Gdiplus::Pen pen(Gdiplus::Color(255, 0x44, 0x44, 0x44), 1.0f);
             AbRoundRect(gs, RECT{ r.left + 1, r.top + 1, r.right - 1, r.bottom - 1 }, 3.0f * (float)g.dpi, nullptr, &pen);
-            (void)act;
         } else if (id == AB_FILL_NONE) {
             Gdiplus::SolidBrush w(Gdiplus::Color(255, 255, 255, 255));
             AbRoundRect(gs, r, 3.0f * (float)g.dpi, &w);
@@ -4082,7 +4079,7 @@ static LRESULT CALLBACK ListPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int rowH = (int)(22 * g.dpi);
-        int hot = g_lp.scroll + max(0, p.y - (int)(4 * g.dpi)) / rowH;
+        int hot = g_lp.scroll + max(0, (int)p.y - (int)(4 * g.dpi)) / rowH;
         if (hot < 0 || hot >= (int)g_lp.items.size()) { ListPopClose(); return 0; }
         if (g_lp.who == 0) {
             g.textFont = g_lp.items[hot];
@@ -4434,7 +4431,7 @@ static int AnnBarSliderAt(int id) {   // the track's left edge, bar-local
 static void AnnBarSlideValue(HWND h, POINT p) {
     RECT br = AnnBarRect();
     int lx = AnnBarSliderAt(g.barSlide);
-    float t = std::clamp((p.x - br.left - lx) / (90.0f * g.dpi), 0.0f, 1.0f);
+    float t = std::clamp((p.x - br.left - lx) / (90.0f * (float)g.dpi), 0.0f, 1.0f);
     switch (g.barSlide) {
     case AB_SIZE: {
         int v = std::clamp(1 + (int)std::lround(t * 59), 1, 60);
@@ -5056,7 +5053,7 @@ static void PaintLiveStroke(HDC dc, const DocState& D, int page, int px, int py,
             float dx0 = g.annFX - g.annPX[0], dy0 = g.annFY - g.annPY[0];
             if (g.annPX.size() >= 3 && dx0 * dx0 + dy0 * dy0 <= 64.0f) {
                 Gdiplus::Pen ring(Gdiplus::Color(255, 0x22, 0xbb, 0x56), 2.0f);
-                gs.DrawEllipse(&ring, px + g.annPX[0] * k - 7, py + g.annPY[0] * k - 7, 14, 14);
+                gs.DrawEllipse(&ring, px + g.annPX[0] * k - 7.0f, py + g.annPY[0] * k - 7.0f, 14.0f, 14.0f);
             }
         }
         return;
@@ -8909,11 +8906,13 @@ static void FlattenSave() {
         Gdiplus::Bitmap bm(b, nullptr);
         IStream* os = nullptr;
         if (CreateStreamOnHGlobal(nullptr, TRUE, &os) != S_OK) { SelectObject(mdc, ob); DeleteDC(mdc); return false; }
-        ULARGE_INTEGER sz{}; LARGE_INTEGER zero{};
         bool ok = false;
         if (bm.Save(os, &jpg, nullptr) == Gdiplus::Ok) {
-            os->Seek(zero, STREAM_SEEK_SET, nullptr);
-            os->Stat(&sz, STATFLAG_NONAME);
+            LARGE_INTEGER z1{}; z1.QuadPart = 0;
+            os->Seek(z1, STREAM_SEEK_SET, nullptr);
+            STATSTG st2{};
+            os->Stat(&st2, STATFLAG_NONAME);
+            ULARGE_INTEGER sz = st2.cbSize;
             out.resize((size_t)sz.QuadPart);
             ULONG rd = 0;
             ok = os->Read(out.data(), (ULONG)out.size(), &rd) == S_OK && rd == out.size();
