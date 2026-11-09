@@ -4222,8 +4222,8 @@ static void AbCheckGlyph(HDC dc, const RECT& box) {
     if (f && fd != g.dpi) { DeleteObject(f); f = nullptr; }
     if (!f) {
         const struct { const wchar_t* face; wchar_t ch; } tries[] = {
-            { L"Segoe UI", L"\u2713" }, { L"Segoe UI Symbol", L"\u2713" },
-            { L"Segoe MDL2 Assets", L"\uE73E" } };
+            { L"Segoe UI", L'\u2713' }, { L"Segoe UI Symbol", L'\u2713' },
+            { L"Segoe MDL2 Assets", L'\uE73E' } };
         for (const auto& t : tries) {
             HFONT tf = CreateFontW(-(int)std::lround(10 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
