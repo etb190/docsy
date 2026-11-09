@@ -36,6 +36,14 @@ jobs:
           "info exit code: $($i2.ExitCode)" | Tee-Object -Append shot.log
           $t2 = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-tools.png","$PWD\sample.pdf",'annot=demo','tool=5' -Wait -PassThru
           "tools exit code: $($t2.ExitCode)" | Tee-Object -Append shot.log
+          $x1 = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-textbar.png","$PWD\sample.pdf",'tool=1' -Wait -PassThru
+          "textbar exit code: $($x1.ExitCode)" | Tee-Object -Append shot.log
+          $x2 = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-shapebar.png","$PWD\sample.pdf",'annot=demo','tool=4' -Wait -PassThru
+          "shapebar exit code: $($x2.ExitCode)" | Tee-Object -Append shot.log
+          $x3 = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-hlbar.png","$PWD\sample.pdf",'annot=demo','tool=2' -Wait -PassThru
+          "hlbar exit code: $($x3.ExitCode)" | Tee-Object -Append shot.log
+          $x4 = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-redact.png","$PWD\sample.pdf",'annot=demo','tool=7' -Wait -PassThru
+          "redact exit code: $($x4.ExitCode)" | Tee-Object -Append shot.log
           $b2 = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-split2.png","$PWD\sample.pdf",'split=on',"fileB=$PWD\sample.pdf",'zoom=35' -Wait -PassThru
           "split2 exit code: $($b2.ExitCode)" | Tee-Object -Append shot.log
           if (!(Test-Path preview.png)) { exit 1 }
@@ -46,7 +54,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-split2.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-redact.png preview-split2.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log
