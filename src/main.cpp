@@ -523,6 +523,8 @@ static void PolyCancel(HWND h);         // abandon the polygon session
 static void PolyCommit(HWND h);         // close the polygon (repeat first point)
 static void FieldEditOpen(bool b, int pg, int idx);   // the Select tool types into a field
 static void ListPopOpen(HWND owner, POINT p, std::vector<std::wstring> items, int who, int selRow);
+static void OpenDlg();                   // the Open button's file dialog
+static void PaintAnnots(HDC dc, const DocState& D, int page, int px, int py, float k);
 // the footer's shared fills (defined with the status bar, used by the bars)
 static HBRUSH PopBrush();
 static HBRUSH PopHoverBrush();
@@ -4615,12 +4617,12 @@ static LRESULT CALLBACK ListPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             std::wstring p = g_lp.items[hot];
             ListPopClose();
             Open(DVF(), p);
-            return;
+            return 0;
         } else if (g_lp.who == 3) {          // the Save chevron's Save / Save As rows
             bool as2 = hot == 1;
             ListPopClose();
             SaveDoc(as2);
-            return;
+            return 0;
         } else {
             bool b = FocusB();
             DocState& D = DV(b);
