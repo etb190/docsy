@@ -2958,6 +2958,9 @@ static LRESULT CALLBACK TextEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_KEYDOWN) {
         if (wp == VK_ESCAPE) { CommitTextEdit(false); return 0; }
         if (wp == VK_RETURN && (GetKeyState(VK_CONTROL) < 0)) { CommitTextEdit(); return 0; }
+        if (wp == 'A' && GetKeyState(VK_CONTROL) < 0) {
+            SendMessageW(h, EM_SETSEL, 0, -1); return 0;   // WPF TextBox's Ctrl+A SelectAll - a
+        }                                                  // plain EDIT ships no such chord
         if (wp == 'B' && GetKeyState(VK_CONTROL) < 0) {
             g.textBold = !g.textBold;
             ApplyTextStyleToSelection();     // the live box restyles with the shared state
@@ -4862,9 +4865,16 @@ static void TransformPopupOpen() {
 }
 
 // The size box: a tiny popup EDIT over the cell; Enter/focus-loss commits
-// (clamped 1-400pt), Escape reverts - KillerPDF's CommitSizeBox.
+// (clamped 1-400pt), Escape reverts - KillerPDF's CommitSizeBox. The subclass
+// chains to the stock EDIT proc (g_sizeEditDef, the g.teditDef pattern):
+// DefWindowProcW implements no editing at all, so the box once ate every key -
+// typing, Backspace, Del, Ctrl+A all landed in the void.
+static WNDPROC g_sizeEditDef = nullptr;
 static LRESULT CALLBACK SizeEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_KEYDOWN) {
+        if (wp == 'A' && GetKeyState(VK_CONTROL) < 0) {
+            SendMessageW(h, EM_SETSEL, 0, -1); return 0;   // the reference's SelectAll chord
+        }
         if (wp == VK_RETURN) {
             wchar_t b[8] = L"";
             GetWindowTextW(h, b, 8);
@@ -4885,7 +4895,8 @@ static LRESULT CALLBACK SizeEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         DestroyWindow(h); g.sizeEdit = nullptr;
         return 0;
     }
-    return DefWindowProcW(h, m, wp, lp);
+    return g_sizeEditDef ? CallWindowProcW(g_sizeEditDef, h, m, wp, lp)
+                         : DefWindowProcW(h, m, wp, lp);
 }
 static void SizeEditOpen(POINT p) {
     if (g.sizeEdit) { DestroyWindow(g.sizeEdit); g.sizeEdit = nullptr; }
@@ -4897,6 +4908,7 @@ static void SizeEditOpen(POINT p) {
     wchar_t b[8]; swprintf(b, 8, L"%d", (int)g.textSize);
     SetWindowTextW(g.sizeEdit, b);
     SendMessageW(g.sizeEdit, EM_SETLIMITTEXT, 4, 0);
+    g_sizeEditDef = (WNDPROC)GetWindowLongPtrW(g.sizeEdit, GWLP_WNDPROC);
     SetWindowLongPtrW(g.sizeEdit, GWLP_WNDPROC, (LONG_PTR)SizeEditProc);
     SendMessageW(g.sizeEdit, WM_SETFONT, (WPARAM)AbFont11(), TRUE);
     SetForegroundWindow(g.sizeEdit);
@@ -4998,6 +5010,17 @@ static LRESULT CALLBACK ParaDlgProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcW(h, m, wp, lp);
 }
+// The paragraph field's keys: the reference's WPF TextBox selects all on
+// Ctrl+A - a plain EDIT ships no such chord (the find box's precedent) - and
+// everything else stays the stock edit's own: Del, Backspace, caret moves.
+static LRESULT CALLBACK ParaEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    if (m == WM_KEYDOWN && wp == 'A' && GetKeyState(VK_CONTROL) < 0) {
+        SendMessageW(h, EM_SETSEL, 0, -1);
+        return 0;
+    }
+    WNDPROC orig = (WNDPROC)GetWindowLongPtrW(h, GWLP_USERDATA);
+    return orig ? CallWindowProcW(orig, h, m, wp, lp) : DefWindowProcW(h, m, wp, lp);
+}
 static void ParagraphOpen() {
     if (g.paraDlg) ParaClose(false);
     std::wstring cur;
@@ -5021,6 +5044,8 @@ static void ParagraphOpen() {
                               h2 - (int)(72 * g.dpi), g.paraDlg, nullptr, g.hinst, nullptr);
     SendMessageW(ed, WM_SETFONT, (WPARAM)UiFont(), TRUE);
     SendMessageW(ed, EM_SETLIMITTEXT, 10000, 0);
+    SetWindowLongPtrW(ed, GWLP_USERDATA, GetWindowLongPtrW(ed, GWLP_WNDPROC));
+    SetWindowLongPtrW(ed, GWLP_WNDPROC, (LONG_PTR)ParaEditProc);
     ShowWindow(g.paraDlg, SW_SHOWNA);
     InvalidateRect(g.paraDlg, nullptr, FALSE);
 }
@@ -8720,6 +8745,9 @@ static LRESULT CALLBACK IdEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_KEYDOWN) {
         if (wp == VK_RETURN) { InfoSave(); return 0; }
         if (wp == VK_ESCAPE) { InfoClose(); return 0; }
+        if (wp == 'A' && GetKeyState(VK_CONTROL) < 0) {
+            SendMessageW(h, EM_SETSEL, 0, -1); return 0;   // the reference's SelectAll chord
+        }
         if (wp == VK_TAB) {
             int i = 0;
             while (i < 5 && g_idEdits[i] != h) i++;
