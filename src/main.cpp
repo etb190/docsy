@@ -2739,10 +2739,17 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int hi = max(lo, g.cw - SplitHalf() - PaneMin());
             int nl = std::clamp((int)p.x, lo, hi);
             if (nl != g.splitX) {
-                int band0 = max(0, min(g.splitX, nl) - SBar() - SplitHalf());
-                int band1 = min(g.cw, max(g.splitX, nl) + SplitHalf() + SBar() + 1);
                 g.splitX = nl;
-                RECT u{ band0, 0, band1, g.ch };   // both thumbs hug the moving edges
+                // BOTH panes re-anchor to the line - pane B's origin is the
+                // line's x, pane A's card ends at it - so every pixel of both
+                // documents shifts with it. A band around the line alone would
+                // leave the rest of each pane at its last frame: the page
+                // reading twice, fragments stacked on fragments, one ghost per
+                // drag frame. The frame composite is cached-bitmap blits (no
+                // page decodes - GetBmp answers from the cache), so a full-view
+                // invalidate per move is the cheap part; KillerPDF's own drag
+                // relayouts both panes on every move the same way.
+                RECT u{ 0, 0, g.cw, g.ch };
                 InvalidateRect(h, &u, FALSE);
             }
             return 0;
@@ -4234,13 +4241,15 @@ static void RailRects(RECT r[RB_COUNT], int h) {   // 24px cells, 6px gaps, 6px 
 }
 
 // The green state: the feature a button toggles is on - the split, the
-// sidebar (KillerPDF lights a panel tab only while its sidebar shows it), the
-// info dialog. Pages and Info need a document; Split does not (KillerPDF's
-// split acts on the WINDOW - pane B simply opens on its start screen).
+// sidebar (KillerPDF lights a panel tab only while its sidebar shows it). The
+// info button never lights: KillerPDF's DocInfoRailBtn has no "on" trigger,
+// it is a momentary action, not a toggle. Pages needs a document; Split does
+// not (KillerPDF's split acts on the WINDOW - pane B simply opens on its start
+// screen).
 static bool RailOn(int id) {
     return id == RB_SPLIT ? g.split
          : id == RB_PAGES ? (g.sideOn && DVF().n)
-         : InfoIsOpen();
+         : false;
 }
 static bool RailEnabled(int id) {
     return id == RB_SPLIT ? true : (DVF().n > 0);
@@ -4285,31 +4294,23 @@ static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c) {
 static void RailDraw(HDC dc, int w, int h) {
     RECT r{ 0, 0, w, h };
     FillRect(dc, &r, GrainBrush(1));        // the shared field, so the rail reads as part
-    RECT seam{ w - max(1, (int)g.dpi), 0, w, h };   // of the one container wrapping the page
-    FillRect(dc, &seam, SplitLineBrush(false));
+                                            // of the one container wrapping the page. No
+                                            // seam of its own: KillerPDF's rail is the
+                                            // SidebarRailBrush field and nothing else - the
+                                            // card's #555 ring at the view's edge is the only
+                                            // line there, the same one every other boundary
+                                            // shows, and the page shadow paints over the field
+                                            // exactly like it does on the sidebar and footer.
     RECT bs[RB_COUNT]; RailRects(bs, h);
     for (int i = 0; i < RB_COUNT; i++) {
         bool en = RailEnabled(i), on = en && RailOn(i), hot = en && g.railHot == i;
-        if (hot) {                          // RowHover's tile under the cursor, darker held
-            Gdiplus::Graphics gs(dc);
-            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::GraphicsPath p;
-            float rr = (float)(3 * g.dpi);
-            float fx = (float)bs[i].left, fy = (float)bs[i].top;
-            float fw = (float)(bs[i].right - bs[i].left), fh = (float)(bs[i].bottom - bs[i].top);
-            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
-            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
-            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-            p.CloseFigure();
-            Gdiplus::SolidBrush b(g.railPressed ? Gdiplus::Color(255, 0x30, 0x30, 0x30)
-                                                : Gdiplus::Color(255, 0x40, 0x40, 0x40));
-            gs.FillPath(&b, &p);
-        }
-        COLORREF c = !en ? RGB(0x5a, 0x5a, 0x5a)               // no document: Pages/Info dim
-                   : on ? RGB(0x22, 0xbb, 0x56)                // the feature is on: the accent
-                   : hot ? RGB(0xe0, 0xe0, 0xe0)
-                   : RGB(0xa3, 0xa3, 0xa3);
+        // KillerPDF's RailPanelBtn template: the glyph IS the button - no face,
+        // no fill, no pressed tile. Rest TextBrush #e0e0e0, hover and lit
+        // PrimaryBrush #22bb56, disabled the glyph at 35% opacity (#e0e0e0
+        // blended at 0.35 over the field).
+        COLORREF c = !en ? RGB(0x4e, 0x4e, 0x4e)
+                   : (on || hot) ? RGB(0x22, 0xbb, 0x56)
+                   : RGB(0xe0, 0xe0, 0xe0);
         RailIcon(dc, i, bs[i], c);
     }
 }
@@ -4480,9 +4481,17 @@ static void ToggleSplit() {
         if (grow > 0)
             SetWindowPos(g.main, nullptr, 0, 0, (rc.right - rc.left) - grow, 0,
                          SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        bool wasB = !g.splitA;                // the focused pane at the moment of closing
         g.splitA = true;                      // the window-level surfaces read pane A again
-        for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-        sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.cw = 0; sd.ch = 0;
+        if (wasB && g.dB.path != g.d.path) {
+            // The sidebar described pane B's document: its thumbs, selection
+            // and scroll belong to that file and go with it. Closing a split
+            // whose panes share one document (or whose pane B is empty) keeps
+            // the sidebar exactly where it was - KillerPDF's close does not
+            // touch it either.
+            for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
+            sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.cw = 0; sd.ch = 0;
+        }
         SideLayout();
         UpdateTitle();
         StatusRepaint();
@@ -4663,150 +4672,398 @@ static bool PdfInfoRead(const std::wstring& path, PdfInfo& out) {
     return out.version.size() > 0;
 }
 
+// Save edited metadata into the PDF the way KillerPDF's save does - an
+// incremental update: the original bytes are never touched, the new /Info
+// object plus a fresh xref table and trailer are appended, and readers take
+// the newest section (a classic trailer after an xref-stream update is legal
+// mixing). The Info object keeps its existing number when the file has one -
+// the new xref entry overrides the old - otherwise it takes /Size and the
+// size grows by one. Strings go out as PDFDocEncoding literals when they are
+// ASCII and UTF-16BE hex strings when they are not, escaped per the spec.
+// A file whose trailer cannot be parsed, or an encrypted one (its strings
+// are ciphered), is refused with a message instead of being damaged.
+static bool PdfInfoWrite(const std::wstring& path, const PdfInfo& in, std::wstring& err) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) { err = L"The file could not be opened for writing."; return false; }
+    LARGE_INTEGER sz{};
+    GetFileSizeEx(f, &sz);
+    long long size = sz.QuadPart;
+    long long tailOff = max(0LL, size - 16384);
+    std::string tail((size_t)(size - tailOff), '\0');
+    DWORD got = 0;
+    SetFilePointer(f, (LONG)tailOff, nullptr, FILE_BEGIN);
+    if (!ReadFile(f, tail.data(), (DWORD)tail.size(), &got, nullptr)) {
+        CloseHandle(f);
+        err = L"The file could not be read.";
+        return false;
+    }
+    tail.resize(got);
+    if (tail.find("/Encrypt") != std::string::npos) {
+        CloseHandle(f);
+        err = L"Encrypted PDFs stay read-only here.";
+        return false;
+    }
+    // the keys the appended trailer must carry forward: /Root and /Size come
+    // from a classic trailer, or - in an xref-stream file - from the xref
+    // object the last startxref points at
+    auto numAfter = [&](const std::string& hay, size_t at) -> long long {
+        size_t p = at;
+        while (p < hay.size() && (hay[p] == ' ' || hay[p] == '\t' || hay[p] == '\r' || hay[p] == '\n')) p++;
+        return _atoi64(hay.c_str() + p);
+    };
+    size_t sx = tail.rfind("startxref");
+    if (sx == std::string::npos) { CloseHandle(f); err = L"This PDF's structure could not be updated."; return false; }
+    long long prev = numAfter(tail, sx + 9);
+    long long rootObj = -1, rootGen = 0, sizeVal = -1, infoObj = -1;
+    std::string td;                                       // trailer dict text, either flavor
+    size_t tr = tail.rfind("trailer");
+    if (tr != std::string::npos) td = tail.substr(tr, min(tail.size() - tr, (size_t)2048));
+    if (td.find("/Root") == std::string::npos && prev > 0 && prev < size) {
+        std::string xb(2048, '\0'); DWORD xr = 0;
+        SetFilePointer(f, (LONG)prev, nullptr, FILE_BEGIN);
+        if (ReadFile(f, xb.data(), (DWORD)xb.size(), &xr, nullptr)) {
+            xb.resize(xr);
+            size_t d = xb.find("<<");
+            if (d != std::string::npos) td = xb.substr(d, min(xb.size() - d, (size_t)2048));
+        }
+    }
+    CloseHandle(f);
+    size_t k = td.find("/Root");
+    if (k == std::string::npos) { err = L"This PDF's structure could not be updated."; return false; }
+    rootObj = numAfter(td, k + 5);
+    {   // the generation is the second integer of the reference
+        const char* q = td.c_str() + k + 5;
+        while (*q == ' ') q++;
+        while (*q >= '0' && *q <= '9') q++;
+        while (*q == ' ') q++;
+        rootGen = _atoi64(q);
+    }
+    k = td.find("/Size");
+    if (k != std::string::npos) sizeVal = numAfter(td, k + 5);
+    k = td.find("/Info");
+    if (k != std::string::npos) infoObj = numAfter(td, k + 5);
+    if (rootObj <= 0 || rootObj > 99999999 || sizeVal <= 0 || sizeVal > 99999999) {
+        err = L"This PDF's structure could not be updated.";
+        return false;
+    }
+    long long obj = infoObj > 0 ? infoObj : sizeVal;
+    long long newSize = infoObj > 0 ? sizeVal : sizeVal + 1;
+    // the strings: ASCII (with escapes) as a literal, anything else UTF-16BE hex
+    auto pdfstr = [](const std::wstring& s) -> std::string {
+        bool ascii = true;
+        for (wchar_t c : s) if (c < 32 || c > 126) { ascii = false; break; }
+        std::string out;
+        if (ascii) {
+            out += '(';
+            for (wchar_t c : s) {
+                if (c == L'(' || c == L')' || c == L'\\') out += '\\';
+                if (c == L'\r') { out += "\\r"; continue; }
+                if (c == L'\n') { out += "\\n"; continue; }
+                out += (char)c;
+            }
+            out += ')';
+            return out;
+        }
+        out += "<FEFF";
+        const char* hx = "0123456789ABCDEF";
+        for (wchar_t c : s) {
+            out += hx[(c >> 12) & 15]; out += hx[(c >> 8) & 15];
+            out += hx[(c >> 4) & 15];  out += hx[c & 15];
+        }
+        out += '>';
+        return out;
+    };
+    std::string body = "\r\n";
+    long long objOff = size + (long long)body.size();
+    body += std::to_string(obj) + " 0 obj\n<< ";
+    auto add = [&](const char* key, const std::wstring& v) {
+        if (!v.empty()) body += std::string(key) + " " + pdfstr(v) + " ";
+    };
+    add("/Title", in.title);       add("/Author", in.author);
+    add("/Subject", in.subject);   add("/Keywords", in.keywords);
+    add("/Creator", in.creator);   add("/Producer", in.producer);
+    body += ">>\nendobj\r\n";
+    long long xrefOff = objOff + (long long)body.size() - 2;
+    char ent[32];
+    snprintf(ent, sizeof ent, "%010lld 00000 n \n", objOff);
+    body += std::string("xref\n") + std::to_string(obj) + " 1\n" + ent;
+    body += "trailer\n<< /Size " + std::to_string(newSize) +
+            " /Root " + std::to_string(rootObj) + " " + std::to_string(rootGen) + " R" +
+            " /Info " + std::to_string(obj) + " 0 R";
+    if (prev > 0 && prev < size) body += " /Prev " + std::to_string(prev);
+    body += " >>\nstartxref\n" + std::to_string(xrefOff) + "\n%%EOF\n";
+    HANDLE w = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (w == INVALID_HANDLE_VALUE) {
+        err = L"The file could not be opened for writing.";
+        return false;
+    }
+    SetFilePointer(w, (LONG)size, nullptr, FILE_BEGIN);
+    DWORD wrote = 0;
+    bool ok = WriteFile(w, body.data(), (DWORD)body.size(), &wrote, nullptr) && wrote == body.size();
+    CloseHandle(w);
+    if (!ok) { err = L"The file could not be written."; return false; }
+    // verify by reading back, so "saved" never lies
+    PdfInfo back;
+    PdfInfoRead(path, back);
+    if (back.title != in.title || back.author != in.author || back.subject != in.subject ||
+        back.keywords != in.keywords || back.creator != in.creator) {
+        err = L"The update could not be verified.";
+        return false;
+    }
+    return true;
+}
+
 // ---- the dialog itself ----
+// KillerPDF's DocumentInfoDialog, in docsy's chrome. The reference's shape:
+// a 460-wide window sized to its content, a caption that DRAGS the window,
+// five EDITABLE fields (Title / Author / Subject / Keywords / Creator - real
+// text boxes with a caret and a selection, Keywords wrapping like the
+// reference's wrap:true field), the mono summary block (Producer when the
+// file has one, Pages, the PDF version off the header, the file's KB) and a
+// right-aligned Cancel / Save pair - Esc cancels, Enter saves. The window is
+// owned, not app-modal: the main window stays live, a click anywhere outside
+// the dialog dismisses it (the reference's dialog is draggable chrome; the
+// click-outside dismissal is the popup contract this port follows), and Save
+// writes the metadata into the PDF itself - the reference applies the edit
+// to the file, so the words must survive the dialog.
 struct InfoDlg {
-    std::wstring title = L"-", author = L"-", subject = L"-", keywords = L"-",
-                 creator = L"-", producer = L"-", ver;
+    std::wstring title, author, subject, keywords, creator, producer, ver;
     long long bytes = 0;
     int pages = 0;
-    int hot = -1;                        // hovered control: 0 the Close button, 1 the caption close
-    bool pressed = false;
+    int hot = -1;                        // hovered control: 0 Cancel, 1 Save, 2 the caption close
 };
 static InfoDlg g_idlg;
 static HWND g_infoDlg = nullptr;
+static HWND g_idEdits[5] = {};       // the five live fields (nullptr in the CI shot host)
 static bool g_idlgShots = false;     // the CI shot renders the dialog's paint without the
-                                     // modal window - one paint path, two hosts
+                                     // live window - one paint path, two hosts
 
 static bool InfoIsOpen() { return g_infoDlg != nullptr; }
 
 static HFONT g_idCap = nullptr, g_idLab = nullptr, g_idVal = nullptr, g_idMono = nullptr;
 static HFONT IdCapFont()  { return CaptionFont(g_idCap, 14, false, L"Killer Sans"); }
-static HFONT IdLabFont()  { return CaptionFont(g_idLab, 10, false, L"Killer Sans UI"); }
+static HFONT IdLabFont()  { return CaptionFont(g_idLab, 11, false, L"Killer Sans UI"); }
 static HFONT IdValFont()  { return CaptionFont(g_idVal, 12, false, L"Killer Sans UI"); }
 static HFONT IdMonoFont() { return CaptionFont(g_idMono, 11, false, L"Consolas"); }
 
 static int IdW() { return (int)(460 * g.dpi); }          // KillerPDF's Width=460
+static int IdCapH() { return (int)(32 * g.dpi); }
 
 // the dialog's natural height from its own metrics, so SizeToContent.Height's
 // behavior is arithmetic, not a magic number
 static int IdFieldH(int i) { return (int)((i == 3 ? 44 : 26) * g.dpi); }   // Keywords wraps
 static int IdH() {
-    int pad = (int)(20 * g.dpi), labH = (int)(14 * g.dpi), gap = (int)(8 * g.dpi);
+    int labH = (int)(14 * g.dpi), gap = (int)(8 * g.dpi);
     int fields = 0;
-    for (int i = 0; i < 5; i++) fields += labH + IdFieldH(i) + gap;
-    int sumH = (int)(15 * g.dpi) * 4 + (int)(12 * g.dpi);
+    for (int i = 0; i < 5; i++) fields += labH + (int)(2 * g.dpi) + IdFieldH(i) + gap;
+    int sumH = (int)(15 * g.dpi) * 4;
     int btnH = (int)(28 * g.dpi);
-    int capH = (int)(32 * g.dpi);
-    return capH + pad + fields + sumH + (int)(16 * g.dpi) + btnH + (int)(16 * g.dpi);
+    return IdCapH() + (int)(6 * g.dpi) + fields + (int)(12 * g.dpi) + sumH +
+           (int)(16 * g.dpi) + btnH + (int)(16 * g.dpi);
 }
 
-// The Close button's rect, in dialog client coords - shared by the paint, the
-// hit test and the shot seed.
-static RECT IdCloseRect(int w, int h) {
-    int bw = (int)(84 * g.dpi), bh = (int)(28 * g.dpi);
-    return { w - (int)(20 * g.dpi) - bw, h - (int)(16 * g.dpi) - bh, w - (int)(20 * g.dpi), h - (int)(16 * g.dpi) };
+// Each field's label and box rect, in dialog client coords - shared by the
+// paint, the edit placement and the shot seed. KillerPDF's stack: GroupLabel
+// (11px, 2px under), the field, 8px after.
+static void IdFieldRect(int i, int w, RECT& lab, RECT& box) {
+    int pad = (int)(20 * g.dpi);
+    int y = IdCapH() + (int)(6 * g.dpi);
+    for (int k = 0; k < i; k++)
+        y += (int)(14 * g.dpi) + (int)(2 * g.dpi) + IdFieldH(k) + (int)(8 * g.dpi);
+    lab = { pad, y, w - pad, y + (int)(14 * g.dpi) };
+    box = { pad, y + (int)(14 * g.dpi) + (int)(2 * g.dpi), w - pad,
+            y + (int)(14 * g.dpi) + (int)(2 * g.dpi) + IdFieldH(i) };
+}
+
+// The button pair, right-aligned with an 8px gap (UiKit.ButtonRow): which 0 =
+// Cancel, 1 = Save (the accent, rightmost - the reference's IsDefault).
+static RECT IdBtnRect(int which, int w, int h) {
+    int saveW = (int)(64 * g.dpi), cancelW = (int)(84 * g.dpi), bh = (int)(28 * g.dpi);
+    int right = w - (int)(20 * g.dpi) - (which ? 0 : saveW + (int)(8 * g.dpi));
+    return { right - (which ? saveW : cancelW), h - (int)(16 * g.dpi) - bh,
+             right, h - (int)(16 * g.dpi) };
 }
 
 // One paint, two hosts: the live dialog's WM_PAINT and the CI shot composite.
+// The field boxes are painted here; the text inside them belongs to the live
+// EDIT children - values are drawn only when there are no edits (the shot
+// host), so the two never double-render a string.
 static void InfoDialogDraw(HDC dc, int w, int h) {
-    int capH = (int)(32 * g.dpi);
-    // the caption row: the main chrome's field with the title and the close glyph
-    {
-        RECT cr{ 0, 0, w, capH };
-        FillRect(dc, &cr, GrainBrush(2));
-        SetBkMode(dc, TRANSPARENT);
-        SelectObject(dc, IdCapFont());
-        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-        RECT tr{ (int)(12 * g.dpi), 0, w - (int)(44 * g.dpi), capH };
-        DrawTextW(dc, L"Docsy - Document Info", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        int bs = (int)(44 * g.dpi);
-        RECT xr{ w - bs, 0, w, capH };
-        if (g_idlg.hot == 1) { RECT hr{ xr.left, 0, xr.right, capH }; FillRect(dc, &hr, RowHoverBrush()); }
-        SelectObject(dc, StGlyph());
-        SetTextColor(dc, g_idlg.hot == 1 ? RGB(0xff, 0x67, 0x67) : RGB(0xa3, 0xa3, 0xa3));
-        DrawTextW(dc, L"\xE8BB", -1, &xr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    // the body field: the shared grain, the dialog panel language of the flyout
+    int capH = IdCapH();
+    // the caption row: DialogFrame's bar - the wordmark, the qualifier, the
+    // red-hovered close. The whole bar drags the window (WM_NCHITTEST below).
+    RECT cr{ 0, 0, w, capH };
+    FillRect(dc, &cr, GrainBrush(2));
+    SetBkMode(dc, TRANSPARENT);
+    SelectObject(dc, IdCapFont());
+    RECT tr{ (int)(12 * g.dpi), 0, w - (int)(44 * g.dpi), capH };
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, L"Docsy", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SIZE ts{};
+    GetTextExtentPoint32W(dc, L"Docsy", 5, &ts);
+    RECT qr{ tr.left + ts.cx + (int)(4 * g.dpi), tr.top, tr.right, tr.bottom };
+    SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+    DrawTextW(dc, L"- Document Info", -1, &qr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    int bs = (int)(44 * g.dpi);
+    RECT xr{ w - bs, 0, w, capH };
+    if (g_idlg.hot == 2) { RECT hr{ xr.left, 0, xr.right, capH }; FillRect(dc, &hr, RowHoverBrush()); }
+    SelectObject(dc, StGlyph());
+    SetTextColor(dc, g_idlg.hot == 2 ? RGB(0xff, 0x67, 0x67) : RGB(0xa3, 0xa3, 0xa3));
+    DrawTextW(dc, L"\xE8BB", -1, &xr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // the body field: the shared grain
     RECT body{ 0, capH, w, h };
     FillRect(dc, &body, GrainBrush(1));
-    int pad = (int)(20 * g.dpi);
-    int labH = (int)(14 * g.dpi), gap = (int)(8 * g.dpi);
     SetBkMode(dc, TRANSPARENT);
-    struct Row { const wchar_t* lab; const std::wstring* val; };
-    const Row rows[5] = {
-        { L"Title",    &g_idlg.title },    { L"Author",   &g_idlg.author },
-        { L"Subject",  &g_idlg.subject },  { L"Keywords", &g_idlg.keywords },
-        { L"Creator",  &g_idlg.creator },
+    const wchar_t* labels[5] = { L"Title", L"Author", L"Subject", L"Keywords", L"Creator" };
+    const std::wstring* vals[5] = { &g_idlg.title, &g_idlg.author, &g_idlg.subject,
+                                    &g_idlg.keywords, &g_idlg.creator };
+    bool live = g_infoDlg != nullptr;
+    // the field boxes: KillerPDF's UiKit.Field - TextFieldBrush #101010 inside
+    // a 1px #4a4a4a CardBorder, radius 4
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    auto boxPath = [&](const RECT& rc) {
+        float rr = (float)(4 * g.dpi);
+        float fx = (float)rc.left, fy = (float)rc.top;
+        float fw = (float)(rc.right - rc.left), fh = (float)(rc.bottom - rc.top);
+        Gdiplus::GraphicsPath* pth = new Gdiplus::GraphicsPath();
+        pth->AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+        pth->AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+        pth->AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+        pth->AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+        pth->CloseFigure();
+        return pth;
     };
-    int y = capH + (int)(12 * g.dpi);
-    int vx = pad + (int)(4 * g.dpi);
+    int lastBoxBottom = 0;
     for (int i = 0; i < 5; i++) {
+        RECT lab, box;
+        IdFieldRect(i, w, lab, box);
+        lastBoxBottom = box.bottom;
         SelectObject(dc, IdLabFont());
         SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
-        RECT lr{ vx, y, w - pad, y + labH };
-        DrawTextW(dc, rows[i].lab, -1, &lr, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-        y += labH;
-        // the value box: the query edit's chrome (#1c1c1c, the ring gray), a
-        // read-only field
-        RECT vr{ vx, y, w - pad, y + IdFieldH(i) - (int)(2 * g.dpi) };
-        static HBRUSH box = CreateSolidBrush(RGB(0x1c, 0x1c, 0x1c));
-        FillRect(dc, &vr, box);
-        FrameRect(dc, &vr, SplitLineBrush(false));
-        SetBkColor(dc, RGB(0x1c, 0x1c, 0x1c));
-        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-        SelectObject(dc, IdValFont());
-        DrawTextW(dc, rows[i].val->c_str(), -1, &vr,
-                  DT_LEFT | (i == 3 ? DT_WORDBREAK | DT_EDITCONTROL : DT_VCENTER | DT_SINGLELINE) | DT_END_ELLIPSIS);
-        y += IdFieldH(i) + gap;
+        DrawTextW(dc, labels[i], -1, &lab, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        Gdiplus::GraphicsPath* pth = boxPath(box);
+        Gdiplus::SolidBrush fill(Gdiplus::Color(255, 0x10, 0x10, 0x10));
+        gs.FillPath(&fill, pth);
+        Gdiplus::Pen edge(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+        gs.DrawPath(&edge, pth);
+        delete pth;
+        if (!live) {                       // the shot host speaks for the edits
+            RECT vr{ box.left + (int)(6 * g.dpi), box.top + (int)(2 * g.dpi),
+                     box.right - (int)(6 * g.dpi), box.bottom - (int)(2 * g.dpi) };
+            SelectObject(dc, IdValFont());
+            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+            SetBkColor(dc, RGB(0x10, 0x10, 0x10));
+            DrawTextW(dc, vals[i]->c_str(), -1, &vr,
+                      DT_LEFT | (i == 3 ? DT_WORDBREAK | DT_EDITCONTROL : DT_VCENTER | DT_SINGLELINE) | DT_END_ELLIPSIS);
+            SetBkMode(dc, TRANSPARENT);
+        }
     }
     // the summary block, mono and muted - KillerPDF's BuildSummary
     std::wstring sum;
-    if (!g_idlg.producer.empty() && g_idlg.producer != L"-") sum += L"Producer: " + g_idlg.producer + L"\n";
+    if (!g_idlg.producer.empty()) sum += L"Producer: " + g_idlg.producer + L"\n";
     sum += L"Pages: " + std::to_wstring(g_idlg.pages) + L"\n";
     sum += L"PDF " + (g_idlg.ver.empty() ? std::wstring(L"1.?") : g_idlg.ver) + L"\n";
     wchar_t kb[40];
     if (g_idlg.bytes >= 1LL << 20) swprintf_s(kb, L"%.0f KB", g_idlg.bytes / 1024.0);
     else swprintf_s(kb, L"%lld KB", g_idlg.bytes / 1024);
     sum += kb;
+    int sy = lastBoxBottom + (int)(12 * g.dpi);
     SelectObject(dc, IdMonoFont());
     SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
-    RECT sr{ vx, y, w - pad, y + (int)(15 * g.dpi) * 4 + (int)(12 * g.dpi) };
+    RECT sr{ (int)(24 * g.dpi), sy, w - (int)(20 * g.dpi), sy + (int)(15 * g.dpi) * 4 };
     DrawTextW(dc, sum.c_str(), -1, &sr, DT_LEFT | DT_WORDBREAK | DT_EDITCONTROL);
-    // the Close button: the accent pill, hover fills green (KillerPDF's accent pair,
-    // minus the Save that has nothing to save in a reader)
-    RECT br = IdCloseRect(w, h);
-    Gdiplus::Graphics gs(dc);
-    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    float rr = (float)(4 * g.dpi);
-    Gdiplus::GraphicsPath pth;
-    float fx = (float)br.left, fy = (float)br.top;
-    float fw = (float)(br.right - br.left), fh = (float)(br.bottom - br.top);
-    pth.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
-    pth.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
-    pth.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-    pth.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-    pth.CloseFigure();
-    if (g_idlg.hot == 0) {
-        Gdiplus::SolidBrush gb(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
-        gs.FillPath(&gb, &pth);
-    } else {
-        Gdiplus::Pen pb(Gdiplus::Color(255, 0x22, 0xbb, 0x56), (float)max(1.0, g.dpi));
-        gs.DrawPath(&pb, &pth);
+    // the pair, right-aligned: Cancel the secondary, Save the accent -
+    // hollow in the accent at rest, filled with it on hover
+    for (int wh = 0; wh < 2; wh++) {
+        RECT br = IdBtnRect(wh, w, h);
+        bool accent = wh == 1, hot = g_idlg.hot == wh;
+        Gdiplus::GraphicsPath* pth = boxPath(br);
+        if (accent && hot) {
+            Gdiplus::SolidBrush gb(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+            gs.FillPath(&gb, pth);
+        } else if (accent) {
+            Gdiplus::Pen pb(Gdiplus::Color(255, 0x22, 0xbb, 0x56), (float)max(1.0, g.dpi));
+            gs.DrawPath(&pb, pth);
+        } else if (hot) {
+            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            gs.FillPath(&hb, pth);
+            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            gs.DrawPath(&pb, pth);
+        } else {
+            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            gs.DrawPath(&pb, pth);
+        }
+        delete pth;
+        SetTextColor(dc, accent ? (hot ? RGB(0x05, 0x24, 0x0f) : RGB(0x22, 0xbb, 0x56))
+                                : RGB(0xe0, 0xe0, 0xe0));
+        SelectObject(dc, IdValFont());
+        DrawTextW(dc, accent ? L"Save" : L"Cancel", -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    SetTextColor(dc, g_idlg.hot == 0 ? RGB(0x05, 0x24, 0x0f) : RGB(0x22, 0xbb, 0x56));
-    SelectObject(dc, IdLabFont());
-    DrawTextW(dc, L"Close", -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 static void InfoClose() {
     if (!g_infoDlg) return;
     HWND d = g_infoDlg;
     g_infoDlg = nullptr;
-    EnableWindow(g.main, TRUE);
+    for (HWND& e : g_idEdits) e = nullptr;
     DestroyWindow(d);
     RailRepaint();
-    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
     if (g.main) SetFocus(g.main);            // the keys go home with the dialog gone
+}
+
+// Save: gather the five fields and apply them the way KillerPDF's save does -
+// the metadata goes into the file itself (an incremental update; the original
+// bytes stay untouched). A failure reports in the footer and leaves the
+// dialog open over an unchanged file.
+static void InfoSave() {
+    if (!g_infoDlg) return;
+    DocState& D = DVF();
+    if (!D.n) { InfoClose(); return; }
+    wchar_t buf[4096]{};
+    auto grab = [&](int i) {
+        if (!g_idEdits[i]) return i == 0 ? g_idlg.title : i == 1 ? g_idlg.author
+                              : i == 2 ? g_idlg.subject : i == 3 ? g_idlg.keywords : g_idlg.creator;
+        GetWindowTextW(g_idEdits[i], buf, 4096);
+        return std::wstring(buf);
+    };
+    PdfInfo meta;
+    meta.title = grab(0);       meta.author = grab(1);
+    meta.subject = grab(2);     meta.keywords = grab(3);
+    meta.creator = grab(4);
+    meta.producer = g_idlg.producer;         // the producer rides through unchanged
+    meta.version = g_idlg.ver;
+    std::wstring err;
+    if (PdfInfoWrite(D.path, meta, err)) {
+        InfoClose();
+        SetStatusHold(L"Document Info updated.");
+    } else {
+        SetStatusHold(err.c_str());
+    }
+}
+
+// The fields' keys: Enter saves, Esc cancels, Tab walks the five boxes -
+// the reference's IsDefault / IsCancel / tab order, which a plain EDIT child
+// would otherwise swallow.
+static LRESULT CALLBACK IdEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    WNDPROC orig = (WNDPROC)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (m == WM_KEYDOWN) {
+        if (wp == VK_RETURN) { InfoSave(); return 0; }
+        if (wp == VK_ESCAPE) { InfoClose(); return 0; }
+        if (wp == VK_TAB) {
+            int i = 0;
+            while (i < 5 && g_idEdits[i] != h) i++;
+            bool back = GetKeyState(VK_SHIFT) < 0;
+            for (int step = 0; step < 5; step++) {
+                i = (i + (back ? -1 : 1) + 5) % 5;
+                if (g_idEdits[i]) { SetFocus(g_idEdits[i]); break; }
+            }
+            return 0;
+        }
+    }
+    return orig ? CallWindowProcW(orig, h, m, wp, lp) : DefWindowProcW(h, m, wp, lp);
 }
 
 static void InfoOpen() {
@@ -4819,19 +5076,21 @@ static void InfoOpen() {
     PdfInfo pi;
     g_idlg = InfoDlg{};
     PdfInfoRead(D.path, pi);
-    g_idlg.title = pi.title.empty() ? L"-" : pi.title;
-    g_idlg.author = pi.author.empty() ? L"-" : pi.author;
-    g_idlg.subject = pi.subject.empty() ? L"-" : pi.subject;
-    g_idlg.keywords = pi.keywords.empty() ? L"-" : pi.keywords;
-    g_idlg.creator = pi.creator.empty() ? L"-" : pi.creator;
-    g_idlg.producer = pi.producer.empty() ? L"-" : pi.producer;
+    g_idlg.title = pi.title;                 // raw values: the reference shows what the
+    g_idlg.author = pi.author;               // dictionary holds, and empty stays empty
+    g_idlg.subject = pi.subject;
+    g_idlg.keywords = pi.keywords;
+    g_idlg.creator = pi.creator;
+    g_idlg.producer = pi.producer;
     g_idlg.ver = pi.version;
     g_idlg.pages = D.n;
     WIN32_FILE_ATTRIBUTE_DATA fa;
     g_idlg.bytes = GetFileAttributesExW(D.path.c_str(), GetFileExInfoStandard, &fa)
                  ? (long long)(((long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) : 0;
-    // a borderless owned popup: the main chrome's language at dialog scale, the
-    // owner disabled while it shows - the modal the reference runs
+    // a borderless OWNED popup at the reference's Width=460: the main window
+    // stays live - NOT app-modal - and a click outside dismisses the dialog
+    // without saving (the popup contract; the reference's own dialog is
+    // dragged by its caption and answered with Cancel or Save)
     int w = IdW(), h = IdH();
     RECT mr{}; GetWindowRect(g.main, &mr);
     int x = mr.left + max(0, (int)((mr.right - mr.left) - w) / 2);
@@ -4840,10 +5099,32 @@ static void InfoOpen() {
                                 WS_POPUP | WS_CLIPCHILDREN, x, y, w, h,
                                 g.main, nullptr, g.hinst, nullptr);
     if (!g_infoDlg) return;
-    EnableWindow(g.main, FALSE);
+    // the five live fields, KillerPDF's UiKit.Field as a child EDIT: 12px
+    // Killer Sans UI on #101010 (WM_CTLCOLOREDIT below), the reference's
+    // 6,4 padding via the edit margins. Keywords is the wrap:true field:
+    // multiline so long lists wrap, and Enter is never a newline - it saves.
+    std::wstring init[5] = { pi.title, pi.author, pi.subject, pi.keywords, pi.creator };
+    for (int i = 0; i < 5; i++) {
+        RECT lab, box;
+        IdFieldRect(i, w, lab, box);
+        DWORD es = WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT |
+                   (i == 3 ? ES_MULTILINE : ES_AUTOHSCROLL);
+        g_idEdits[i] = CreateWindowExW(0, L"EDIT", nullptr, es,
+            box.left + 2, box.top + 2, box.right - box.left - 4, box.bottom - box.top - 4,
+            g_infoDlg, (HMENU)(intptr_t)(100 + i), g.hinst, nullptr);
+        if (g_idEdits[i]) {
+            SetWindowLongPtrW(g_idEdits[i], GWLP_USERDATA,
+                              GetWindowLongPtrW(g_idEdits[i], GWLP_WNDPROC));
+            SetWindowLongPtrW(g_idEdits[i], GWLP_WNDPROC, (LONG_PTR)IdEditProc);
+            SendMessageW(g_idEdits[i], WM_SETFONT, (WPARAM)IdValFont(), FALSE);
+            SendMessageW(g_idEdits[i], EM_SETMARGIN, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                         MAKELPARAM((int)(4 * g.dpi), (int)(4 * g.dpi)));
+            SetWindowTextW(g_idEdits[i], init[i].c_str());
+        }
+    }
     DwmApply(g_infoDlg);
     ShowWindow(g_infoDlg, SW_SHOWNORMAL);
-    SetFocus(g_infoDlg);
+    if (g_idEdits[0]) SetFocus(g_idEdits[0]);   // the reference: Loaded focuses _title
     RailRepaint();
 }
 
@@ -4859,18 +5140,41 @@ static LRESULT CALLBACK InfoDlgProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         EndPaint(h, &ps);
         return 0;
     }
-    case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) { InfoClose(); return 0; }
-        if (wp == VK_RETURN) { InfoClose(); return 0; }   // no Save to confirm: Enter closes too
+    case WM_ACTIVATE:
+        // the popup contract: a click anywhere outside the dialog - the main
+        // window, another app, the taskbar - dismisses it the way KillerPDF's
+        // flyouts close on deactivation. Cancel semantics: what was typed is
+        // simply not saved.
+        if (LOWORD(wp) == WA_INACTIVE && g_infoDlg == h) InfoClose();
         return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { InfoClose(); return 0; }   // IsCancel
+        if (wp == VK_RETURN) { InfoSave(); return 0; }    // IsDefault
+        return 0;
+    case WM_CTLCOLOREDIT: {               // UiKit.Field: the text #e0e0e0 on #101010
+        HDC dc = (HDC)wp;
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        SetBkColor(dc, RGB(0x10, 0x10, 0x10));
+        static HBRUSH b = CreateSolidBrush(RGB(0x10, 0x10, 0x10));
+        return (LRESULT)b;
+    }
+    case WM_NCHITTEST: {
+        // the caption DRAGS the window (DialogFrame's DragMove); the close
+        // zone stays client so its click is ours
+        POINT s{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        POINT c = s; ScreenToClient(h, &c);
+        RECT r; GetClientRect(h, &r);
+        if (c.y >= 0 && c.y < IdCapH() && c.x < r.right - (int)(44 * g.dpi)) return HTCAPTION;
+        break;
+    }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
-        RECT br = IdCloseRect(r.right, r.bottom);
-        int capH = (int)(32 * g.dpi);
+        RECT b0 = IdBtnRect(0, r.right, r.bottom), b1 = IdBtnRect(1, r.right, r.bottom);
         int hot = -1;
-        if (PtInRect(&br, p)) hot = 0;
-        else if (p.y < capH && p.x >= r.right - (int)(44 * g.dpi)) hot = 1;
+        if (PtInRect(&b1, p)) hot = 1;
+        else if (PtInRect(&b0, p)) hot = 0;
+        else if (p.y < IdCapH() && p.x >= r.right - (int)(44 * g.dpi)) hot = 2;
         if (hot != g_idlg.hot) {
             g_idlg.hot = hot;
             if (hot >= 0) TrackLeave(h);
@@ -4884,21 +5188,22 @@ static LRESULT CALLBACK InfoDlgProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
-        RECT br = IdCloseRect(r.right, r.bottom);
-        int capH = (int)(32 * g.dpi);
-        if (PtInRect(&br, p) && g_idlg.hot == 0) { InfoClose(); return 0; }
-        if (p.y < capH && p.x >= r.right - (int)(44 * g.dpi) && g_idlg.hot == 1) { InfoClose(); return 0; }
+        RECT b0 = IdBtnRect(0, r.right, r.bottom), b1 = IdBtnRect(1, r.right, r.bottom);
+        if (PtInRect(&b0, p) && g_idlg.hot == 0) { InfoClose(); return 0; }   // Cancel
+        if (PtInRect(&b1, p) && g_idlg.hot == 1) { InfoSave(); return 0; }    // Save
+        if (p.y < IdCapH() && p.x >= r.right - (int)(44 * g.dpi) && g_idlg.hot == 2) InfoClose();
         return 0;
     }
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             RECT r; GetClientRect(h, &r);
-            RECT br = IdCloseRect(r.right, r.bottom);
-            int capH = (int)(32 * g.dpi);
-            if (PtInRect(&br, p) || (p.y < capH && p.x >= r.right - (int)(44 * g.dpi))) {
+            RECT b0 = IdBtnRect(0, r.right, r.bottom), b1 = IdBtnRect(1, r.right, r.bottom);
+            if (PtInRect(&b0, p) || PtInRect(&b1, p) ||
+                (p.y < IdCapH() && p.x >= r.right - (int)(44 * g.dpi))) {
                 SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE;
             }
+            if (p.y < IdCapH()) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
         }
         break;
     case WM_CLOSE:
@@ -4914,6 +5219,23 @@ static void LayoutMain() {
     if (!g.main || !g.view) return;
     RECT r; GetClientRect(g.main, &r);
     int w = r.right, h = r.bottom;
+    // The children's OLD rects, captured before the moves. When a child moves
+    // or shrinks, the pixels it vacates are NOT repainted by anyone: the
+    // window system hands them to whichever sibling now covers them, but that
+    // sibling's own rect did not change, so it never repaints - the rail's
+    // last frame then lives on as ghost buttons stacked over the sidebar, and
+    // a resized sidebar's stale edge reads as a border that belongs to no one.
+    // After the moves, every vacated strip is handed to the sibling that now
+    // owns it (the parent for whatever no child covers). The strips are thin
+    // bands - a layout pass moves edges, never documents - so this stays a
+    // few InvalidateRects, not a repaint.
+    struct Kid { HWND w; RECT was; } kids[5] = { { g.bar, {} }, { g.side, {} }, { g.rail, {} }, { g.view, {} }, { g.status, {} } };
+    for (auto& k : kids)
+        if (k.w) {
+            GetWindowRect(k.w, &k.was);
+            ScreenToClient(g.main, (POINT*)&k.was);
+            ScreenToClient(g.main, ((POINT*)&k.was) + 1);
+        }
     int sw = (g.sideOn && DVF().n && !g.full) ? SW() : 0;   // the sidebar shows the FOCUSED
     int rw = RW();                              // pane's pages; the rail always rides between
     int cap = CAP();
@@ -4935,6 +5257,39 @@ static void LayoutMain() {
     }
     MoveWindow(g.view, sw + rw, cap + tb, max(0, w - sw - rw), ch, TRUE);
     if (g.status) MoveWindow(g.status, 0, cap + tb + ch, w, sh, TRUE);
+    // Hand the vacated strips out. A moved child leaves up to four strips
+    // (old ∖ new); each is intersected with every sibling's NEW rect - that
+    // sibling repaints it in its own coords - and the parent mops up whatever
+    // no child covers (WS_CLIPCHILDREN limits that paint to the exposed area,
+    // so it is the grain fill and nothing else).
+    for (auto& k : kids) {
+        if (!k.w) continue;
+        RECT now; GetWindowRect(k.w, &now); ScreenToClient(g.main, (POINT*)&now);
+        ScreenToClient(g.main, ((POINT*)&now) + 1);
+        if (EqualRect(&k.was, &now)) continue;
+        RECT vac[4]; int nv = 0;
+        if (now.left > k.was.left)
+            vac[nv++] = { k.was.left, k.was.top, min(now.left, k.was.right), k.was.bottom };
+        if (now.right < k.was.right)
+            vac[nv++] = { max(now.right, k.was.left), k.was.top, k.was.right, k.was.bottom };
+        if (now.top > k.was.top)
+            vac[nv++] = { max(k.was.left, now.left), k.was.top,
+                          min(k.was.right, now.right), min(now.top, k.was.bottom) };
+        if (now.bottom < k.was.bottom)
+            vac[nv++] = { max(k.was.left, now.left), max(now.bottom, k.was.top),
+                          min(k.was.right, now.right), k.was.bottom };
+        for (int i = 0; i < nv; i++) {
+            // route the strip: every sibling whose CURRENT rect covers part of it
+            RECT is;
+            for (auto& o : kids) {
+                if (!o.w || o.w == k.w) continue;
+                RECT o2; GetWindowRect(o.w, &o2); ScreenToClient(g.main, (POINT*)&o2);
+                ScreenToClient(g.main, ((POINT*)&o2) + 1);
+                if (IntersectRect(&is, &vac[i], &o2)) InvalidateRect(o.w, &is, FALSE);
+            }
+            InvalidateRect(g.main, &vac[i], FALSE);   // the exposed remainder, if any
+        }
+    }
     if (g_fedit && fd.open) FindPlace();        // the edit tracks the focused card's top-right corner
     RECT vr; GetClientRect(g.view, &vr);
     g.cw = vr.right; g.ch = vr.bottom;
@@ -5520,12 +5875,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 PdfInfo pi;
                 PdfInfoRead(DVF().path, pi);
                 g_idlg = InfoDlg{};
-                g_idlg.title = pi.title.empty() ? L"-" : pi.title;
-                g_idlg.author = pi.author.empty() ? L"-" : pi.author;
-                g_idlg.subject = pi.subject.empty() ? L"-" : pi.subject;
-                g_idlg.keywords = pi.keywords.empty() ? L"-" : pi.keywords;
-                g_idlg.creator = pi.creator.empty() ? L"-" : pi.creator;
-                g_idlg.producer = pi.producer.empty() ? L"-" : pi.producer;
+                g_idlg.title = pi.title;      // raw values, like the live dialog
+                g_idlg.author = pi.author;
+                g_idlg.subject = pi.subject;
+                g_idlg.keywords = pi.keywords;
+                g_idlg.creator = pi.creator;
+                g_idlg.producer = pi.producer;
                 g_idlg.ver = pi.version;
                 g_idlg.pages = DVF().n;
                 WIN32_FILE_ATTRIBUTE_DATA fa;
