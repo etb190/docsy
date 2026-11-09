@@ -211,7 +211,7 @@ struct DocState {
     // and the current tool remain independent between panes"), so each pane
     // draws with the tool the reader left IT on
     std::unordered_map<int, std::vector<Annot>> annos;
-    int tool = 0;                       // TOOL_SELECT .. TOOL_DRAW (the rail's top stack)
+    int tool = 0;                       // TOOL_SELECT .. TOOL_DRAW (the toolbar's tool buttons)
 };
 enum { TOOL_SELECT, TOOL_TEXT, TOOL_HIGHLIGHT, TOOL_LINE, TOOL_SHAPE, TOOL_DRAW, TOOL_COUNT };
 
@@ -239,8 +239,8 @@ struct App {
     int osFrame = 0;                    // OS side-border width from WM_NCCALCSIZE (the top resize grip)
     int capHot = -1;                    // hovered caption button: 0 min, 1 max, 2 close, -1 none
     bool capPressed = false;            // the maximize button held down (non-client, SnapLayouts-style)
-    int tbHot = -1;                     // hovered toolbar button: 0 the Find Text button, -1 none
-    bool tbPressed = false;             // the Find Text button held down (capture-held, WPF's IsPressed)
+    int tbHot = -1;                     // hovered toolbar button, -1 none (index into the row)
+    int tbPressed = -1;                 // a toolbar button held down (capture-held, WPF's IsPressed)
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
     HDC capdc = nullptr; HBITMAP capbm = nullptr, capold = nullptr; int capw = 0, caph = 0;
     // the footer (KillerPDF's status bar): a held message briefly wins over the
@@ -420,7 +420,7 @@ static void ToggleSide();               // defined with the main window (the Pag
 static void InfoOpen();
 static bool InfoIsOpen();
 static void SetStatusHold(const std::wstring& t, unsigned ms = 2500);   // the footer's held line
-static void SetTool(int t, bool b);     // the rail's tool stack (KillerPDF's SetTool)
+static void SetTool(int t, bool b);     // the toolbar's tool buttons (KillerPDF's SetTool)
 static void CommitTextEdit(bool commit = true);   // the Text tool's box (defined with the tools)
 
 static HBRUSH GrainBrush(int which);   // defined with the grain tile below
@@ -594,20 +594,30 @@ static void PaintCaptionInto(HDC dst, int w) {
 // ---------------- toolbar row (KillerPDF's Row 1) ----------------
 // Under the caption KillerPDF runs a full-width toolbar border: BackgroundBrush
 // #1c1c1c under the shared grain (MainWindow.xaml's ToolbarRowBorder + the
-// GrainBrushShared overlay), holding ToolbarGrid (Margin 4,2) with the tool
-// buttons. docsy is a viewer, so its bar carries the one tool that exists here:
-// ToolbarLayout's "search" unit - the magnifier E721 with Str_Lbl_Search "Find
-// Text" and the Ctrl:F caption (Shell/ToolbarLayout.cs), whose Search_Click
-// toggles the find bar. The button is the family ToolbarButton in the default
-// Large + Under mode (Shell/ToolbarStyle.cs): glyph FontSize 20 over a Killer
-// Sans 14 caption with a 2px gap, MinHeight 50, Padding 6,4 - sitting directly
-// on the chrome (no box at rest), a radius-3 SmallCornerRadius RowHoverBrush
+// GrainBrushShared overlay), holding ToolbarGrid (Margin 4,2). Its RightBar
+// carries the editing tools; docsy takes the six its annotation engine owns,
+// in ToolbarLayout's own default order - select, text, highlight, line, shape,
+// draw - followed by the search unit, the same right-aligned cluster the
+// reference bar ends with. Every button is the family ToolbarButton in the
+// default Large + Under mode (Shell/ToolbarStyle.cs: Large icons, text under,
+// the family default since 2026-07-30): glyph FontSize 20 over a Killer Sans
+// 14 caption with a 2px gap, Padding 6,4, MinHeight 50, width auto = the
+// wider of the glyph line box and the caption plus 12 - sitting directly on
+// the chrome (no box at rest), a radius-4 ControlCornerRadius RowHoverBrush
 // #404040 tile on hover, SurfaceBrush #333333 while pressed, Opacity 0.4 when
-// no document is open, the Hand cursor, and the content's icon shadow (black,
-// blur 4, depth 2, IconShadowOpacity 0.9 on the dark themes) as the 1px dark
-// offset copy the caption's wordmark already uses. Click acts on release inside,
-// with capture held - WPF button semantics - and opens the same find bar as
-// Ctrl+F and the caption button.
+// no document is open (ToolbarAvailability's `_ => state.HasDocument` - the
+// tools are not special-cased), the Hand cursor, and the content's icon shadow
+// (black, blur 4, depth 2, IconShadowOpacity 0.9 on the dark themes) as the
+// dark offset copy the caption's wordmark already uses. Click acts on release
+// inside, with capture held - WPF button semantics.
+//
+// The tools' selected state is KillerPDF's SetTool (Shell/ToolSelection.cs):
+// the active tool's button wears the SelectionBg gradient with the SelectionFg
+// white glyph and caption, the icon shadow dropped (Tag="selected" clears the
+// ContentPresenter effect), and the face stays SelectionBg under hover and
+// press - the local Background beats the style triggers, exactly as WPF
+// resolves it. A button with no document behind it dims instead; a click
+// never lands on a dimmed button.
 
 // The button's auto height, the way WPF's Under mode sizes it: the content
 // column (the MDL2 line box for FontSize 20 is ~23.5px, the Killer Sans 14
@@ -769,97 +779,143 @@ static void EnsureInfoBack(HDC ref, int w, int h) {
     g_idw = w; g_idh = h;
 }
 
-// The button's width: the wider of the 20px glyph and the "Find Text" caption,
-// plus Padding 6,4's 12 horizontal pixels (auto width in Under mode).
-static int BarBtnW(HDC dc) {
+// The row's buttons, right to left exactly as ToolbarLayout's default Right
+// list ends: the six tools, then the search unit. Labels are the reference's
+// own strings (Str_Lbl_Select "Select" .. Str_Lbl_Shape "Shapes", Str_Lbl_Draw
+// "Draw", Str_Lbl_Search "Find Text"); glyphs are the buttons' own MDL2
+// codepoints from MainWindow.xaml.
+enum { TB_SELECT, TB_TEXT, TB_HIGHLIGHT, TB_LINE, TB_SHAPE, TB_DRAW, TB_FIND, TB_COUNT };
+static const wchar_t* const TbLabel[TB_COUNT] = {
+    L"Select", L"Text", L"Highlight", L"Line", L"Shapes", L"Draw", L"Find Text"
+};
+static const wchar_t* const TbGlyph[TB_COUNT] = {
+    L"\uE8B0", L"\uE8D2", L"\uE7E6", L"\uE738", L"\uE739", L"\uED63", L"\uE721"
+};
+
+// A button's auto width in Under mode: the wider of the glyph's 24px MDL2 line
+// box (FontSize 20) and the caption, plus Padding 6,4's 12 horizontal pixels.
+static int TbBtnW(HDC dc, int i) {
     RECT rc{ 0, 0, 0, 0 };
     HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
-    DrawTextW(dc, L"Find Text", -1, &rc, DT_CALCRECT | DT_SINGLELINE);
+    DrawTextW(dc, TbLabel[i], -1, &rc, DT_CALCRECT | DT_SINGLELINE);
     SelectObject(dc, of);
-    int capW = rc.right - rc.left;
-    return max((int)(20 * g.dpi), capW) + (int)(12 * g.dpi);
-}
+    return max((int)(24 * g.dpi), (int)(rc.right - rc.left)) + (int)(12 * g.dpi);
+}   // the caption width casts: MSVC's std::max cannot deduce across LONG and int
 
-// The button box inside the row: ToolbarGrid's Margin 4,2 - 4 from the right
-// edge, 2 from the top, auto height (TbBtnH, MinHeight 50 floor).
-static RECT BarBtnRect(int w) {
+// The row inside the strip: ToolbarGrid's Margin 4,2 - 4 from the right edge,
+// 2 from the top, auto height (TbBtnH, MinHeight 50 floor), buttons touching
+// (a StackPanel has no spacing; each button's own padding makes the gap).
+static void TbRects(int w, RECT out[TB_COUNT]) {
     HDC dc = GetDC(g.bar);
-    int bw = BarBtnW(dc);
-    ReleaseDC(g.bar, dc);
     int bh = TbBtnH();
-    int right = w - (int)(4 * g.dpi);
-    return { right - bw, (int)(2 * g.dpi), right, (int)(2 * g.dpi) + bh };
+    int x = w - (int)(4 * g.dpi);
+    for (int i = TB_COUNT - 1; i >= 0; i--) {
+        int bw = TbBtnW(dc, i);
+        x -= bw;
+        out[i] = { x, (int)(2 * g.dpi), x + bw, (int)(2 * g.dpi) + bh };
+    }
+    ReleaseDC(g.bar, dc);
 }
 
 static int BarHit(POINT p, int w) {
-    RECT b = BarBtnRect(w);
-    return (p.x >= b.left && p.x < b.right && p.y >= b.top && p.y < b.bottom) ? 0 : -1;
+    RECT bs[TB_COUNT]; TbRects(w, bs);
+    for (int i = 0; i < TB_COUNT; i++)
+        if (p.x >= bs[i].left && p.x < bs[i].right && p.y >= bs[i].top && p.y < bs[i].bottom) return i;
+    return -1;
 }
 
 static void BarDraw(HDC dc, int w, int h) {
     if (w <= 0 || h <= 0) return;
     RECT bar{ 0, 0, w, h };
     FillRect(dc, &bar, GrainBrush(1));   // the shared dark chrome: title bar + toolbar + sidebar + footer
-    RECT b = BarBtnRect(w);
-    bool en = DVF().n != 0;                // ToolbarAvailability: search needs an open document
-    bool hot = g.tbHot == 0, pr = g.tbPressed && en;
-    if (hot || pr) {                     // the hover/pressed tile: radius-3 SmallCornerRadius
-        Gdiplus::Graphics gs(dc);
-        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::GraphicsPath p;
-        float rr = (float)(3 * g.dpi);
-        float fx = (float)b.left, fy = (float)b.top;
-        float fw = (float)(b.right - b.left), fh = (float)(b.bottom - b.top);
-        p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
-        p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
-        p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-        p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-        p.CloseFigure();
-        // RowHoverBrush #404040, pressed SurfaceBrush #333333; disabled bakes the
-        // style's Opacity 0.4 over #1c1c1c: 0.4*#404040 + 0.6*#1c1c1c = #2a2a2a
-        Gdiplus::Color c = pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
-                              : Gdiplus::Color(255, 0x40, 0x40, 0x40);
-        if (!en) c = Gdiplus::Color(255, 0x2a, 0x2a, 0x2a);
-        Gdiplus::SolidBrush f(c);
-        gs.FillPath(&f, &p);
+    RECT bs[TB_COUNT]; TbRects(w, bs);
+    bool enDoc = DVF().n != 0;           // ToolbarAvailability `_ => state.HasDocument`:
+    int capH = 0;                        // every row button needs an open document
+    {   RECT mc{ 0, 0, 0, 0 };
+        HFONT cf = CaptionFont(g_tbcap, 14, false, L"Killer Sans");
+        HFONT of = (HFONT)SelectObject(dc, cf);
+        DrawTextW(dc, L"Find Text", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
+        SelectObject(dc, of);
+        capH = mc.bottom - mc.top;       // one face, one size: every caption shares it
     }
-    // the content column: E721 at 20 with the caption 2px under, both centered
-    // (ToolbarStyle.cs BuildToolbarContent, Under mode), and the icon shadow's
-    // 1px dark copy under the light pass - the wordmark's treatment
-    RECT mc{ 0, 0, 0, 0 };
-    HFONT cf = CaptionFont(g_tbcap, 14, false, L"Killer Sans");
-    HFONT of = (HFONT)SelectObject(dc, cf);
-    DrawTextW(dc, L"Find Text", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
-    SelectObject(dc, of);
-    int capH = mc.bottom - mc.top;
-    int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);   // the MDL2 line box at FontSize 20 (~23.5px):
-    int colH = gh + gap + capH;                            // a 20px cell would clip the glyph
-    int avail = (int)(b.bottom - b.top) - colH;            // MSVC: RECT members are LONG - cast
-    int y0 = b.top + max(0, avail) / 2;                    // before the std::max deduction
-    RECT gr{ b.left, y0, b.right, y0 + gh };
-    RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
-    SetBkMode(dc, TRANSPARENT);
-    SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
-    SetTextColor(dc, RGB(16, 16, 16));                             // the shadow copy
-    RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
-    DrawTextW(dc, L"\uE721", -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
-    SelectObject(dc, cf);
-    DrawTextW(dc, L"Find Text", -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SetTextColor(dc, en ? RGB(0xe0, 0xe0, 0xe0) : RGB(0x6a, 0x6a, 0x6a));   // TextBrush, 0.4 when dimmed
-    SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
-    DrawTextW(dc, L"\uE721", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, cf);
-    DrawTextW(dc, L"Find Text", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    for (int i = 0; i < TB_COUNT; i++) {
+        const RECT& b = bs[i];
+        bool en = enDoc;
+        bool sel = en && i != TB_FIND && DVF().tool == i;   // SetTool's SelectionBg face,
+                                                            // lit on the focused pane's tool
+        bool hot = en && !sel && g.tbHot == i;
+        bool pr = en && !sel && g.tbPressed == i;
+        if (sel || hot || pr) {              // a face under the content: the active tool's
+            Gdiplus::Graphics gs(dc);        // SelectionBg, or the hover/pressed tile
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath p;
+            float rr = (float)(4 * g.dpi);   // ToolbarButton's ControlCornerRadius is 4
+            float fx = (float)b.left, fy = (float)b.top;
+            float fw = (float)(b.right - b.left), fh = (float)(b.bottom - b.top);
+            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            if (sel) {   // SelectionBg's own #387552 -> #104e2b vertical gradient; it also
+                         // holds under hover/press (the local value beats the triggers)
+                Gdiplus::LinearGradientBrush gb(
+                    Gdiplus::Rect(b.left, b.top, b.right - b.left, b.bottom - b.top),
+                    Gdiplus::Color(255, 0x38, 0x75, 0x52),
+                    Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
+                gs.FillPath(&gb, &p);
+            } else {     // RowHoverBrush #404040, pressed SurfaceBrush #333333; disabled
+                         // bakes the style's Opacity 0.4 over #1c1c1c: 0.4*#404040 +
+                         // 0.6*#1c1c1c = #2a2a2a
+                Gdiplus::Color c = pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
+                                      : Gdiplus::Color(255, 0x40, 0x40, 0x40);
+                if (!en) c = Gdiplus::Color(255, 0x2a, 0x2a, 0x2a);
+                Gdiplus::SolidBrush f(c);
+                gs.FillPath(&f, &p);
+            }
+        }
+        // the content column: the glyph at 20 with the caption 2px under, both
+        // centered (ToolbarStyle.cs BuildToolbarContent, Under mode). White on
+        // the active tool (SelectionFg), TextBrush otherwise, the 0.4 dim over
+        // #1c1c1c with no document - and the icon shadow's dark copy under the
+        // light pass except on the active tool (Tag="selected" clears the
+        // ContentPresenter effect).
+        int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);   // the MDL2 line box at FontSize 20:
+        int colH = gh + gap + capH;                            // a 20px cell would clip the glyph
+        int avail = (int)(b.bottom - b.top) - colH;            // MSVC: RECT members are LONG - cast
+        int y0 = b.top + max(0, avail) / 2;                    // before the std::max deduction
+        RECT gr{ b.left, y0, b.right, y0 + gh };
+        RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
+        SetBkMode(dc, TRANSPARENT);
+        COLORREF fg = sel ? RGB(0xff, 0xff, 0xff)
+                   : en ? RGB(0xe0, 0xe0, 0xe0) : RGB(0x6a, 0x6a, 0x6a);
+        if (!sel) {                                            // the shadow copy
+            SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
+            SetTextColor(dc, RGB(16, 16, 16));
+            RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
+            DrawTextW(dc, TbGlyph[i], -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
+        SetTextColor(dc, fg);
+        DrawTextW(dc, TbGlyph[i], -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        if (!sel) {                                            // the caption's shadow copy
+            SetTextColor(dc, RGB(16, 16, 16));
+            RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
+            DrawTextW(dc, TbLabel[i], -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        SetTextColor(dc, fg);
+        DrawTextW(dc, TbLabel[i], -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 }
 
 static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
-    case WM_SIZE:                        // the Find Text button anchors to the right
-        InvalidateRect(h, nullptr, FALSE);   // edge: a resize only dirties the exposed
-        return 0;                            // strip, so the row must repaint whole or
-                                             // the button vanishes and old copies linger
+    case WM_SIZE:                        // the row anchors to the right edge: a resize
+        InvalidateRect(h, nullptr, FALSE);   // only dirties the exposed strip, so the
+        return 0;                            // row must repaint whole or buttons
+                                             // vanish and old copies linger
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
@@ -897,27 +953,32 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
-        if (BarHit(p, r.right) == 0 && DVF().n) {   // capture held: WPF's IsPressed story
-            SetCapture(h);
-            g.tbPressed = true;
+        int hit = BarHit(p, r.right);
+        if (hit >= 0 && DVF().n) {         // capture held: WPF's IsPressed story
+            SetCapture(h);                 // (every row button needs an open document -
+            g.tbPressed = hit;             // ToolbarAvailability's HasDocument rule)
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_LBUTTONUP: {
-        bool was = g.tbPressed;
-        if (was) {
-            g.tbPressed = false;
+        int was = g.tbPressed;
+        if (was >= 0) {
+            g.tbPressed = -1;
             if (GetCapture() == h) ReleaseCapture();
             POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             RECT r; GetClientRect(h, &r);
-            if (BarHit(p, r.right) == 0 && DVF().n) FindToggle();   // click on release inside
+            int hit = BarHit(p, r.right);
+            if (hit >= 0 && hit == was && DVF().n) {    // click on release inside one button
+                if (hit == TB_FIND) FindToggle();
+                else SetTool(hit, FocusB());            // KillerPDF's ToolX_Click:
+            }                                           // SetTool on the active viewer
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_CAPTURECHANGED:              // the press lost the mouse some other way
-        if (g.tbPressed) { g.tbPressed = false; InvalidateRect(h, nullptr, FALSE); }
+        if (g.tbPressed >= 0) { g.tbPressed = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_MOUSEWHEEL:
         return SendMessageW(g.main, m, wp, lp);   // route like the footer does: the wheel scrolls
@@ -926,7 +987,7 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (LOWORD(lp) == HTCLIENT) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             RECT r; GetClientRect(h, &r);
-            SetCursor(LoadCursorW(nullptr, BarHit(p, r.right) == 0 ? IDC_HAND : IDC_ARROW));
+            SetCursor(LoadCursorW(nullptr, BarHit(p, r.right) >= 0 ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         break;
@@ -1798,6 +1859,8 @@ static void FocusPane(bool b) {
     SideSync();
     StatusRepaint();
     RailRepaint();                        // the Pages tab's light rides the focused pane too
+    if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);   // the toolbar's selected tool is
+                                                        // the focused pane's tool
     InvalidateRect(g.view, nullptr, FALSE);
 }
 
@@ -2191,7 +2254,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
-// ---------------- annotation tools (the rail's top stack) ----------------
+// ---------------- annotation tools (the toolbar's tool buttons) ----------------
 // KillerPDF's editing tools, in docsy's pane language. The Text tool commits
 // through a real child EDIT (the Find query's WS_CLIPCHILDREN contract, at
 // KillerPDF's 165pt box and 24pt Segoe UI); the Draw / Line / Shapes tools
@@ -2507,6 +2570,24 @@ static bool SelectAnnotAt(HWND h, bool b, POINT p) {
     }
     return false;
 }
+
+// KillerPDF's SetTool (Shell/ToolSelection.cs), driving the toolbar's tool
+// buttons: the tool lands on ONE pane's document state (KillerPDF keeps the
+// editing state per viewer instance), a no-document pane re-lands on Select,
+// a live text box commits first, and the view's cursor + brush ring follow on
+// the repaint. The toolbar repaints too: its selected face mirrors the
+// focused pane's tool, like KillerPDF's bar mirrors the active viewer.
+static void SetTool(int t, bool b) {
+    if (t < 0 || t >= TOOL_COUNT) return;
+    DocState& D = DV(b);
+    if (!D.n) t = TOOL_SELECT;              // KillerPDF's SetTool: no document, no editing
+    CommitTextEdit();                       // an open box lands with the tool switch
+    bool was = D.tool;
+    D.tool = t;
+    if (g.annSelPage >= 0) { g.annSelPage = -1; g.annSelIdx = -1; }   // the ring belongs to Select
+    if (g.bar && (was != t || b == FocusB())) InvalidateRect(g.bar, nullptr, FALSE);
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);   // cursors and ring states ride the
+}                                                         // tool; the switch is a rare click
 
 // ---------------- page view ----------------
 
@@ -4982,24 +5063,19 @@ static void FindClampDrag() {
     fd.dy = std::clamp(fd.dy, min(loY, hiY), max(loY, hiY));
 }
 
-// ---------------- the sidebar rail: tools + Split pane / Pages / Document Info ----------------
+// ---------------- the sidebar rail: Split pane / Pages / Document Info ----------------
 // KillerPDF's SidebarToggleStrip, in docsy's container language: a 24px strip
 // that always sits between the sidebar and the page (the sidebar collapses TO
 // it, so a closed sidebar comes back from the same place), the shared grain
-// field, a 1px seam against the view, a TOP-anchored tool stack and a
-// bottom-anchored reference stack. The tools are the six edit buttons the
-// screenshot asked for, in KillerPDF's own toolbar order - Select, Text,
-// Highlight, Line, Shapes, Draw - with their ToolbarButton styling: hover
-// paints the RowHoverBrush #404040 rounded face, the active tool wears the
-// SelectionBg gradient with the white glyph, the rest ride the shadowed glyph
-// at rest. The reference trio keeps the locked bottom order - Split pane,
-// Pages, Document Info. Each vector icon reads at 16px and never depends on a
-// glyph being present in the OS font.
+// field, and a bottom-anchored button stack in the reference's locked order -
+// Split pane, Pages, Document Info. The editing tools are NOT rail buttons in
+// KillerPDF: they live in the toolbar's RightBar, and that is where docsy
+// carries them (the toolbar row above). The rail is exactly the reference's
+// three buttons, with their logic and nothing else: no outline, comments,
+// attachments or theme buttons come over. Each vector icon reads at 16px and
+// never depends on a glyph being present in the OS font.
 
 enum { RB_SPLIT, RB_PAGES, RB_INFO, RB_COUNT };
-enum { RT_SELECT = 100, RT_TEXT, RT_HIGHLIGHT, RT_LINE, RT_SHAPE, RT_DRAW, RT_COUNT_ };
-static int RailId(int tool) { return RT_SELECT + tool; }   // tool index -> rail id
-static int RailTool(int id) { return id >= RT_SELECT ? id - RT_SELECT : -1; }
 
 static int RW() { return g.full ? 0 : (int)(24 * g.dpi); }   // full screen gives the column to the page
 
@@ -5013,19 +5089,6 @@ static void RailRects(RECT r[RB_COUNT], int h) {   // 24px cells, 6px gaps, 6px 
     }
 }
 
-// The tool stack hangs from the TOP edge (6px in), one 24px cell per tool in
-// the toolbar's order, so the pointer reaches Select - the resting tool -
-// without crossing the reference trio's zone.
-static void ToolRects(RECT r[TOOL_COUNT], int h) {
-    int bw = (int)(24 * g.dpi), gap = (int)(6 * g.dpi);
-    int x = max(0, (RW() - bw) / 2);
-    int y = (int)(6 * g.dpi);
-    for (int i = 0; i < TOOL_COUNT; i++) {
-        r[i] = { x, y, x + bw, y + bw };
-        y += bw + gap;
-    }
-}
-
 // The green state: the feature a button toggles is on - the split, the
 // sidebar (KillerPDF lights a panel tab only while its sidebar shows it). The
 // info button never lights: KillerPDF's DocInfoRailBtn has no "on" trigger,
@@ -5033,18 +5096,13 @@ static void ToolRects(RECT r[TOOL_COUNT], int h) {
 // not (KillerPDF's split acts on the WINDOW - pane B simply opens on its start
 // screen).
 static bool RailOn(int id) {
-    if (id >= RT_SELECT) {                              // a tool is lit while ITS pane is the
-        if (!DVF().n) return false;                     // focused one and holds the tool -
-        return DVF().tool == RailTool(id);              // KillerPDF's toolbar mirrors the
-    }                                                   // active viewer's CurrentTool
     return id == RB_SPLIT ? g.split
          : id == RB_PAGES ? (g.sideOn && DVF().n)
          : false;
 }
 static bool RailEnabled(int id) {
-    if (id >= RT_SELECT) return true;                   // KillerPDF's tool buttons are always
-    return id == RB_SPLIT ? true : (DVF().n > 0);       // live; a no-document click re-lands
-}                                                       // on Select inside SetTool
+    return id == RB_SPLIT ? true : (DVF().n > 0);
+}
 
 // KillerPDF centers the rail glyphs with GlyphInk.Center (Controls/GlyphInk.cs):
 // icon fonts draw glyphs off-center inside their advance box, so the text is
@@ -5088,31 +5146,16 @@ static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c, bool shadow = t
         { L"\uE8A9", L"\uE8A9", &f15 },   // Pages (RailPanelBtn), FontSize 15
         { L"\uE946", L"\uE946", &f15 },   // Document Info, FontSize 15
     };
-    // the tools: the toolbar's own glyphs at the ToolbarButton's FontSize 14
-    static const wchar_t* tools[TOOL_COUNT] = {
-        L"\uE8B0",   // Select  (ToolSelectBtn)
-        L"\uE8D2",   // Text    (ToolTextBtn)
-        L"\uE7E6",   // Highlight (ToolHighlightBtn)
-        L"\uE738",   // Line    (ToolUnderlineBtn - the old Underline button IS the Line tool)
-        L"\uE739",   // Shapes  (ToolShapeBtn)
-        L"\uED63",   // Draw    (ToolDrawBtn)
-    };
-    int tool = RailTool(id);
-    const wchar_t* glyph;
-    int px;
-    if (tool >= 0) { glyph = tools[tool]; px = 14; }
-    else {
-        const Spec& sp = specs[id];
-        glyph = (id == RB_SPLIT && g.split) ? sp.open : sp.closed;
-        px = id == RB_SPLIT ? 14 : 15;
-    }
+    const Spec& sp = specs[id];
+    const wchar_t* glyph = (id == RB_SPLIT && g.split) ? sp.open : sp.closed;
+    int px = id == RB_SPLIT ? 14 : 15;
     SetBkMode(dc, TRANSPARENT);
     SelectObject(dc, CaptionFont(px == 14 ? f14 : f15, px, false, L"Segoe MDL2 Assets"));
     RECT in; InkCenterRect(dc, rc, glyph, in);   // GlyphInk.Center's shift, both passes
     if (shadow) {                           // the shadow pass: depth 2, straight down -
-        RECT sh = in;                       // the selected tool drops it (ToolbarButton's
-        OffsetRect(&sh, 0, (int)std::lround(2 * g.dpi));   // Tag=selected trigger clears
-        SetTextColor(dc, RGB(16, 16, 16));                 // the ContentPresenter effect)
+        RECT sh = in;
+        OffsetRect(&sh, 0, (int)std::lround(2 * g.dpi));
+        SetTextColor(dc, RGB(16, 16, 16));
         DrawTextW(dc, glyph, -1, &sh, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     SetTextColor(dc, c);
@@ -5129,43 +5172,6 @@ static void RailDraw(HDC dc, int w, int h) {
                                             // line there, the same one every other boundary
                                             // shows, and the page shadow paints over the field
                                             // exactly like it does on the sidebar and footer.
-    RECT ts[TOOL_COUNT]; ToolRects(ts, h);
-    for (int t = 0; t < TOOL_COUNT; t++) {
-        int id = RailId(t);
-        bool en = RailEnabled(id), on = en && RailOn(id), hot = en && g.railHot == id;
-        if (on) {
-            // the active tool wears KillerPDF's ToolbarButton selected state:
-            // the SelectionBg gradient face and the white glyph, the icon
-            // shadow dropped (the Tag=selected trigger clears the effect)
-            Gdiplus::Graphics gs(dc);
-            Gdiplus::LinearGradientBrush gb(Gdiplus::Rect(ts[t].left, ts[t].top - 1, ts[t].right - ts[t].left, ts[t].bottom - ts[t].top + 2),
-                                            Gdiplus::Color(255, 0x38, 0x75, 0x52),
-                                            Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
-            Gdiplus::GraphicsPath p;
-            int rad = (int)(4 * g.dpi);
-            p.AddArc((float)ts[t].left, (float)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
-            p.AddArc((float)(ts[t].right - 2 * rad), (float)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
-            p.AddArc((float)(ts[t].right - 2 * rad), (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
-            p.AddArc((float)ts[t].left, (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
-            p.CloseFigure();
-            gs.FillPath(&gb, &p);
-            RailIcon(dc, id, ts[t], RGB(0xff, 0xff, 0xff), false);   // white, no shadow pass
-            continue;
-        }
-        if (hot) {                          // ToolbarButton's IsMouseOver trigger: the
-            Gdiplus::Graphics gs(dc);       // RowHoverBrush #404040 rounded face under
-            Gdiplus::GraphicsPath p;        // the unlit glyph
-            int rad = (int)(4 * g.dpi);
-            p.AddArc((float)ts[t].left, (float)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
-            p.AddArc((float)(ts[t].right - 2 * rad), (float)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
-            p.AddArc((float)(ts[t].right - 2 * rad), (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
-            p.AddArc((float)ts[t].left, (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
-            p.CloseFigure();
-            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
-            gs.FillPath(&hb, &p);
-        }
-        RailIcon(dc, id, ts[t], RGB(0xe0, 0xe0, 0xe0));
-    }
     RECT bs[RB_COUNT]; RailRects(bs, h);
     for (int i = 0; i < RB_COUNT; i++) {
         bool en = RailEnabled(i), on = en && RailOn(i), hot = en && g.railHot == i;
@@ -5183,39 +5189,18 @@ static void RailDraw(HDC dc, int w, int h) {
 
 static void RailRepaint() { if (g.rail) InvalidateRect(g.rail, nullptr, FALSE); }
 
-// One hover/click map for both stacks: the tool group first, the reference
-// trio second (their zones never overlap - one hangs from the top, one from
-// the bottom). Returns the coded rail id, -1 for nothing.
+// The hover/click map over the bottom stack. Returns the rail id, -1 for nothing.
 static int RailHitAt(POINT p, int hh) {
-    RECT ts[TOOL_COUNT]; ToolRects(ts, hh);
-    for (int t = 0; t < TOOL_COUNT; t++) if (PtInRect(&ts[t], p)) return RailId(t);
     RECT bs[RB_COUNT]; RailRects(bs, hh);
     for (int i = 0; i < RB_COUNT; i++) if (PtInRect(&bs[i], p)) return i;
     return -1;
 }
 
 static void RailActivate(int id) {
-    if (id >= RT_SELECT) { SetTool(RailTool(id), FocusB()); return; }   // KillerPDF's ToolX_Click
-    if (id == RB_SPLIT) ToggleSplit();      // = SetTool on the ACTIVE viewer; docsy's rail
-    else if (id == RB_PAGES) ToggleSide();  // serves the focused pane
+    if (id == RB_SPLIT) ToggleSplit();      // KillerPDF's SplitPaneRailBtn_Click = F10
+    else if (id == RB_PAGES) ToggleSide();  // the Pages tab opens the sidebar's pages panel
     else InfoOpen();                        // KillerPDF's DocInfo_Click: the button stays
 }                                           // enabled; a no-document click is told to the reader
-
-// the SetTool behind the tool stack: the tool lands on ONE pane's document
-// state (KillerPDF keeps the editing state per viewer instance), a no-document
-// pane re-lands on Select, a live text box commits first, and the view's
-// cursor + brush ring follow on the repaint.
-static void SetTool(int t, bool b) {
-    if (t < 0 || t >= TOOL_COUNT) return;
-    DocState& D = DV(b);
-    if (!D.n) t = TOOL_SELECT;              // KillerPDF's SetTool: no document, no editing
-    CommitTextEdit();                       // an open box lands with the tool switch
-    if (D.tool == t) { RailRepaint(); return; }   // re-click: the tool stays (its bar-tuck
-    D.tool = t;                             // toggle rides the settings bar we don't carry)
-    if (g.annSelPage >= 0) { g.annSelPage = -1; g.annSelIdx = -1; }   // the ring belongs to Select
-    RailRepaint();
-    if (g.view) InvalidateRect(g.view, nullptr, FALSE);   // cursors and ring states ride the
-}                                                         // tool; the switch is a rare click
 
 static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
@@ -6449,7 +6434,17 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         int line = (int)(56 * g.dpi), pg = max(1, (int)(g.ch * 0.9));
         int& fx = PaneSx(FocusB()); int& fy = PaneSy(FocusB());   // the keys steer the focused pane
         switch (wp) {
-        case 'O': if (ctrl) OpenDlg(); break;
+        case 'O': if (ctrl) OpenDlg(); else if (!shift && DVF().n) SetTool(TOOL_SHAPE, FocusB()); break;
+        // KillerPDF's one-letter tool keys (KeyboardShortcuts.cs TryToolShortcut):
+        // one letter per tool, so a key keeps its tool however the bar grows -
+        // Select is V (the Photoshop convention), Shapes O, Line also U. They
+        // need an open document, exactly like the buttons they drive.
+        case 'V': if (!ctrl && !shift && DVF().n) SetTool(TOOL_SELECT, FocusB()); break;
+        case 'T': if (!ctrl && !shift && DVF().n) SetTool(TOOL_TEXT, FocusB()); break;
+        case 'H': if (!ctrl && !shift && DVF().n) SetTool(TOOL_HIGHLIGHT, FocusB()); break;
+        case 'L': case 'U':
+            if (!ctrl && !shift && DVF().n) SetTool(TOOL_LINE, FocusB()); break;
+        case 'D': if (!ctrl && !shift && DVF().n) SetTool(TOOL_DRAW, FocusB()); break;
         case VK_DOWN: ScrollTo(fx, fy + line); break;
         case VK_UP: ScrollTo(fx, fy - line); break;
         case VK_RIGHT: ScrollTo(fx + line, fy); break;
