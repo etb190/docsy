@@ -1118,32 +1118,25 @@ static void BarDraw(HDC dc, int w, int h) {
                 DrawTextW(dc, L"T", -1, &tr2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(dc, of2);
             } else {
-                // the frame, then the arrows as four stroked lines + four miter
-                // chevrons, scaled from the 16-unit path to 70% of the box
+                // ToolRotateBtn's own icon, exactly as its XAML builds it: a
+                // 16x16 Grid holding a 14x14 1px Border (stroke bound to the
+                // button's Foreground) with the E7C2 "Move" MDL2 glyph at
+                // FontSize 9 centered inside - NOT hand-drawn arrows. The
+                // glyph IS the four move arrows; the font's own outlines are
+                // what the reference shows, so the font draws them here too.
                 auto drawTf = [&](COLORREF c, int ox, int oy) {
-                    Gdiplus::Graphics gs2(dc);
-                    gs2.SetSmoothingMode(Gdiplus::SmoothingModeNone);
                     HPEN fr = CreatePen(PS_SOLID, 1, c);
                     HGDIOBJ og = SelectObject(dc, fr);
                     HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));   // frame only
-                    Rectangle(dc, gx + ox, gy + oy, gx + fw2 + ox, gy + fh2 + oy);
+                    RECT fr2{ gx + ox, gy + oy, gx + fw2 + ox, gy + fh2 + oy };
+                    Rectangle(dc, fr2.left, fr2.top, fr2.right, fr2.bottom);
                     SelectObject(dc, ob);
                     SelectObject(dc, og); DeleteObject(fr);
-                    float u = fw2 * 0.7f / 16.0f;         // the path's unit in pixels
-                    float cx = gx + ox + fw2 / 2.0f, cy = gy + oy + fh2 / 2.0f;
-                    auto P = [&](float ux, float uy) { return Gdiplus::PointF(
-                        cx + (ux - 8.0f) * u, cy + (uy - 8.0f) * u); };
-                    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.0f);
-                    pen.SetStartCap(Gdiplus::LineCapSquare); pen.SetEndCap(Gdiplus::LineCapSquare);
-                    pen.SetLineJoin(Gdiplus::LineJoinMiter);
-                    Gdiplus::PointF seg[4][2] = { { P(8, 2.5f), P(8, 6) }, { P(8, 10), P(8, 13.5f) },
-                                                  { P(2.5f, 8), P(6, 8) }, { P(10, 8), P(13.5f, 8) } };
-                    for (auto& s2 : seg) gs2.DrawLines(&pen, s2, 2);
-                    Gdiplus::PointF hd[4][3] = { { P(6, 4.5f), P(8, 2.5f), P(10, 4.5f) },
-                                                 { P(6, 11.5f), P(8, 13.5f), P(10, 11.5f) },
-                                                 { P(4.5f, 6), P(2.5f, 8), P(4.5f, 10) },
-                                                 { P(11.5f, 6), P(13.5f, 8), P(11.5f, 10) } };
-                    for (auto& h3 : hd) gs2.DrawLines(&pen, h3, 3);
+                    RECT gr2{ fr2.left, fr2.top, fr2.right, fr2.bottom };
+                    SelectObject(dc, CaptionFont(g_tbglyph, 9, false, L"Segoe MDL2 Assets"));
+                    SetBkMode(dc, TRANSPARENT);
+                    SetTextColor(dc, c);
+                    DrawTextW(dc, L"\uE7C2", -1, &gr2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 };
                 if (!sel) drawTf(RGB(16, 16, 16), 1, 1);
                 drawTf(fg, 0, 0);
@@ -3919,14 +3912,26 @@ static bool AbBarTool(int t) { return BarToolOwns(t); }
 // One pass lays the tool's groups into g_ab (bar-local rects), wrapping when
 // the pane's width runs out - WrapPanel's line breaking. The wrap cap is the
 // document area's width less the bar chrome (KillerPDF's _barWidthInset: area
-// - 28), not the page card's, and the Opacity group owns its Level/Eraser
-// toggle the way AnnotationBars.cs packs it into one dOpacityUnit - the toggle
-// can never drop onto a row by itself.
+// - 28). The packing is the reference's own arithmetic: both wrap hosts carry
+// Margin (8,2,8,2); the draw-family bars are the bare host (BarPadding 0,
+// BarEdgeThickness 0 in Dark) while the text bar adds Padding 4 and its
+// (1,0,1,1) PaneBorderBrush frame; a draw bar's line is content 20 + the 2+2
+// group margins, the text bar's rows are content + the 3+3 Group margins; and
+// the Opacity unit is ATOMIC - AnnotationBars.cs packs the Level/Eraser check
+// (and the Shape tool's whole kind picker) into dOpacityUnit, so the wrap can
+// never split a toggle from its slider.
 static void AbLayout() {
     bool b = FocusB();
     DocState& D = DV(b);
     int tool = g.barTool;
-    int avail = max(160, PaneW(b) - (int)(28 * g.dpi));
+    bool text = tool == TOOL_TEXT;
+    // the text bar and the redact bar carry their own Padding 4 and (1,0,1,1)
+    // PaneBorderBrush frame; the draw-family bars ride BarPadding 0 and
+    // BarEdgeThickness 0 in Dark - the bare wrap host
+    int pad = (text || tool == TOOL_REDACT) ? (int)(5 * g.dpi) : 0;
+    int host = (int)(8 * g.dpi);                // the wrap host's Margin (8,...,8)
+    int area = max(160, PaneW(b) - (int)(28 * g.dpi));   // the host's MaxWidth: area - 28
+    int avail = max(120, area - 2 * pad - 2 * host);     // the content's wrap cap inside it
     int key = (tool + 2) * 2 + (g.barMini ? 1 : 0) * 7 + (int)(g.dpi * 4) * 1000;
     if (key == g_abKey && g_abKeyW == avail) return;
     g_abKey = key; g_abKeyW = avail;
@@ -3937,178 +3942,220 @@ static void AbLayout() {
         return;
     }
     HDC dc = GetDC(g.view);
-    int pad = (int)(4 * g.dpi), rowH = (int)(26 * g.dpi);
-    int x = (int)(16 * g.dpi), y = pad;      // the grip's room comes first
-    int maxW = x;
-    auto nl = [&]() { maxW = max(maxW, x); x = (int)(16 * g.dpi); y += rowH; };
-    auto need = [&](int w) { if (x + w > avail && x > (int)(16 * g.dpi)) nl(); };
-    auto put = [&](int id, int w, int h) {
-        g_ab.push_back({ id, { x, y + (rowH - (int)(2 * g.dpi) - h) / 2, x + w, y + (rowH - (int)(2 * g.dpi) - h) / 2 + h } });
+    auto S = [&](double v) { return (int)std::lround(v * g.dpi); };
+    int band = tool == TOOL_REDACT ? S(22) : S(20);   // the line's content band: the redact
+    int rowH = band + S(4);                 // bar's buttons ride MinHeight 22, the rest 18-20
+    int x = pad + host, y = pad + S(2);     // the host's Margin (8,2) - and the bar's chrome
+    int x0 = x;
+    int rowTop = y;                         // the row the cells are landing on (y only
+    int maxW = 0;                           // moves when a unit wraps)
+    // MakeBarGrip: Padding (1,0,10,0) around the 3px dots - one 14px strip,
+    // stretched over the line (the text bar's MakeBarGrip(4) is the same
+    // width). The cell is EnableBarSlide's drag zone.
+    auto grip = [&]() {
+        g_ab.push_back({ AB_GRIP, { x, y - S(2), x + S(14), y + rowH - S(2) } });
+        x += S(14);
+    };
+    auto nl = [&]() { maxW = max(maxW, x); x = x0; y += rowH; rowTop = y; };
+    auto need = [&](int w) { if (x + w > x0 + avail && x > x0) nl(); };
+    auto put = [&](int id, int w, int h) {  // the cell centers in the line's content band
+        int top = y + S(2) + max(0, (band - h)) / 2;
+        g_ab.push_back({ id, { x, top, x + w, top + h } });
         x += w;
     };
     auto label = [&](const wchar_t* s) {
-        int w = AbTextW(dc, s) + (int)(6 * g.dpi);
-        g_ab.push_back({ -1, { x, y + (rowH - (int)(2 * g.dpi) - (int)(16 * g.dpi)) / 2,
-                               x + w, y + (rowH - (int)(2 * g.dpi) + (int)(16 * g.dpi)) / 2 }, s });
+        int w = AbTextW(dc, s) + S(6);
+        g_ab.push_back({ -1, { x, y + S(2), x + w, y + S(2) + band }, s });
         x += w;
     };
-    auto swatchRow = [&](int base) {
-        int w = 10 * (int)(20 * g.dpi);
-        need((int)(42 * g.dpi) + w);
+    auto swatchRow = [&](int base) {        // the Color group: label + 9 swatches + rainbow, +16
+        need(S(42) + 10 * S(20));
         label(L"Color:");
-        for (int i = 0; i < 9; i++) put(base + i, (int)(20 * g.dpi), (int)(18 * g.dpi));
-        put(base == AB_SWC_DRAW ? AB_RW_DRAW : base == AB_SWC_TEXT ? AB_RW_TEXT : AB_RW_FILL,
-            (int)(20 * g.dpi), (int)(18 * g.dpi));
-        x += (int)(16 * g.dpi);              // the groups' Margin (0,2,16,2)
+        for (int i = 0; i < 9; i++) put(base + i, S(20), S(18));
+        put(base == AB_SWC_DRAW ? AB_RW_DRAW : base == AB_SWC_TEXT ? AB_RW_TEXT : AB_RW_FILL, S(20), S(18));
+        x += S(16);                         // the group's Margin (0,2,16,2)
     };
-    auto slider = [&](int id, const wchar_t* lab, int labW) {
-        int w = (int)(90 * g.dpi) + (int)(4 * g.dpi) + labW;
-        need(w + (int)(40 * g.dpi));
+    auto slider = [&](int id, const wchar_t* lab, int valW) {
+        need(S(6) + AbTextW(dc, lab) + S(90) + S(4) + valW + S(16));
         label(lab);
-        put(id, (int)(90 * g.dpi) + (int)(4 * g.dpi) + labW, (int)(20 * g.dpi));
-        x += (int)(16 * g.dpi);
+        put(id, S(90) + S(4) + valW, S(20));
+        x += S(16);                         // the group's Margin (0,2,16,2)
     };
-    // BarCheck: a 15px box (radius 3, accent fill + white check when on) and
-    // the 11px label, the whole unit VerticalAlignment.Center - the box rides
-    // the row's center line exactly like the sliders and swatches beside it,
-    // and the trailing margin is Margin(2,0,18,0).
-    auto check = [&](int id, const wchar_t* lab) {
-        int bw = (int)(15 * g.dpi);
-        int w = bw + (int)(5 * g.dpi) + AbTextW(dc, lab);
-        need(w);
-        int top = y + (rowH - (int)(2 * g.dpi) - bw) / 2;
-        g_ab.push_back({ id, { x, top, x + w, top + bw } });
-        x += w + (int)(18 * g.dpi);
+    // BarCheck: the 15px box (radius 3) and the 11px label, the unit centered
+    // on the row's content band. lead/trail are the WPF margins around it.
+    auto check = [&](int id, const wchar_t* lab, int lead, int trail) {
+        int bw = S(15);
+        int w = bw + S(5) + AbTextW(dc, lab);
+        int top = y + S(2) + max(0, (band - bw)) / 2;
+        g_ab.push_back({ id, { x + lead, top, x + lead + w, top + bw } });
+        x += lead + w + trail;
     };
-    if (tool == TOOL_TEXT) {
+    // per-row cell emitters for the text bar's columns: (rh) the row's line
+    // height, (ch) the row's content height - the cell centers in the content
+    // band the way the WPF StackPanels center in their Group margins.
+    auto rowPut = [&](int rx, int ry, int rh, int ch, int id, int w, int h) {
+        int top = ry + (rh - ch) / 2 + max(0, (ch - h)) / 2;
+        g_ab.push_back({ id, { rx, top, rx + w, top + h } });
+        return rx + w;
+    };
+    auto rowLab = [&](int rx, int ry, int rh, const wchar_t* s) {
+        int w = AbTextW(dc, s) + S(6);
+        g_ab.push_back({ -1, { rx, ry + (rh - S(16)) / 2, rx + w, ry + (rh + S(16)) / 2 }, s });
+        return rx + w;
+    };
+    if (text) {
         // KillerPDF's deliberate 1.7.5 layout, assembled as three vertical
         // pairs so related controls share an exact left edge: Font over Size
         // over Spacing, Color over Fill over "Edit paragraph", and Opacity
-        // beside Fill Opacity. The outer WrapPanel moves a whole column at
-        // narrow widths instead of separating a label from its control.
-        const wchar_t* styles[4] = { L"B", L"I", L"S", L"U" };
-        int sids[4] = { AB_BOLD, AB_ITALIC, AB_STRIKE, AB_UNDER };
-        int x0v = (int)(16 * g.dpi);
-        // column A: Font / Size / Spacing - its width is the widest of the three rows
-        int fontRowW = AbTextW(dc, L"Font:") + (int)(6 * g.dpi) + (int)(132 * g.dpi) + 4 * (int)(24 * g.dpi);
-        int sizeRowW = AbTextW(dc, L"Size:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) +
-                       (int)(20 * g.dpi) + (int)(20 * g.dpi) + (int)(32 * g.dpi) + (int)(18 * g.dpi);
-        int spacRowW = AbTextW(dc, L"Spacing:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(48 * g.dpi);
-        int colA = max(fontRowW, max(sizeRowW, spacRowW));
-        int fillRowW = AbTextW(dc, L"Fill:") + (int)(6 * g.dpi) + (int)(15 * g.dpi) + (int)(5 * g.dpi) + 10 * (int)(20 * g.dpi);
-        int colB = max(AbTextW(dc, L"Color:") + (int)(6 * g.dpi) + 10 * (int)(20 * g.dpi), fillRowW);
-        int colC = 2 * (AbTextW(dc, L"Opacity:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi)) + (int)(16 * g.dpi);
-        int yBase = y;
-        x = x0v; y = yBase;
-        {   // Font row
-            int w = AbTextW(dc, L"Font:") + (int)(6 * g.dpi) + (int)(132 * g.dpi);
-            label(L"Font:"); put(AB_FONT, (int)(132 * g.dpi), (int)(22 * g.dpi));
-            for (int i = 0; i < 4; i++) { int s2 = max((int)(22 * g.dpi), AbTextW(dc, styles[i]) + (int)(8 * g.dpi)); put(sids[i], s2, (int)(20 * g.dpi)); }
-            (void)w;
+        // beside Fill Opacity. The outer WrapPanel moves a whole pair at
+        // narrow widths instead of separating a label from its control. Each
+        // row's line height is its content + the Group margin 3+3; each row
+        // carries the group's right Margin 16 (the paragraph button's own
+        // Margin (0,3,0,0) has none).
+        int six = S(6);
+        int rowF = six + AbTextW(dc, L"Font:") + S(132) + 4 * S(24);
+        int rowS = six + AbTextW(dc, L"Size:") + S(90) + S(21) + S(21) + S(36) + S(16);
+        int rowP = six + AbTextW(dc, L"Spacing:") + S(90) + S(4) + S(48);
+        int colA = max(rowF, max(rowS, rowP)) + S(16);
+        int hF = S(28), hS = S(26), hP = S(26);          // 22/20/20 content + 6
+        int rowC = six + AbTextW(dc, L"Color:") + 10 * S(20);
+        int rowFl = six + AbTextW(dc, L"Fill:") + S(20) + 10 * S(20);
+        int paraW = AbTextW(dc, L"Edit paragraph") + S(20);
+        int colB = max(rowC + S(16), max(rowFl + S(16), paraW));
+        int hC = S(26), hFl = S(26), hPara = S(25);      // 20/20/22 content + margins
+        int oLab = S(6) + AbTextW(dc, L"Opacity:") + S(94) + S(40) + S(16);
+        int foLab = S(6) + AbTextW(dc, L"Fill Opacity:") + S(94) + S(40) + S(16);
+        int colC = oLab + foLab;
+        int hO = S(26);
+        int colAh = hF + hS + hP, colBh = hC + hFl + hPara, colCh = hO;
+        // the WrapPanel's line decisions: the grip leads line 1, a pair that
+        // does not fit moves WHOLE to the next line, whose top rides the
+        // tallest pair the line before it kept
+        g_ab.push_back({ AB_GRIP, { x, y - S(2), x + S(14), y - S(2) + S(80) } });   // stretched; re-heighted below
+        int ax = x + S(14), ay = y;
+        int l1w = S(14) + colA, l1h = colAh;
+        bool bWrap = l1w + colB > avail;
+        if (!bWrap) { l1w += colB; l1h = max(l1h, colBh); }
+        bool cWrap = l1w + colC > avail;
+        if (!cWrap) l1h = max(l1h, colCh);
+        // the grip stretched over line 1: its cell rides l1h (VerticalAlignment.Stretch)
+        for (AbCell& c : g_ab) if (c.id == AB_GRIP) c.r.bottom = ay - S(2) + l1h;
+        {   // column A rows
+            int rx = rowLab(ax, ay, hF, L"Font:");
+            rx = rowPut(rx, ay, hF, S(22), AB_FONT, S(132), S(22));
+            const wchar_t* styles[4] = { L"B", L"I", L"S", L"U" };
+            int sids[4] = { AB_BOLD, AB_ITALIC, AB_STRIKE, AB_UNDER };
+            for (int i = 0; i < 4; i++) {
+                int s2 = max(S(22), AbTextW(dc, styles[i]) + S(8));
+                rowPut(rx + S(2), ay, hF, S(22), sids[i], s2, S(20));   // StyleToggle Margin (2,0,0,0)
+                rx += S(2) + s2;
+            }
+            rx = rowLab(ax, ay + hF, hS, L"Size:");
+            rx = rowPut(rx, ay + hF, hS, S(20), AB_TSIZE, S(94), S(20));
+            rowPut(rx + S(3), ay + hF, hS, S(20), AB_TMINUS, S(18), S(20)); rx += S(21);
+            rowPut(rx + S(3), ay + hF, hS, S(20), AB_TPLUS, S(18), S(20)); rx += S(21);
+            rowPut(rx + S(4), ay + hF, hS, S(20), AB_TBOX, S(32), S(20)); rx += S(36);
+            rowPut(rx + S(2), ay + hF, hS, S(20), -1, S(14), S(14));       // the pt label
+            g_ab.back().lab = L"pt";
+            rx = rowLab(ax, ay + hF + hS, hP, L"Spacing:");
+            rowPut(rx, ay + hF + hS, hP, S(20), AB_SPACING, S(94) + S(48), S(20));
         }
-        x = x0v; y = yBase + rowH;
-        {   // Size row: slider + - / + steppers + the editable pt box (TextSettingsBar's sizeStack)
-            label(L"Size:"); put(AB_TSIZE, (int)(90 * g.dpi) + (int)(4 * g.dpi), (int)(20 * g.dpi));
-            AbCell& sc = g_ab.back();
-            x = sc.r.right + (int)(0 * g.dpi);
-            g_ab.push_back({ AB_TMINUS, { x, sc.r.top, x + (int)(18 * g.dpi), sc.r.bottom } }); x += (int)(20 * g.dpi);
-            g_ab.push_back({ AB_TPLUS, { x, sc.r.top, x + (int)(18 * g.dpi), sc.r.bottom } }); x += (int)(22 * g.dpi);
-            g_ab.push_back({ AB_TBOX, { x, sc.r.top, x + (int)(32 * g.dpi), sc.r.bottom } }); x += (int)(36 * g.dpi);
-            g_ab.push_back({ -1, { x, sc.r.top, x + (int)(14 * g.dpi), sc.r.bottom }, L"pt" }); x += (int)(14 * g.dpi); }
-        x = x0v; y = yBase + 2 * rowH;
-        {   // Spacing row
-            label(L"Spacing:"); put(AB_SPACING, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(48 * g.dpi), (int)(20 * g.dpi));
+        int bRight = 0;
+        int bx = bWrap ? x0 : ax + colA, by = bWrap ? ay + colAh : ay;
+        {   // column B rows
+            int rx = rowLab(bx, by, hC, L"Color:");
+            for (int i = 0; i < 9; i++) { rowPut(rx, by, hC, S(20), AB_SWC_TEXT + i, S(20), S(18)); rx += S(20); }
+            rowPut(rx, by, hC, S(20), AB_RW_TEXT, S(20), S(18)); rx += S(20);
+            bRight = max(bRight, rx + S(16));
+            rx = rowLab(bx, by + hC, hFl, L"Fill:");
+            rowPut(rx, by + hC, hFl, S(20), AB_FILL_NONE, S(18), S(18)); rx += S(20);
+            for (int i = 0; i < 9; i++) { rowPut(rx, by + hC, hFl, S(20), AB_SWC_FILL + i, S(20), S(18)); rx += S(20); }
+            rowPut(rx, by + hC, hFl, S(20), AB_RW_FILL, S(20), S(18)); rx += S(20);
+            bRight = max(bRight, rx + S(16));
+            // the paragraph button: Margin (0,3,0,0), MinHeight 22
+            int py = by + hC + hFl + S(3);
+            g_ab.push_back({ AB_PARA, { bx, py, bx + paraW, py + S(22) } });
+            bRight = max(bRight, bx + paraW);
         }
-        int colAright = x0v + colA;
-        // column B: Color / Fill / Edit paragraph - beside A while both fit,
-        // below A when the pane is too narrow (the whole column wraps)
-        int colBx;
-        if (colAright + (int)(16 * g.dpi) + colB > avail) {
-            x = x0v; y = yBase + 3 * rowH; maxW = max(maxW, colAright); colBx = x0v;
-        } else {
-            x = colAright + (int)(16 * g.dpi); y = yBase; colBx = x;
+        int cx = cWrap ? x0 : bx + colB;
+        int cy = cWrap ? (bWrap ? by + colBh : max(ay + colAh, by + colBh)) : ay;
+        {   // the opacity pair, one line (top-aligned like every wrap unit)
+            int rx = rowLab(cx, cy, hO, L"Opacity:");
+            rowPut(rx, cy, hO, S(20), AB_TOACITY, S(94) + S(40), S(20));
+            int rx2 = rowLab(cx + oLab, cy, hO, L"Fill Opacity:");
+            rowPut(rx2, cy, hO, S(20), AB_FOACITY, S(94) + S(40), S(20));
         }
-        {   swatchRow(AB_SWC_TEXT); }
-        x = colBx; y += rowH;                // the fill row keeps the column's left edge
-        {   int w = (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, L"Fill:") + (int)(6 * g.dpi) + 10 * (int)(20 * g.dpi);
-            if (x + w > avail) { maxW = max(maxW, x); x = x0v; colBx = x0v; }
-            label(L"Fill:");
-            g_ab.push_back({ AB_FILL_NONE, { x, y + (rowH - (int)(2 * g.dpi) - (int)(15 * g.dpi)) / 2,
-                                             x + (int)(15 * g.dpi), y + (rowH - (int)(2 * g.dpi) + (int)(15 * g.dpi)) / 2 } });
-            x += (int)(20 * g.dpi);
-            for (int i = 0; i < 9; i++) put(AB_SWC_FILL + i, (int)(20 * g.dpi), (int)(18 * g.dpi));
-            put(AB_RW_FILL, (int)(20 * g.dpi), (int)(18 * g.dpi));
-            x += (int)(2 * g.dpi); }
-        x = colBx; y += rowH;
-        {   int w = AbTextW(dc, L"Edit paragraph") + (int)(20 * g.dpi);
-            if (x + w > avail) { maxW = max(maxW, x); x = x0v; }
-            put(AB_PARA, w, (int)(22 * g.dpi)); }
-        int colBright = max(x, colBx + colB);
-        // column C: Opacity beside Fill Opacity (the pair's WrapPanel), below
-        // the first two columns when even that wrap cannot hold them
-        int colCx;
-        if (max(maxW, colBright) + (int)(16 * g.dpi) + colC > avail) {
-            x = x0v; y += rowH; maxW = max(maxW, colBright); colCx = x0v;
-        } else {
-            x = colBright + (int)(16 * g.dpi); y = yBase; colCx = x;
-        }
-        {   label(L"Opacity:"); put(AB_TOACITY, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi), (int)(20 * g.dpi)); }
-        x = colCx + AbTextW(dc, L"Opacity:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) +
-            (int)(40 * g.dpi) + (int)(16 * g.dpi);   // the pair's second group, 16 past the first
-        {   label(L"Fill Opacity:"); put(AB_FOACITY, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi), (int)(20 * g.dpi)); }
-        maxW = max(maxW, x);
-    } else if (tool == TOOL_REDACT) {
+        int bottom = max(ay + colAh, max(by + colBh, cy + colCh));
+        int l2w = bWrap ? (colB + (cWrap ? 0 : colC)) : (cWrap ? colC : 0);
+        maxW = max(l1w, l2w);
+        g_abW = min(maxW + host + pad, area - S(28) + 2 * pad);   // + the chrome, capped
+        g_abH = bottom + S(2) + pad;                      // + the host's bottom Margin 2 + chrome
+        ReleaseDC(g.view, dc);
+        for (AbCell& c : g_ab) if (c.r.right > g_abW) c.r.right = g_abW;
+        return;
+    }
+    grip();
+    if (tool == TOOL_REDACT) {
+        // the redact bar's own row (PdfViewer.Redaction.cs): the status text
+        // with Margin (0,0,10,0), the Clear button with Margin (0,0,5,0), the
+        // 1px divider (Margin 2,0,8,0), then the accent Apply
         int marks = 0, pgs = 0;
         for (auto& kv : D.reds) { marks += (int)kv.second.size(); if (!kv.second.empty()) pgs++; }
         std::wstring st = marks ? (L"Marked areas: " + std::to_wstring(marks) + L", on " + std::to_wstring(pgs) + L" page(s)")
                                 : L"Drag over the page to mark areas";
-        int w = AbTextW(dc, st.c_str()) + (int)(6 * g.dpi);
-        g_ab.push_back({ -1, { x, y + 1, x + w, y + 1 + (int)(16 * g.dpi) }, nullptr });   // painted by the redact branch below
+        int w = AbTextW(dc, st.c_str()) + S(10);
+        g_ab.push_back({ -1, { x, y + S(2), x + w, y + S(2) + band }, nullptr });   // painted by the redact branch below
         x += w;
-        int w1 = AbTextW(dc, L"Clear") + (int)(20 * g.dpi);
-        put(AB_R_CLEAR, w1, (int)(22 * g.dpi));
-        int w2 = AbTextW(dc, L"Redact") + (int)(20 * g.dpi);
-        put(AB_R_APPLY, w2, (int)(22 * g.dpi));
+        int w1 = AbTextW(dc, L"Clear") + S(20);
+        put(AB_R_CLEAR, w1, S(22));
+        x += S(5);                           // the button's Margin (0,0,5,0)
+        int w2 = AbTextW(dc, L"Redact") + S(20);
+        x += S(2) + S(1) + S(8);             // the divider: Margin (2,0,8,0) + its 1px
+        put(AB_R_APPLY, w2, S(22));
     } else {
         swatchRow(AB_SWC_DRAW);
         // KillerPDF's Width=34 size value and Width=40 opacity value, both
         // right-aligned - the reserves keep the slider pitch constant as the
         // number's digits change.
         if (tool != TOOL_HIGHLIGHT) {
-            slider(AB_SIZE, L"Size:", (int)(34 * g.dpi));
+            slider(AB_SIZE, L"Size:", S(34));
         }
-        // Opacity and the Level/Eraser/Fill toggle share ONE wrap unit
-        // (AnnotationBars.cs's dOpacityUnit): the toggle rides at the end of
-        // the Opacity group, so it never lands on a row by itself.
+        // The dOpacityUnit: Opacity + the Level/Eraser toggle (or the Shape
+        // tool's kind picker row) is ONE wrap unit - AnnotationBars.cs packs
+        // barCheck into dOpacityUnit, so the unit's width is measured before
+        // the wrap test and the toggle can never land on a row by itself.
         {
             const wchar_t* cl = tool == TOOL_DRAW ? L"Eraser" : tool == TOOL_LINE ? L"Level"
                               : tool == TOOL_HIGHLIGHT ? L"Annotation eraser" : nullptr;
-            int clW = cl ? (int)(15 * g.dpi) + (int)(5 * g.dpi) + AbTextW(dc, cl) : 0;
-            int unit = AbTextW(dc, L"Opacity:") + (int)(6 * g.dpi) + (int)(90 * g.dpi) + (int)(4 * g.dpi) +
-                       (int)(40 * g.dpi) + (int)(6 * g.dpi) + clW;
+            int opW = S(6) + AbTextW(dc, L"Opacity:") + S(94) + S(40);
+            int unit = opW + S(16);          // opacityGroup's Margin (0,2,16,2)
+            if (cl) unit += S(15) + S(5) + AbTextW(dc, cl) + S(2);   // + barCheck Margin (0,2,2,2)
+            if (tool == TOOL_SHAPE)          // ShapeKindPicker's row rides the unit's end
+                unit += S(2) + 3 * S(28) + S(10) + S(15) + S(5) + AbTextW(dc, L"Fill") + S(18);
             need(unit);
             label(L"Opacity:");
-            put(AB_OPACITY, (int)(90 * g.dpi) + (int)(4 * g.dpi) + (int)(40 * g.dpi), (int)(20 * g.dpi));
-            x += (int)(6 * g.dpi);
-            if (tool == TOOL_DRAW) check(AB_ERASE, L"Eraser");
-            else if (tool == TOOL_LINE) check(AB_LEVEL, L"Level");
-            else if (tool == TOOL_HIGHLIGHT) check(AB_HLERASE, L"Annotation eraser");
-            else x += (int)(16 * g.dpi);
-        }
-        if (tool == TOOL_SHAPE) {
-            int kw = 3 * (int)(26 * g.dpi) + (int)(4 * g.dpi);
-            need(kw + (int)(60 * g.dpi));
-            put(AB_KIND0, (int)(26 * g.dpi), (int)(20 * g.dpi));
-            put(AB_KIND1, (int)(26 * g.dpi), (int)(20 * g.dpi));
-            put(AB_KIND2, (int)(26 * g.dpi), (int)(20 * g.dpi));
-            x += (int)(4 * g.dpi);
-            check(AB_FILLCHK, L"Fill");
+            put(AB_OPACITY, S(94) + S(40), S(20));
+            x += S(16);                      // opacityGroup's Margin (0,2,16,2)
+            if (tool == TOOL_DRAW) check(AB_ERASE, L"Eraser", 0, S(2));
+            else if (tool == TOOL_LINE) check(AB_LEVEL, L"Level", 0, S(2));
+            else if (tool == TOOL_HIGHLIGHT) check(AB_HLERASE, L"Annotation eraser", 0, S(2));
+            else if (tool == TOOL_SHAPE) {
+                x += S(2);                   // the picker row's Margin (2,0,0,0)
+                put(AB_KIND0, S(26), S(20)); x += S(2);   // KindBtn Margin (1,0,1,0)
+                put(AB_KIND1, S(26), S(20)); x += S(2);
+                x += S(1);                   // KindBtn Margin (1,0,1,0): the last kind's
+                                             // right margin, then the check's own lead 10
+                check(AB_FILLCHK, L"Fill", S(10), S(18)); // fillCheck Margin (10,0,18,0)
+            } else x += S(16);
         }
     }
     maxW = max(maxW, x);
     ReleaseDC(g.view, dc);
-    g_abW = min(maxW + pad, avail);
-    g_abH = y + rowH - (int)(2 * g.dpi) + pad;
+    // the bar hugs its content: the host's Margin 8 on both sides (+ the
+    // chrome), capped at the area - the same cap the WPF MaxWidth binding
+    // puts on the wrap panel (area - 28) plus the chrome around it
+    g_abW = min(maxW + host + pad, area - S(28) + 2 * pad);
+    g_abH = rowTop + rowH + S(2) + pad;                   // the last row + the host's bottom 2
     for (AbCell& c : g_ab) if (c.r.right > g_abW) c.r.right = g_abW;
 }
 
@@ -4130,17 +4177,22 @@ static RECT AnnBarRect() {
 // field below the bottom edge rides along.
 static void AnnBarSync(bool) {
     if (!g.view) return;
-    int sh = (int)(4 * g.dpi) + 1;
+    // the shadow field: blur 6 (sigma 3) tails ~9px past the sides and depth
+    // 3 + ~9px below - the tile AnnBarDraw blends, so old ∪ new must cover it
+    int mx = (int)std::ceil(9.0 * g.dpi);
+    int sh = (int)std::ceil((3.0 + 9.0) * g.dpi) + 1;
     RECT now = g.barOn ? AnnBarRect() : RECT{ 0, 0, 0, 0 };
     RECT old = g_barLast;
     bool hadOld = old.left < old.right;
     if (hadOld && g.barOn) {
         now.bottom += sh; old.bottom += sh;
+        now.left -= mx; now.right += mx;
+        old.left -= mx; old.right += mx;
         RECT u{ min(old.left, now.left), min(old.top, now.top),
                 max(old.right, now.right), max(old.bottom, now.bottom) };
         InvalidateRect(g.view, &u, FALSE);
-    } else if (hadOld) { old.bottom += sh; InvalidateRect(g.view, &old, FALSE); }
-    else if (g.barOn) { now.bottom += sh; InvalidateRect(g.view, &now, FALSE); }
+    } else if (hadOld) { old.bottom += sh; old.left -= mx; old.right += mx; InvalidateRect(g.view, &old, FALSE); }
+    else if (g.barOn) { now.bottom += sh; now.left -= mx; now.right += mx; InvalidateRect(g.view, &now, FALSE); }
 }
 
 // Bar choices flow into the SELECTED annotation live (KillerPDF's
@@ -4287,39 +4339,106 @@ static void AbCheckLabel(HDC dc, const RECT& r, const wchar_t* lab) {
     DrawTextW(dc, lab, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 }
 
+static double Phi(double z);   // the gaussian CDF, defined with the card's shadow
+static Gdiplus::TextureBrush* GrainTex(int which);   // the grain tile as a GDI+ brush
+
 static void AnnBarDraw(HDC dc, int ox, int oy) {
     if (!g.barOn) return;
     AbLayout();
     g_barLast = RECT{ ox, oy, ox + g_abW, oy + g_abH };
-    // the drop shadow's near field (blur 6, depth 3, dir 270, 0.38)
+    bool textBar = g.barTool == TOOL_TEXT;
+    // the DropShadow: black, blur 6 (sigma 3), depth 3 down, opacity 0.38 -
+    // AnnotBarShadow's exact recipe, rasterized as one cached gaussian tile
+    // like the Find bar's (its blur 16 / 0.55 there, 6 / 0.38 here)
     {
-        Gdiplus::Graphics gs(dc);
-        for (int i = 0; i < 3; i++) {
-            Gdiplus::SolidBrush sh(Gdiplus::Color((BYTE)(60 - i * 18), 0, 0, 0));
-            gs.FillRectangle(&sh, ox + i, oy + g_abH + i, g_abW - 2 * i, 1);
+        static HBITMAP shb = nullptr; static HDC shdc = nullptr;
+        static int shw = 0, shh = 0, shmx = 0; static double shdpi = 0;
+        double sig = 3.0 * g.dpi, depth = 3.0 * g.dpi;
+        int mx = (int)std::ceil(3.0 * sig), my = (int)std::ceil(depth + 3.0 * sig);
+        int tw = g_abW + 2 * mx, th = g_abH + my;
+        if (!shb || shw != tw || shh != th || shdpi != g.dpi) {
+            BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), tw, -th, 1, 32, BI_RGB };
+            BYTE* px = nullptr;
+            HBITMAP nb = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
+            if (px && nb) {
+                for (int y = 0; y < th; y++) {
+                    double ay = Phi((y - depth) / sig) - Phi((y - depth - g_abH) / sig);
+                    BYTE* row = px + (size_t)y * tw * 4;
+                    for (int x2 = 0; x2 < tw; x2++) {
+                        double a = 0.38 * ay * (Phi((x2 - mx) / sig) - Phi((x2 - mx - g_abW) / sig));
+                        BYTE* p = row + (size_t)x2 * 4;
+                        p[0] = p[1] = p[2] = 0;
+                        p[3] = (BYTE)std::lround(a * 255.0);
+                    }
+                }
+                if (!shdc) shdc = CreateCompatibleDC(dc);
+                if (shb) DeleteObject(shb);
+                shb = nb;
+                SelectObject(shdc, shb);
+                shw = tw; shh = th; shmx = mx; shdpi = g.dpi;
+            }
+        }
+        if (shb) {
+            BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            AlphaBlend(dc, ox - shmx, oy, shw, shh, shdc, 0, 0, shw, shh, bf);
         }
     }
-    // the body: #141414, square top corners, rounded bottom (0,0,4,4)
+    // the body: the floating surface tier - MenuBackgroundBrush #141414 under
+    // the shared grain (AnnotationBars.cs's BuildBarHost grain layer), square
+    // top corners, the flyout's radius-4 bottom (0,0,4,4). The TEXT bar adds
+    // its own (1,0,1,1) PaneBorderBrush #555555 frame - no top edge, the
+    // toolbar above already separates (TextSettingsBar.cs); the draw-family
+    // bars ride BarEdgeThickness 0 in Dark - no edge of their own, the shadow
+    // is the only line.
+    int spx = g_grainPX, spy = g_grainPY;
+    g_grainPX += ox; g_grainPY += oy;
     {
         Gdiplus::Graphics gs(dc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::GraphicsPath p;
         float fx = (float)ox, fy = (float)oy;
         float fw = (float)g_abW, fh = (float)g_abH;
         float rad = 4.0f * (float)g.dpi;
-        p.AddLine(fx, fy, fx + fw, fy);
-        p.AddArc(fx + fw - 2 * rad, fy + fh - 2 * rad, 2 * rad, 2 * rad, 0, 90);
-        p.AddArc(fx, fy + fh - 2 * rad, 2 * rad, 2 * rad, 90, 90);
-        p.CloseFigure();
-        Gdiplus::SolidBrush body(Gdiplus::Color(255, 0x14, 0x14, 0x14));
-        gs.FillPath(&body, &p);
-        Gdiplus::Pen edge(Gdiplus::Color(255, 0x40, 0x40, 0x40), 1.0f);
-        gs.DrawPath(&edge, &p);
-        // the grip: three 3px dots, #a3a3a3, vertically centered at the left
-        int cy = oy + g_abH / 2, cx = ox + (int)(6 * g.dpi);
-        Gdiplus::SolidBrush dot(Gdiplus::Color(255, 0xa3, 0xa3, 0xa3));
-        for (int i = -1; i <= 1; i++)
-            gs.FillEllipse(&dot, cx - 1, cy + i * (int)(4.5 * g.dpi) - 1, 3, 3);
+        auto barPath = [&](float inset) {
+            Gdiplus::GraphicsPath* p = new Gdiplus::GraphicsPath();
+            float r = max(0.5f, rad - inset);
+            p->AddLine(fx + inset, fy + inset, fx + fw - inset, fy + inset);
+            p->AddArc(fx + fw - inset - 2 * r, fy + fh - inset - 2 * r, 2 * r, 2 * r, 0, 90);
+            p->AddArc(fx + inset, fy + fh - inset - 2 * r, 2 * r, 2 * r, 90, 90);
+            p->CloseFigure();
+            return p;
+        };
+        if (textBar) {   // the 1px rim under the grain: fill the rim color,
+                         // then the inset body over it - the top edge stays
+                         // body (no top border)
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::SolidBrush rim(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+            Gdiplus::GraphicsPath* outer = barPath(0);
+            gs.FillPath(&rim, outer);
+            delete outer;
+        }
+        Gdiplus::GraphicsPath* inner = barPath(textBar ? 1.0f : 0.0f);
+        if (Gdiplus::TextureBrush* t = GrainTex(2)) gs.FillPath(t, inner);
+        else { Gdiplus::SolidBrush mb(Gdiplus::Color(255, 0x14, 0x14, 0x14)); gs.FillPath(&mb, inner); }
+        delete inner;
+    }
+    g_grainPX = spx; g_grainPY = spy;
+    // the grip: MakeBarGrip's dots - 3px, MutedTextBrush #a3a3a3, spaced 3px,
+    // centered in the grip strip (three dots on the single-row bars, the text
+    // bar's MakeBarGrip(4) carries four)
+    {
+        Gdiplus::Graphics gs(dc);
+        for (const AbCell& c : g_ab) {
+            if (c.id != AB_GRIP) continue;
+            int n = textBar ? 4 : 3;
+            float cx = (float)(ox + c.r.left) + 2.5f * (float)g.dpi;
+            float cy = (float)(oy + c.r.top + c.r.bottom) / 2.0f;
+            Gdiplus::SolidBrush dot(Gdiplus::Color(255, 0xa3, 0xa3, 0xa3));
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            for (int i = 0; i < n; i++)
+                gs.FillEllipse(&dot, cx - 1.5f * (float)g.dpi, cy + (i - (n - 1) / 2.0f) * 6.0f * (float)g.dpi - 1.5f * (float)g.dpi,
+                               3.0f * (float)g.dpi, 3.0f * (float)g.dpi);
+            break;
+        }
     }
     SetBkMode(dc, TRANSPARENT);
     SelectObject(dc, AbFont11());
@@ -4498,7 +4617,8 @@ static void AnnBarDraw(HDC dc, int ox, int oy) {
             DrawTextW(dc, id == AB_R_CLEAR ? L"Clear" : L"Redact", -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
     }
-    // the redact bar's status text and the slider labels' shared tone
+    // the redact bar's status text: its own cell's band (the layout pushed it
+    // right after the grip), drawn here because the string is rebuilt live
     if (g.barTool == TOOL_REDACT) {
         DocState& D = DV(FocusB());
         int marks = 0, pgs = 0;
@@ -4506,8 +4626,12 @@ static void AnnBarDraw(HDC dc, int ox, int oy) {
         std::wstring st = marks ? (L"Marked areas: " + std::to_wstring(marks) + L", on " + std::to_wstring(pgs) + L" page(s)")
                                 : L"Drag over the page to mark areas";
         SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
-        RECT sr{ ox + (int)(16 * g.dpi), oy + (int)(4 * g.dpi), ox + g_abW, oy + (int)(4 * g.dpi) + (int)(16 * g.dpi) };
-        DrawTextW(dc, st.c_str(), -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        for (const AbCell& c : g_ab) {
+            if (c.id != -1 || c.lab) continue;
+            RECT sr{ ox + c.r.left, oy + c.r.top, ox + c.r.right, oy + c.r.bottom };
+            DrawTextW(dc, st.c_str(), -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            break;
+        }
     }
 }
 
@@ -6179,20 +6303,42 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         if (g.barSlide >= 0) { AnnBarSlideValue(h, p); return 0; }
         if (g_teResize) {                        // the editor's box follows the dragged handle:
-            int minW = (int)(40 * g.dpi), minH = (int)(24 * g.dpi);
-            int nx0 = g_teAnchor.x, ny0 = g_teAnchor.y;
-            int nx1 = max(g_teAnchor.x + minW, p.x), ny1 = max(g_teAnchor.y + minH, p.y);
-            if (g_teHandle == 0 || g_teHandle == 3) std::swap(nx0, nx1);
-            if (g_teHandle >= 2) std::swap(ny0, ny1);
-            if (nx1 - nx0 != g_teStart.right - g_teStart.left || ny1 - ny0 != g_teStart.bottom - g_teStart.top ||
-                nx0 != g_teStart.left || ny0 != g_teStart.top) {
-                MoveWindow(g.tedit, nx0, ny0, nx1 - nx0, ny1 - ny0, TRUE);
-                g_teStart = RECT{ nx0, ny0, nx1, ny1 };
-                float k = (float)(DV(g.tePaneB).zoom * g.dpi);
-                g.teW = max(24.0f, (nx1 - nx0) / max(0.01f, k));   // the commit takes the new width
+            int minW = (int)(40 * g.dpi), minH = (int)(24 * g.dpi);   // KillerPDF's min 40x24
+            // KillerPDF's PdfViewer.Annotations live resize: the dragged
+            // corner takes the pointer (clamped to the page card), the size is
+            // the pointer's ABSOLUTE distance from the opposite-corner anchor
+            // clamped to the minimum, and the box's origin derives from the
+            // anchor MINUS that size on the dragged sides - so a left/top
+            // handle grows the box leftward/upward with the anchor pinned,
+            // and crossing the anchor flips the box to the other side without
+            // ever producing an inverted rect.
+            DocState& ED = DV(g.tePaneB);
+            int cardL = PaneX0(g.tePaneB) + CardX(g.tePaneB), cardR = cardL + CardW(g.tePaneB);
+            POINT q{ std::clamp(p.x, cardL, max(cardL, cardR)), std::clamp(p.y, 0, g.ch) };
+            int newW = max(minW, abs(q.x - g_teAnchor.x));
+            int newH = max(minH, abs(q.y - g_teAnchor.y));
+            int nx = (g_teHandle == 0 || g_teHandle == 3) ? g_teAnchor.x - newW : g_teAnchor.x;
+            int ny = (g_teHandle == 0 || g_teHandle == 1) ? g_teAnchor.y - newH : g_teAnchor.y;
+            if (nx != g_teStart.left || ny != g_teStart.top ||
+                newW != g_teStart.right - g_teStart.left || newH != g_teStart.bottom - g_teStart.top) {
+                RECT was{ g_teStart.left - 8, g_teStart.top - 8, g_teStart.right + 8, g_teStart.bottom + 8 };
+                MoveWindow(g.tedit, nx, ny, newW, newH, TRUE);
+                g_teStart = RECT{ nx, ny, nx + newW, ny + newH };
+                float k = (float)(ED.zoom * g.dpi);
+                // the box's page-DIP origin and width ride the drag, so the
+                // commit lands the annotation where the box was left
+                int ox, oy;
+                if (PageOrigin(ED, g.tePaneB, g.tePage, ox, oy)) {
+                    g.teX = (nx - PaneX0(g.tePaneB) - ox) / max(0.01f, k);
+                    g.teY = (ny - oy) / max(0.01f, k);
+                }
+                g.teW = max(24.0f, newW / max(0.01f, k));
                 g_teFixedH = true;   // a handle drag makes the height free-form (KillerPDF's rule)
+                RECT now{ nx - 8, ny - 8, nx + newW + 8, ny + newH + 8 };
+                RECT u{ min(was.left, now.left), min(was.top, now.top),
+                        max(was.right, now.right), max(was.bottom, now.bottom) };
+                InvalidateRect(h, &u, FALSE);   // the ring + handles' own band, not the view
             }
-            InvalidateRect(h, nullptr, FALSE);
             return 0;
         }
         if (g.barOn) {                           // the bar's hover tile, flip-only
@@ -6462,9 +6608,25 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
-            if (g.barOn) {                     // the bar's cells take the hand
+            if (g.barOn) {                     // the bar's cells take the hand (the bar wins
+                POINT p; GetCursorPos(&p); ScreenToClient(h, &p);   // its pixels in the press
+                if (AnnBarHit(p) != AB_OUT) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }   // path too)
+            }
+            if (g.tedit) {                     // the editor's corner handles say the drag
                 POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
-                if (AnnBarHit(p) != AB_OUT) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }
+                RECT er; GetWindowRect(g.tedit, &er);
+                ScreenToClient(h, (POINT*)&er); ScreenToClient(h, ((POINT*)&er) + 1);
+                int hs = (int)(12 * g.dpi);
+                for (int hd = 0; hd < 4; hd++) {
+                    int hx = (hd == 0 || hd == 3) ? er.left : er.right;
+                    int hy = (hd < 2) ? er.top : er.bottom;
+                    if (p.x >= hx - hs / 2 && p.x < hx - hs / 2 + hs &&
+                        p.y >= hy - hs / 2 && p.y < hy - hs / 2 + hs) {
+                        // KillerPDF's handle cursors: NW/SE the NWSE arrow, NE/SW the NESW one
+                        SetCursor(LoadCursorW(nullptr, (hd == 0 || hd == 2) ? IDC_SIZENWSE : IDC_SIZENESW));
+                        return TRUE;
+                    }
+                }
             }
             if (fd.open) {                     // the bar's cells take the hand (ToolbarButton's
                 POINT p; GetCursorPos(&p);     // Cursor=Hand); over the chrome an arrow - the
