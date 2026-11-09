@@ -490,20 +490,15 @@ static bool InfoIsOpen();
 static void SetStatusHold(const std::wstring& t, unsigned ms = 2500);   // the footer's held line
 static void SetTool(int t, bool b);     // the toolbar's tool buttons (KillerPDF's SetTool)
 static void CommitTextEdit(bool commit = true);   // the Text tool's box (defined with the tools)
-static void NewBlank();                 // the New button: a blank document into the focused pane
+static void NewBlank();                 // Ctrl+N: a blank document into the focused pane
 static void CloseDoc();                 // the Close button: the focused pane's document leaves
-static void SaveDoc(bool saveAs);       // the Save button + the chevron's Save As
-static void RecentsPopup();             // the Open chevron's recent-files menu
-static void SaveMenuPopup();            // the Save chevron's Save / Save As menu
+static void SaveDoc(bool saveAs);       // the Save button + Ctrl+S / Ctrl+Shift+S
 static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err);
-static void RememberRecent(const std::wstring& p);   // the Open chevron's MRU (registry)
 // ---- edit tools, the bar and its popups (defined with their sections) ----
 static void UndoPush(bool b);           // snapshot the pane's annotations + marks before a change
-static void UndoOp();                   // toolbar Undo / Ctrl+Z
-static void RedoOp();                   // toolbar Redo / Ctrl+Y
+static void UndoOp();                   // Ctrl+Z
+static void RedoOp();                   // Ctrl+Y / Ctrl+Shift+Z
 static void ClearAllAnnos();            // the Clear All button
-static void FlattenSave();              // the Flatten button: a rasterized copy, annotations burned
-static void PrintDoc();                 // the Print button
 static void TransformPopupOpen();       // the Transform button's menu
 static void TransformApply(bool b, int page, int turns, bool flipH, bool flipV);
 static void ApplyDrawStyleToSelection();    // bar color/size/opacity -> the selected annotation
@@ -877,39 +872,33 @@ static void EnsureInfoBack(HDC ref, int w, int h) {
     g_idw = w; g_idh = h;
 }
 
-// The row's buttons, laid out exactly like the reference toolbar the user
-// showed: a LEFT cluster (New, Close, Open+chevron, Save+chevron, Flatten,
-// Print, Undo, Redo - ToolbarLayout's default Left list is new, close, open,
-// save, ... flatten, print, undo, redo) and the RIGHT cluster (the four tools,
-// Transform, Clear All, then the search unit).
+// The row's buttons, the trimmed set the user's reference shows: a LEFT
+// cluster (Close, Open, Save) and the RIGHT cluster (the tools, Transform,
+// Clear All, then the search unit) - the reference's New, Flatten, Print,
+// Undo, Redo and the Open/Save split chevrons stay off docsy's row, their
+// actions riding the keyboard shortcuts instead.
 // Labels are the reference's own strings (Str_Lbl_*); glyphs are the buttons'
-// own MDL2 codepoints from MainWindow.xaml - Open and Save are split buttons
-// (main half + \uE70D chevron, the OpenRecent / SaveMenu dropdowns), Transform
-// draws its composed icon (a frame + four move arrows), like its XAML and
-// DrawToolbarGlyph.
-enum { TB_NEW, TB_CLOSE, TB_OPEN, TB_OPENM, TB_SAVE, TB_SAVEM,   // the file cluster
-       TB_FLATTEN, TB_PRINT, TB_UNDO, TB_REDO,
+// own MDL2 codepoints from MainWindow.xaml - Transform draws its composed
+// icon (a frame + the E7C2 move glyph), like its XAML and DrawToolbarGlyph.
+enum { TB_CLOSE, TB_OPEN, TB_SAVE,   // the file cluster
        TB_SELECT, TB_TEXT, TB_HIGHLIGHT, TB_LINE, TB_SHAPE, TB_DRAW,
        TB_TRANSFORM, TB_CLEAR, TB_FIND, TB_COUNT };
 static const wchar_t* const TbLabel[TB_COUNT] = {
-    L"New", L"Close", L"Open", L"", L"Save", L"",
-    L"Flatten", L"Print", L"Undo", L"Redo",
+    L"Close", L"Open", L"Save",
     L"Select", L"Text", L"Highlight", L"Line", L"Shapes", L"Draw",
     L"Transform", L"Clear All", L"Find Text"
 };
 static const wchar_t* const TbGlyph[TB_COUNT] = {
-    L"\uE7C3", L"\uE711", L"\uE8DA", L"\uE70D", L"\uE74E", L"\uE70D",
-    L"\uE8B9", L"\uE749", L"\uE7A7", L"\uE7A6",
+    L"\uE711", L"\uE8DA", L"\uE74E",
     L"\uE8B0", L"\uE8D2", L"\uE7E6", L"\uE738", L"\uE739", L"\uED63",
     L"", L"\uED62", L"\uE721"
 };   // Transform carries its composed icon, drawn in BarDraw
 
-// ToolbarAvailability: New and Open arm always (KillerPDF's XAML leaves them
-// enabled with no document), Close/Save/Flatten/Print/tools/Transform/Search
-// arm with a document; Undo/Redo follow their stacks; Clear All arms when
-// there is anything to clear. The chevrons follow their split buttons. Narrow
-// windows shed RIGHT-cluster middle buttons first (ReflowToolbar's shed order,
-// adapted) - Select and Find Text always stay.
+// ToolbarAvailability: Open arms always (KillerPDF's XAML leaves it enabled
+// with no document), Close/Save/tools/Transform/Search arm with a document;
+// Clear All arms when there is anything to clear. Narrow windows shed
+// RIGHT-cluster middle buttons first (ReflowToolbar's shed order, adapted) -
+// Select and Find Text always stay.
 static bool TbShed[TB_COUNT] = {};
 static int TbToolOf(int i) {
     if (i >= TB_SELECT && i <= TB_DRAW) return i - TB_SELECT;
@@ -917,9 +906,7 @@ static int TbToolOf(int i) {
 }
 static bool TbEnabled(int i) {
     bool doc = DVF().n != 0;
-    if (i == TB_NEW || i == TB_OPEN || i == TB_OPENM) return true;
-    if (i == TB_UNDO) return doc && !g.undo.empty();
-    if (i == TB_REDO) return doc && !g.redo.empty();
+    if (i == TB_OPEN) return true;
     if (i == TB_CLEAR) {
         if (!doc) return false;
         for (auto& kv : DVF().annos) if (!kv.second.empty()) return true;
@@ -930,9 +917,7 @@ static bool TbEnabled(int i) {
 
 // A button's auto width in Under mode: the wider of the glyph's 24px MDL2 line
 // box (FontSize 20) and the caption, plus Padding 6,4's 12 horizontal pixels.
-// The split chevrons carry no caption: their box is the XAML's Width 13.
 static int TbBtnW(HDC dc, int i) {
-    if (i == TB_OPENM || i == TB_SAVEM) return (int)(13 * g.dpi);
     RECT rc{ 0, 0, 0, 0 };
     HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
     DrawTextW(dc, TbLabel[i], -1, &rc, DT_CALCRECT | DT_SINGLELINE);
@@ -945,8 +930,7 @@ static int TbBtnW(HDC dc, int i) {
 // (a StackPanel has no spacing; each button's own padding makes the gap).
 // The LEFT cluster anchors to the left edge, the RIGHT cluster to the right;
 // when the window is too narrow for both, right-cluster middle buttons shed
-// (ReflowToolbar) until the two fit. A split chevron overlaps its main half's
-// right edge by 6px (Margin -6), exactly the XAML's joined look.
+// (ReflowToolbar) until the two fit.
 static void TbRects(int w, RECT out[TB_COUNT]) {
     HDC dc = GetDC(g.bar);
     int bh = TbBtnH();
@@ -964,10 +948,8 @@ static void TbRects(int w, RECT out[TB_COUNT]) {
     static const int shedOrder[] = { TB_TRANSFORM, TB_CLEAR,
                                      TB_DRAW, TB_SHAPE, TB_LINE, TB_HIGHLIGHT, TB_TEXT };
     int lx = (int)(4 * g.dpi);
-    for (int i = TB_NEW; i < TB_SELECT; i++) {
+    for (int i = TB_CLOSE; i < TB_SELECT; i++) {
         int bw = TbBtnW(dc, i);
-        if ((i == TB_OPENM || i == TB_SAVEM) && out[i - 1].right > 0)
-            lx -= (int)(6 * g.dpi);        // the chevron slides 6px over the main half
         out[i] = { lx, y0, lx + bw, y0 + bh };
         lx += bw;
     }
@@ -988,6 +970,62 @@ static int BarHit(POINT p, int w) {
     for (int i = 0; i < TB_COUNT; i++)
         if (!TbShed[i] && p.x >= bs[i].left && p.x < bs[i].right && p.y >= bs[i].top && p.y < bs[i].bottom) return i;
     return -1;
+}
+
+// The composed Transform icon's inner glyph, ink-centered (AbCheckGlyph's
+// technique): drawn once into a scratch frame-sized box exactly the way the
+// real draw draws it, its ink bbox scanned, and the real draw's rect shifted
+// by minus the ink-to-center offset - the E7C2 move arrows land dead center
+// in their frame BY CONSTRUCTION (DrawTextW's line-box math had thrown them
+// onto the frame's edges). ANTIALIASED_QUALITY is what the reference shows:
+// the ToolbarButton ContentPresenter's DropShadowEffect renders this content
+// in grayscale AA - ClearType's subpixel filter read as chroma mush at 9px.
+static HFONT g_tfFont = nullptr;
+static double g_tfFontDpi = 0;
+static POINT g_tfInkOff{ 0, 0 };       // ink-center minus box-center at this dpi
+static void TfMoveGlyph(HDC dc, const RECT& box, COLORREF c) {
+    if (!g_tfFont || g_tfFontDpi != g.dpi) {
+        if (g_tfFont) DeleteObject(g_tfFont);
+        g_tfFont = CreateFontW(-(int)std::lround(9 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                               L"Segoe MDL2 Assets");
+        g_tfInkOff = { 0, 0 };
+        int bw = max(1, box.right - box.left), bh = max(1, box.bottom - box.top);
+        HDC m = CreateCompatibleDC(dc);
+        HBITMAP bm = CreateCompatibleBitmap(dc, bw, bh);
+        HGDIOBJ ob = SelectObject(m, bm);
+        RECT full{ 0, 0, bw, bh };
+        HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));
+        FillRect(m, &full, bg); DeleteObject(bg);
+        HGDIOBJ of = SelectObject(m, g_tfFont);
+        SetBkMode(m, TRANSPARENT);
+        SetTextColor(m, RGB(255, 255, 255));
+        DrawTextW(m, L"\uE7C2", -1, &full, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(m, of);
+        int x0 = bw, y0 = bh, x1 = -1, y1 = -1;
+        for (int y = 0; y < bh; y++)
+            for (int x = 0; x < bw; x++) {
+                COLORREF p2 = GetPixel(m, x, y);
+                if (GetRValue(p2) + GetGValue(p2) + GetBValue(p2) > 90) {   // ink over black
+                    if (x < x0) x0 = x;
+                    if (x > x1) x1 = x;
+                    if (y < y0) y0 = y;
+                    if (y > y1) y1 = y;
+                }
+            }
+        SelectObject(m, ob); DeleteObject(bm); DeleteDC(m);
+        if (x1 >= x0 && y1 >= y0)
+            g_tfInkOff = { (x0 + x1) / 2 - bw / 2, (y0 + y1) / 2 - bh / 2 };
+        g_tfFontDpi = g.dpi;
+    }
+    RECT cr{ box.left - g_tfInkOff.x, box.top - g_tfInkOff.y,
+             box.right - g_tfInkOff.x, box.bottom - g_tfInkOff.y };
+    HGDIOBJ of = SelectObject(dc, g_tfFont);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, c);
+    DrawTextW(dc, L"\uE7C2", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, of);
 }
 
 static void BarDraw(HDC dc, int w, int h) {
@@ -1046,13 +1084,11 @@ static void BarDraw(HDC dc, int w, int h) {
         // the active tool (SelectionFg), TextBrush otherwise, the 0.4 dim over
         // #1c1c1c with no document - and the icon shadow's dark copy under the
         // light pass except on the active tool (Tag="selected" clears the
-        // ContentPresenter effect). The chevrons draw their 10px glyph only
-        // (FontSize 10, Width 13, no caption); Save's main half rides the
+        // ContentPresenter effect). Save's accent rides the
         // ToolbarSplitMainAccent's AccentLogo #1ea54c.
-        bool chev = i == TB_OPENM || i == TB_SAVEM;
         bool accent = i == TB_SAVE;
         int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);   // the MDL2 line box at FontSize 20:
-        int colH = gh + (chev ? 0 : gap + capH);               // a 20px cell would clip the glyph
+        int colH = gh + gap + capH;                            // a 20px cell would clip the glyph
         int avail = (int)(b.bottom - b.top) - colH;            // MSVC: RECT members are LONG - cast
         int y0 = b.top + max(0, avail) / 2;                    // before the std::max deduction
         RECT gr{ b.left, y0, b.right, y0 + gh };
@@ -1066,31 +1102,14 @@ static void BarDraw(HDC dc, int w, int h) {
                                   : accent ? RGB(0x1e, 0xa5, 0x4c) : RGB(0xe0, 0xe0, 0xe0))
                         : (danger ? RGB(0x77, 0x33, 0x33)
                                   : accent ? RGB(0x18, 0x63, 0x2e) : RGB(0x6a, 0x6a, 0x6a));
-        if (chev) {                          // the split chevron: FontSize 10 in its 13px cell
-            if (!sel) {
-                SelectObject(dc, CaptionFont(g_tbglyph, 10, false, L"Segoe MDL2 Assets"));
-                SetTextColor(dc, RGB(16, 16, 16));
-                RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
-                DrawTextW(dc, TbGlyph[i], -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            }
-            SelectObject(dc, CaptionFont(g_tbglyph, 10, false, L"Segoe MDL2 Assets"));
-            SetTextColor(dc, fg);
-            DrawTextW(dc, TbGlyph[i], -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            continue;
-        }
-        if (!TbGlyph[i][0]) {                // the composed icon. Transform = DrawToolbarGlyph's
-                                             // TransformBoxMove: a 14x14 1px frame with the four
-                                             // move arrows inside (70% of the box, square caps,
-                                             // miter joins)
+        if (!TbGlyph[i][0]) {                // the composed icon. ToolRotateBtn's XAML: a
+                                             // 16x16 Grid holding a 14x14 1px Border with
+                                             // the E7C2 "Move" MDL2 glyph at FontSize 9
+                                             // centered inside - the font's own outlines
+                                             // ARE the four arrows, so the font draws them
             int fw2 = (int)(14 * g.dpi), fh2 = (int)(14 * g.dpi);
             int gx = b.left + (b.right - b.left - fw2) / 2;
             int gy = gr.top + (gh - fh2) / 2;
-            // ToolRotateBtn's own icon, exactly as its XAML builds it: a
-            // 16x16 Grid holding a 14x14 1px Border (stroke bound to the
-            // button's Foreground) with the E7C2 "Move" MDL2 glyph at
-            // FontSize 9 centered inside - NOT hand-drawn arrows. The
-            // glyph IS the four move arrows; the font's own outlines are
-            // what the reference shows, so the font draws them here too.
             auto drawTf = [&](COLORREF c, int ox, int oy) {
                 HPEN fr = CreatePen(PS_SOLID, 1, c);
                 HGDIOBJ og = SelectObject(dc, fr);
@@ -1099,14 +1118,10 @@ static void BarDraw(HDC dc, int w, int h) {
                 Rectangle(dc, fr2.left, fr2.top, fr2.right, fr2.bottom);
                 SelectObject(dc, ob);
                 SelectObject(dc, og); DeleteObject(fr);
-                RECT gr2{ fr2.left, fr2.top, fr2.right, fr2.bottom };
-                SelectObject(dc, CaptionFont(g_tbglyph, 9, false, L"Segoe MDL2 Assets"));
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, c);
-                DrawTextW(dc, L"\uE7C2", -1, &gr2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                TfMoveGlyph(dc, fr2, c);     // the glyph, ink-centered in the frame
             };
-            if (!sel) drawTf(RGB(16, 16, 16), 1, 1);
-            drawTf(fg, 0, 0);
+            if (!sel) drawTf(RGB(16, 16, 16), 0, 1);   // Direction 270: the shadow hangs
+            drawTf(fg, 0, 0);                          // BELOW the icon, never beside it
         } else {
         if (!sel) {                                            // the shadow copy
             SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
@@ -1193,16 +1208,9 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int hit = BarHit(p, r.right);
             if (hit >= 0 && hit == was && TbEnabled(hit)) {    // click on release inside one
                 switch (hit) {                                 // button, KillerPDF's handlers
-                case TB_NEW: NewBlank(); break;
                 case TB_CLOSE: CloseDoc(); break;
                 case TB_OPEN: OpenDlg(); break;
-                case TB_OPENM: RecentsPopup(); break;
                 case TB_SAVE: SaveDoc(false); break;
-                case TB_SAVEM: SaveMenuPopup(); break;
-                case TB_FLATTEN: FlattenSave(); break;
-                case TB_PRINT: PrintDoc(); break;
-                case TB_UNDO: UndoOp(); break;
-                case TB_REDO: RedoOp(); break;
                 case TB_TRANSFORM: TransformPopupOpen(); break;
                 case TB_CLEAR: ClearAllAnnos(); break;
                 case TB_FIND: FindToggle(); break;
@@ -2193,7 +2201,6 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         D.prot.clear(); D.pflip.clear();
         D.tool = TOOL_SELECT;        // the pane's tool re-lands on Select, like KillerPDF's
                                      // open path restores the toolbar
-        RememberRecent(full);        // the Open chevron's MRU rides every open
         g.annSelPage = -1; g.annSelIdx = -1;   // and the Select tool's ring has nothing to hold
         SelClear(D);
         bool mine = fd.pane == (&D == &g.dB);        // the find dies only when ITS document
@@ -2241,55 +2248,8 @@ static void HandleDrop(HDROP d, HWND h) {        // the pane under the drop take
 }
 
 // ---------------- file cluster (KillerPDF's FileOperations.cs) ----------------
-// New / Close / Open / Save with their split-button chevrons, reduced to
-// docsy's single-document model: a pane IS KillerPDF's tab.
-
-// The Open chevron's MRU: KillerPDF persists App.GetRecentFiles() in its
-// settings store; docsy keeps the same list under HKCU\Software\Docsy\Recents,
-// newest first, capped at 8. Open() remembers every file it opens.
-static void RememberRecent(const std::wstring& p) {
-    wchar_t full[MAX_PATH * 4];
-    if (!GetFullPathNameW(p.c_str(), (DWORD)_countof(full), full, nullptr)) return;
-    HKEY k;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Docsy\\Recents", 0, nullptr,
-                        0, KEY_READ | KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
-    // read the old list, drop duplicates of this file, re-write newest-first
-    wchar_t items[8][MAX_PATH * 4] = {}; int n = 0;
-    for (int i = 0; i < 8; i++) {
-        wchar_t name[8]; swprintf(name, 8, L"%d", i);
-        DWORD sz = sizeof(items[0]), type = 0;
-        if (RegQueryValueExW(k, name, nullptr, &type, (BYTE*)items[n], &sz) == ERROR_SUCCESS &&
-            type == REG_SZ && items[n][0]) {
-            if (!_wcsicmp(items[n], full)) continue;   // the reopened file moves to the front
-            if (++n >= 8) break;
-        }
-    }
-    for (int i = min(n, 7); i > 0; i--) wcscpy(items[i], items[i - 1]);   // shift, front slot free
-    wcscpy(items[0], full); n = min(8, n + 1);
-    for (int i = 0; i < n; i++) {
-        wchar_t name[8]; swprintf(name, 8, L"%d", i);
-        RegSetValueExW(k, name, 0, REG_SZ, (BYTE*)items[i], (DWORD)((wcslen(items[i]) + 1) * sizeof(wchar_t)));
-    }
-    for (int i = n; i < 8; i++) {                  // clear the stale tail
-        wchar_t name[8]; swprintf(name, 8, L"%d", i);
-        RegDeleteValueW(k, name);
-    }
-    RegCloseKey(k);
-}
-static std::vector<std::wstring> RecentList() {
-    std::vector<std::wstring> out;
-    HKEY k;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Docsy\\Recents", 0, KEY_READ, &k) != ERROR_SUCCESS) return out;
-    for (int i = 0; i < 8 && out.size() < 8; i++) {
-        wchar_t name[8]; swprintf(name, 8, L"%d", i);
-        wchar_t v[MAX_PATH * 4] = {}; DWORD sz = sizeof v, type = 0;
-        if (RegQueryValueExW(k, name, nullptr, &type, (BYTE*)v, &sz) == ERROR_SUCCESS &&
-            type == REG_SZ && v[0] && GetFileAttributesW(v) != INVALID_FILE_ATTRIBUTES)
-            out.push_back(v);                      // dead paths leave the menu (KillerPDF warns
-    }                                              // on click; a clean list reads better here)
-    RegCloseKey(k);
-    return out;
-}
+// Close / Open / Save, reduced to docsy's single-document model: a pane IS
+// KillerPDF's tab.
 
 // New_Click -> NewDocument: a blank one-page PDF opens temp-backed with the
 // suggested name "Untitled.pdf" - the first Save asks where to keep it, which
@@ -2359,7 +2319,7 @@ static void CloseDoc() {
 
 // The shared write-out: every page renders at ~150dpi with the annotations
 // composited - the same paint the screen shows - and lands as JPEG pages in a
-// minimal PDF. FlattenSave and SaveDoc share it.
+// minimal PDF. SaveDoc's writer is the only emitter.
 static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err) {
     HANDLE f = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) { err = L"the file could not be written"; return false; }
@@ -2480,26 +2440,7 @@ static void SaveDoc(bool saveAs) {
         D.name = sl == std::wstring::npos ? file : file.substr(sl + 1);
         UpdateTitle();
     }
-    RememberRecent(file);
     SetStatusHold(std::wstring(L"Saved to ") + file);
-}
-
-// OpenRecent_Click: the Open chevron drops the recents menu; a row opens into
-// the focused pane. Empty shows KillerPDF's disabled "No recent files" row.
-static void RecentsPopup() {
-    auto items = RecentList();
-    if (items.empty()) { SetStatusHold(L"No recent files"); return; }
-    RECT r; GetWindowRect(g.bar, &r);
-    RECT bs[TB_COUNT]; TbRects(r.right - r.left, bs);
-    ListPopOpen(g.main, { r.left + bs[TB_OPENM].left, r.bottom + 2 }, items, 2, -1);
-}
-
-// SaveMenu_Click: the Save chevron's explicit Save / Save As rows.
-static void SaveMenuPopup() {
-    RECT r; GetWindowRect(g.bar, &r);
-    RECT bs[TB_COUNT]; TbRects(r.right - r.left, bs);
-    ListPopOpen(g.main, { r.left + bs[TB_SAVEM].left, r.bottom + 2 },
-                { L"Save", L"Save As..." }, 3, -1);
 }
 
 // ---------------- sidebar ----------------
@@ -2849,7 +2790,9 @@ static void CommitTextEdit(bool commit) {
     int fpg = g.tePage; bool fpaneB = g.tePaneB;
     g.tedit = nullptr;
     if (g.teBg) { DeleteObject(g.teBg); g.teBg = nullptr; }
-    if (GetFocus() == e) SetFocus(g.view);
+    if (GetFocus() == e) SetFocus(g.main);   // the keys go home - parking focus on the view
+                                             // starved the main window's shortcuts (Del on
+                                             // the selected box included) after every commit
     DestroyWindow(e);
     if (!s.empty()) {
         DocState& D = DV(fpaneB);
@@ -4678,16 +4621,6 @@ static LRESULT CALLBACK ListPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_lp.who == 0) {
             g.textFont = g_lp.items[hot];
             ApplyTextStyleToSelection();
-        } else if (g_lp.who == 2) {          // the Open chevron's recents: open into the pane
-            std::wstring p = g_lp.items[hot];
-            ListPopClose();
-            Open(DVF(), p);
-            return 0;
-        } else if (g_lp.who == 3) {          // the Save chevron's Save / Save As rows
-            bool as2 = hot == 1;
-            ListPopClose();
-            SaveDoc(as2);
-            return 0;
         } else {
             bool b = FocusB();
             DocState& D = DV(b);
@@ -4710,7 +4643,7 @@ static void ListPopOpen(HWND owner, POINT p, std::vector<std::wstring> items, in
     g_lp.items = items; g_lp.hot = -1; g_lp.who = who;
     g_lp.scroll = std::clamp(selRow - 3, 0, max(0, (int)items.size() - 1));
     int rowH = (int)(22 * g.dpi);
-    int w = who == 2 ? (int)(360 * g.dpi) : (int)(200 * g.dpi);   // recents carry full paths
+    int w = (int)(200 * g.dpi);
     int rows = min(12, (int)items.size());
     int h2 = (int)(8 * g.dpi) + rows * rowH;
     g.fontPop = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"DocsyListPop", nullptr,
@@ -6031,7 +5964,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         ScrollPane(b, D.sx + GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 80) / 120, D.sy);
         return 0;
     }
-    case WM_KEYDOWN: return 0;   // keys live on the main window
+    case WM_KEYDOWN:                         // keys live on the main window: forward, never
+        SendMessageW(g.main, m, wp, lp);     // swallow - a stray focus here once ate Del and
+        return 0;                            // every other shortcut until the next edit
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         SetCapture(h);
@@ -9408,7 +9343,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
-// ---------------- Transform / Flatten / Print (the toolbar's actions) ----------------
+// ---------------- Transform (the toolbar's action) ----------------
 
 // The Transform menu's apply: the page's session transform - KillerPDF
 // rasterizes the page for these (its TransformWindow), and the annotations
@@ -9477,80 +9412,6 @@ static void TransformApply(bool b, int page, int turns, bool flipH, bool flipV) 
     Layout(D, b);
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
     SetStatusHold(L"Transformed page " + std::to_wstring(page + 1));
-}
-
-// The Flatten button (SaveFlattened_Click): a Save dialog, then every page
-// rasterizes WITH its annotations into a new
-// PDF - the open document never changes. The writer is a minimal but exact
-// PDF 1.4: one JPEG XObject per page (DCTDecode), a correct xref.
-static void FlattenSave() {
-    DocState& D = DVF();
-    if (!D.n) return;
-    if (g.tedit) CommitTextEdit();
-    wchar_t file[MAX_PATH] = L"";
-    std::wstring stem = D.name;
-    size_t dot = stem.rfind(L'.');
-    if (dot != std::wstring::npos) stem = stem.substr(0, dot);
-    wcsncpy(file, (stem + L"_Flattened.pdf").c_str(), MAX_PATH - 1);
-    OPENFILENAMEW o{}; o.lStructSize = sizeof o; o.hwndOwner = g.main;
-    o.lpstrFilter = L"PDF files (*.pdf)\0*.pdf\0All files\0*.*\0";
-    o.lpstrFile = file; o.nMaxFile = MAX_PATH;
-    o.lpstrTitle = L"Save Flattened PDF"; o.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
-    o.lpstrDefExt = L"pdf";
-    if (!GetSaveFileNameW(&o)) { SetStatusHold(L"Flatten canceled (no file written)"); return; }
-    std::wstring err;
-    if (!WriteAnnotatedPdf(D, file, err)) { SetStatusHold(std::wstring(L"Flatten failed: ") + err); return; }
-    SetStatusHold(std::wstring(L"Flattened PDF saved to ") + file);
-}
-
-// The Print button (Print_Click): the print dialog, then every page renders
-// at the printer's own resolution with the annotations composited - the same
-// paint the screen shows.
-static void PrintDoc() {
-    DocState& D = DVF();
-    if (!D.n) return;
-    if (g.tedit) CommitTextEdit();
-    PRINTDLGW pd{}; pd.lStructSize = sizeof pd;
-    pd.hwndOwner = g.main; pd.Flags = PD_RETURNDC | PD_NOSELECTION | PD_HIDEPRINTTOFILE;
-    pd.nMinPage = 1; pd.nMaxPage = (WORD)D.n; pd.nFromPage = 1; pd.nToPage = (WORD)D.n;
-    if (!PrintDlgW(&pd)) return;
-    if (!pd.hDC) { SetStatusHold(L"Print failed: no printer device context"); return; }
-    int px = GetDeviceCaps(pd.hDC, PHYSICALWIDTH), py = GetDeviceCaps(pd.hDC, PHYSICALHEIGHT);
-    int ox2 = GetDeviceCaps(pd.hDC, PHYSICALOFFSETX), oy2 = GetDeviceCaps(pd.hDC, PHYSICALOFFSETY);
-    DOCINFOW di{ sizeof di }; std::wstring doc = D.name;
-    di.lpszDocName = doc.c_str();
-    if (StartDocW(pd.hDC, &di) <= 0) { DeleteDC(pd.hDC); SetStatusHold(L"Print failed"); return; }
-    int from = pd.Flags & PD_PAGENUMS ? pd.nFromPage : 1;
-    int to = pd.Flags & PD_PAGENUMS ? pd.nToPage : D.n;
-    int sent = 0;
-    for (int i = from - 1; i < to && i < D.n; i++) {
-        int w = std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 3000);
-        int h = max(1, (int)std::lround((float)w * D.ph[i] / max(1.f, D.pw[i])));
-        HBITMAP b = GetBmp(D, i, w, h);
-        if (!b) continue;
-        HDC mdc = CreateCompatibleDC(pd.hDC);
-        HGDIOBJ ob = SelectObject(mdc, b);
-        float k = (float)w / max(1.f, D.pw[i]);
-        PaintAnnots(mdc, D, i, 0, 0, k);
-        if (StartPage(pd.hDC) > 0) {
-            SetMapMode(pd.hDC, MM_TEXT);
-            SetStretchBltMode(pd.hDC, HALFTONE);
-            BITMAP bm{}; GetObject(b, sizeof bm, &bm);
-            // fit the page into the printable area, preserving its aspect
-            double sx = (double)(px - 2 * ox2) / bm.bmWidth, sy = (double)(py - 2 * oy2) / bm.bmHeight;
-            double sc = min(sx, sy);
-            int dw = (int)(bm.bmWidth * sc), dh = (int)(bm.bmHeight * sc);
-            StretchBlt(pd.hDC, ox2 + (px - 2 * ox2 - dw) / 2, oy2 + (py - 2 * oy2 - dh) / 2,
-                       dw, dh, mdc, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
-            EndPage(pd.hDC);
-            sent++;
-        }
-        SelectObject(mdc, ob);
-        DeleteDC(mdc);
-    }
-    EndDoc(pd.hDC);
-    DeleteDC(pd.hDC);
-    SetStatusHold(L"Sent " + std::to_wstring(sent) + L" page(s) to printer");
 }
 
 // CI preview: render the first view offscreen to a PNG. Returns 0 on success, else 10+GDI+ status.
