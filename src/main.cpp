@@ -655,6 +655,35 @@ static void EnsureBarBack(HDC ref, int w, int h) {
     g_barw = w; g_barh = h;
 }
 
+// The rail and the Document Info dialog paint through the same one-buffer
+// contract as the toolbar above: draw the frame into memory, present it as one
+// BitBlt. They are the two surfaces the new buttons live on, and painting them
+// straight to the screen is what made hovering ANY of those buttons flash -
+// a direct paint lands in two visible steps (the field fill erases the icons,
+// then the icons redraw over it), so every hover flip strobed the whole strip.
+// A buffered present is atomic: the same flip costs one blit and shows one
+// state, exactly like the toolbar, the footer, the sidebar and the view.
+static HDC g_raildc = nullptr; static HBITMAP g_railbm = nullptr, g_railold = nullptr;
+static int g_railw = 0, g_railh = 0;
+static void EnsureRailBack(HDC ref, int w, int h) {
+    if (g_railbm && g_railw == w && g_railh == h) return;
+    if (g_railbm) { SelectObject(g_raildc, g_railold); DeleteObject(g_railbm); }
+    else g_raildc = CreateCompatibleDC(ref);
+    g_railbm = CreateCompatibleBitmap(ref, w, h);
+    g_railold = (HBITMAP)SelectObject(g_raildc, g_railbm);
+    g_railw = w; g_railh = h;
+}
+static HDC g_iddc = nullptr; static HBITMAP g_idbm = nullptr, g_idold = nullptr;
+static int g_idw = 0, g_idh = 0;
+static void EnsureInfoBack(HDC ref, int w, int h) {
+    if (g_idbm && g_idw == w && g_idh == h) return;
+    if (g_idbm) { SelectObject(g_iddc, g_idold); DeleteObject(g_idbm); }
+    else g_iddc = CreateCompatibleDC(ref);
+    g_idbm = CreateCompatibleBitmap(ref, w, h);
+    g_idold = (HBITMAP)SelectObject(g_iddc, g_idbm);
+    g_idw = w; g_idh = h;
+}
+
 // The button's width: the wider of the 20px glyph and the "Find Text" caption,
 // plus Padding 6,4's 12 horizontal pixels (auto width in Under mode).
 static int BarBtnW(HDC dc) {
@@ -3537,6 +3566,36 @@ static void StatusDraw(HDC dc, int w, int h) {
 static RECT g_zoomComboScr{};            // the closed combo, screen coords, while open
 static int g_zoomItemH = 0, g_zoomPopW = 0;
 
+// The popup's frame, drawn by WM_PAINT through one buffer - the items are
+// buttons, so the same buffered-present rule as the toolbar applies: a direct
+// paint shows the fill and the rows in two visible steps and strobes on every
+// highlight flip.
+static void ZoomPopDraw(HDC dc, int w, int h) {
+    RECT r{ 0, 0, w, h };
+    FillRect(dc, &r, PopBrush());
+    FrameRect(dc, &r, ComboBorderBrush());
+    SelectObject(dc, StCombo());
+    SetBkMode(dc, TRANSPARENT);
+    int cur = ZoomCurrent();
+    for (int i = 0; i < 8; i++) {
+        RECT it{ 1, 1 + i * g_zoomItemH, r.right - 1, 1 + (i + 1) * g_zoomItemH };
+        if (i == g.zoomHot) FillRect(dc, &it, PopHoverBrush());
+        RECT tx = it; tx.left += (int)(8 * g.dpi);
+        StText(dc, tx, ZoomLabel(i), DT_LEFT, StCombo(), 10 * g.dpi, StCapU,
+               i == cur ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
+    }
+}
+static HDC g_zdc = nullptr; static HBITMAP g_zbm = nullptr, g_zold = nullptr;
+static int g_zw = 0, g_zh = 0;
+static void EnsureZoomBack(HDC ref, int w, int h) {
+    if (g_zbm && g_zw == w && g_zh == h) return;
+    if (g_zbm) { SelectObject(g_zdc, g_zold); DeleteObject(g_zbm); }
+    else g_zdc = CreateCompatibleDC(ref);
+    g_zbm = CreateCompatibleBitmap(ref, w, h);
+    g_zold = (HBITMAP)SelectObject(g_zdc, g_zbm);
+    g_zw = w; g_zh = h;
+}
+
 static void ZoomPopupClose() {
     if (!g.zoomOpen) return;
     g.zoomOpen = false; g.zoomHot = -1;
@@ -3584,18 +3643,9 @@ static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
-        FillRect(dc, &r, PopBrush());
-        FrameRect(dc, &r, ComboBorderBrush());
-        SelectObject(dc, StCombo());
-        SetBkMode(dc, TRANSPARENT);
-        int cur = ZoomCurrent();
-        for (int i = 0; i < 8; i++) {
-            RECT it{ 1, 1 + i * g_zoomItemH, r.right - 1, 1 + (i + 1) * g_zoomItemH };
-            if (i == g.zoomHot) FillRect(dc, &it, PopHoverBrush());
-            RECT tx = it; tx.left += (int)(8 * g.dpi);
-            StText(dc, tx, ZoomLabel(i), DT_LEFT, StCombo(), 10 * g.dpi, StCapU,
-                   i == cur ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
-        }
+        EnsureZoomBack(dc, r.right, r.bottom);   // buffered like every hover surface: the
+        ZoomPopDraw(g_zdc, r.right, r.bottom);   // items are buttons and a direct paint
+        BitBlt(dc, 0, 0, r.right, r.bottom, g_zdc, 0, 0, SRCCOPY);   // strobes on a flip
         EndPaint(h, &ps);
         return 0;
     }
@@ -4267,40 +4317,59 @@ static bool RailEnabled(int id) {
     return id == RB_SPLIT ? true : (DVF().n > 0);
 }
 
+// KillerPDF centers the rail glyphs with GlyphInk.Center (Controls/GlyphInk.cs):
+// icon fonts draw glyphs off-center inside their advance box, so the text is
+// shifted by the distance between the advance-box center and the INK center on
+// both axes. The GDI twin reads the same numbers from the font - the ink box
+// and origin from GetGlyphOutlineW's metrics, the advance box and the line
+// box from the text metrics DrawTextW centers by - and shifts the draw rect by
+// that distance, so the glyph lands with the same space on every side.
+static void InkCenterRect(HDC dc, const RECT& cell, const wchar_t* glyph, RECT& out) {
+    out = cell;
+    TEXTMETRICW tm{};
+    if (!GetTextMetricsW(dc, &tm)) return;
+    GLYPHMETRICS gm{}; MAT2 mat{ {0, 1}, {0, 0}, {0, 0}, {0, 1} };
+    if (GetGlyphOutlineW(dc, (UINT)glyph[0], GGO_METRICS, &gm, 0, nullptr, &mat) == GDI_ERROR)
+        return;
+    // vertical: the baseline sits tmAscent under the line box's top (DrawTextW
+    // centers the tmHeight line box, no external leading), the ink's top sits
+    // gmptGlyphOrigin.y above the baseline, the box runs gmBlackBoxY down
+    double inkC = tm.tmAscent - gm.gmptGlyphOrigin.y + gm.gmBlackBoxY / 2.0;
+    double dy = tm.tmHeight / 2.0 - inkC;
+    SIZE adv{}; GetTextExtentPoint32W(dc, glyph, 1, &adv);
+    double dx = adv.cx / 2.0 - gm.gmptGlyphOrigin.x - gm.gmBlackBoxX / 2.0;
+    OffsetRect(&out, (int)std::lround(dx), (int)std::lround(dy));
+}
+
+// The glyphs are KillerPDF's own, drawn from the same font and codepoints the
+// reference buttons use - Segoe MDL2 Assets, the system icon font Windows 10+
+// always ships (the toolbar's E721 and the caption's E921/E922/E923/E8BB
+// already ride it): Split pane swaps E89F (a pane pushed out - "open one")
+// while closed for E8A0 (a pane pulled in) while open at FontSize 14, Pages
+// shows E8A9 and Document Info E946 at FontSize 15 (the RailPanelBtn and
+// DocInfoRailBtn templates). Under each ink pass sits the reference's icon
+// shadow - black, ShadowDepth 2, Direction 270 (straight down), 0.9 in the
+// dark theme - which GDI speaks as the app's one dark copy under the light
+// pass, the same treatment the toolbar's E721 and the caption glyphs get.
 static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c) {
-    Gdiplus::Graphics gs(dc);
-    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)),
-                     (float)max(1.0, 1.4 * g.dpi));
-    float s = (float)(rc.right - rc.left);
-    float m = s * 0.26f;                    // the icon box inside the 24px cell
-    float ix = (float)rc.left + m, iy = (float)rc.top + m, iw = s - 2 * m;
-    if (id == RB_SPLIT) {                   // KillerPDF's glyph swap: E89F (a pane pushed
-        float t = iw * 0.12f;               // out - "open one") while closed, E8A0 (a pane
-        Gdiplus::Pen mid(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)),
-                         (float)max(1.0, 2.2 * g.dpi));
-        if (!g.split) {                     // pulled in) while open - in vector form: two
-            gs.DrawRectangle(&pen, ix, iy + t, iw, iw - 2 * t);   // panes apart while closed,
-            float half = iw / 2, mg = iw * 0.10f;                 // one joined pane while open
-            gs.DrawLine(&mid, ix + half, iy + t + mg, ix + half, iy + t + half - mg / 2);
-            gs.DrawLine(&mid, ix + half, iy + t + half + mg / 2, ix + half, iy + iw - t - mg);
-        } else {
-            gs.DrawRectangle(&pen, ix, iy + t, iw, iw - 2 * t);
-            gs.DrawLine(&mid, ix + iw / 2, iy + t, ix + iw / 2, iy + iw - t);
-        }
-    } else if (id == RB_PAGES) {            // 2x2 grid of page tiles
-        float gap = (float)(2 * g.dpi), q = (iw - gap) / 2;
-        for (int a = 0; a < 2; a++)
-            for (int b = 0; b < 2; b++)
-                gs.DrawRectangle(&pen, ix + a * (q + gap), iy + b * (q + gap), q, q);
-    } else {                                // circle-i: ring, dot, stem
-        float cx = ix + iw / 2, cy = iy + iw / 2, r = iw / 2;
-        gs.DrawEllipse(&pen, cx - r, cy - r, 2 * r, 2 * r);
-        float d = (float)(2.0 * g.dpi);
-        Gdiplus::SolidBrush dot(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
-        gs.FillEllipse(&dot, cx - d / 2, cy - r * 0.52f, d, d);
-        gs.DrawLine(&pen, cx, cy - r * 0.02f, cx, cy + r * 0.55f);
-    }
+    struct Spec { const wchar_t* closed; const wchar_t* open; HFONT* font; };
+    static HFONT f14 = nullptr, f15 = nullptr;
+    static const Spec specs[RB_COUNT] = {
+        { L"\uE89F", L"\uE8A0", &f14 },   // Split pane, FontSize 14, glyph swaps on state
+        { L"\uE8A9", L"\uE8A9", &f15 },   // Pages (RailPanelBtn), FontSize 15
+        { L"\uE946", L"\uE946", &f15 },   // Document Info, FontSize 15
+    };
+    const Spec& sp = specs[id];
+    const wchar_t* glyph = (id == RB_SPLIT && g.split) ? sp.open : sp.closed;
+    SetBkMode(dc, TRANSPARENT);
+    SelectObject(dc, CaptionFont(*sp.font, id == RB_SPLIT ? 14 : 15, false, L"Segoe MDL2 Assets"));
+    RECT in; InkCenterRect(dc, rc, glyph, in);   // GlyphInk.Center's shift, both passes
+    RECT sh = in;                           // the shadow pass: depth 2, straight down
+    OffsetRect(&sh, 0, (int)std::lround(2 * g.dpi));
+    SetTextColor(dc, RGB(16, 16, 16));
+    DrawTextW(dc, glyph, -1, &sh, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(dc, c);
+    DrawTextW(dc, glyph, -1, &in, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 static void RailDraw(HDC dc, int w, int h) {
@@ -4318,9 +4387,10 @@ static void RailDraw(HDC dc, int w, int h) {
         bool en = RailEnabled(i), on = en && RailOn(i), hot = en && g.railHot == i;
         // KillerPDF's RailPanelBtn template: the glyph IS the button - no face,
         // no fill, no pressed tile. Rest TextBrush #e0e0e0, hover and lit
-        // PrimaryBrush #22bb56, disabled the glyph at 35% opacity (#e0e0e0
-        // blended at 0.35 over the field).
-        COLORREF c = !en ? RGB(0x4e, 0x4e, 0x4e)
+        // PrimaryBrush #22bb56, disabled the glyph at Opacity 0.35: 0.35 of
+        // #e0e0e0 over the #1c1c1c field is #616161, not the #4e4e4e the first
+        // port guessed with.
+        COLORREF c = !en ? RGB(0x61, 0x61, 0x61)
                    : (on || hot) ? RGB(0x22, 0xbb, 0x56)
                    : RGB(0xe0, 0xe0, 0xe0);
         RailIcon(dc, i, bs[i], c);
@@ -4341,10 +4411,21 @@ static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
-        POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
-        SetBrushOrgEx(dc, -po.x, -po.y, nullptr);   // the grain phase is the window's
-        RailDraw(dc, r.right, r.bottom);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureRailBack(dc, r.right, r.bottom);   // one buffered frame per hover flip:
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // a direct paint lands in
+            SetBrushOrgEx(g_raildc, -po.x, -po.y, nullptr);   // two visible steps (the fill
+            RailDraw(g_raildc, r.right, r.bottom);   // erases the icons, then they redraw)
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_raildc, 0, 0, SRCCOPY);   // and strobes -
+        }                                            // the blit shows one state, like the bar
         EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT: {               // mirrors/hover heals, like the toolbar's
+        RECT r; GetClientRect(h, &r);
+        POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+        SetBrushOrgEx((HDC)wp, -po.x, -po.y, nullptr);
+        RailDraw((HDC)wp, r.right, r.bottom);
         return 0;
     }
     case WM_MOUSEMOVE: {
@@ -5146,9 +5227,13 @@ static LRESULT CALLBACK InfoDlgProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
-        POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
-        SetBrushOrgEx(dc, -po.x, -po.y, nullptr);
-        InfoDialogDraw(dc, r.right, r.bottom);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureInfoBack(dc, r.right, r.bottom);   // the same buffered present as the rail:
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the dialog used to paint
+            SetBrushOrgEx(g_iddc, -po.x, -po.y, nullptr);   // straight to the screen, so every
+            InfoDialogDraw(g_iddc, r.right, r.bottom);   // hover flip over Cancel/Save/the close
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_iddc, 0, 0, SRCCOPY);   // strobed the window
+        }
         EndPaint(h, &ps);
         return 0;
     }
