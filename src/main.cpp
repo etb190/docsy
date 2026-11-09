@@ -3821,7 +3821,7 @@ static void AnnBarDraw(HDC dc, int ox, int oy) {
             Gdiplus::Color cols[5] = { Gdiplus::Color(255, 255, 0, 0), Gdiplus::Color(255, 255, 255, 0),
                                        Gdiplus::Color(255, 0, 255, 0), Gdiplus::Color(255, 0, 255, 255),
                                        Gdiplus::Color(255, 0, 0, 255) };
-            REAL pos[5] = { 0.0f, 0.25f, 0.5f, 0.7f, 1.0f };
+            float pos[5] = { 0.0f, 0.25f, 0.5f, 0.7f, 1.0f };   // Gdiplus::REAL positions
             Gdiplus::LinearGradientBrush rb(Gdiplus::Rect(r.left, r.top, r.right - r.left, r.bottom - r.top),
                 Gdiplus::Color(255, 255, 0, 0), Gdiplus::Color(255, 0, 0, 255), 0.0f, false);
             rb.SetInterpolationColors(cols, pos, 5);
