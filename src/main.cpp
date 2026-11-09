@@ -403,6 +403,14 @@ static int ViewH(const DocState& D, bool b) {
     return max(0, g.ch - gut);
 }
 
+// defined with the split's pane geometry and the annotation paint below - the
+// tools' interaction layer (further down) reads both
+static int PaneX0(bool b);                         // a pane's pass origin in view x
+static int CardX(bool b);                          // the card inside the pass
+static bool PageOrigin(const DocState& D, bool b, int i, int& ox, int& oy);
+static void AnnotBounds(const Annot& a, float& x0, float& y0, float& x1, float& y1);
+static bool AnnotHit(const Annot& a, float fx, float fy, float k);
+
 // the sidebar rail's three buttons and the Document Info dialog, defined with
 // the rail section below
 static int RW();                        // the rail's column width (0 in full screen)
@@ -2197,8 +2205,8 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // The text box commits on focus loss, on any view motion, or on Escape -
 // Escape discards, everything else lands as an AT_TEXT annotation in the
 // pane's own document.
-static void CommitTextEdit(bool commit = true) {
-    if (!g.tedit) return;
+static void CommitTextEdit(bool commit) {
+    if (!g.tedit) return;                       // the default argument rides the forward
     HWND e = g.tedit;
     int len = GetWindowTextLengthW(e);
     std::wstring s;
@@ -5134,10 +5142,10 @@ static void RailDraw(HDC dc, int w, int h) {
                                             Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
             Gdiplus::GraphicsPath p;
             int rad = (int)(4 * g.dpi);
-            p.AddArc((REAL)ts[t].left, (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
-            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
-            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
-            p.AddArc((REAL)ts[t].left, (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
+            p.AddArc((float)ts[t].left, (float)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
+            p.AddArc((float)(ts[t].right - 2 * rad), (float)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
+            p.AddArc((float)(ts[t].right - 2 * rad), (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
+            p.AddArc((float)ts[t].left, (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
             p.CloseFigure();
             gs.FillPath(&gb, &p);
             RailIcon(dc, id, ts[t], RGB(0xff, 0xff, 0xff), false);   // white, no shadow pass
@@ -5147,10 +5155,10 @@ static void RailDraw(HDC dc, int w, int h) {
             Gdiplus::Graphics gs(dc);       // RowHoverBrush #404040 rounded face under
             Gdiplus::GraphicsPath p;        // the unlit glyph
             int rad = (int)(4 * g.dpi);
-            p.AddArc((REAL)ts[t].left, (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
-            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
-            p.AddArc((REAL)(ts[t].right - 2 * rad), (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
-            p.AddArc((REAL)ts[t].left, (REAL)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
+            p.AddArc((float)ts[t].left, (float)ts[t].top, 2.0f * rad, 2.0f * rad, 180, 90);
+            p.AddArc((float)(ts[t].right - 2 * rad), (float)ts[t].top, 2.0f * rad, 2.0f * rad, 270, 90);
+            p.AddArc((float)(ts[t].right - 2 * rad), (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 0, 90);
+            p.AddArc((float)ts[t].left, (float)(ts[t].bottom - 2 * rad), 2.0f * rad, 2.0f * rad, 90, 90);
             p.CloseFigure();
             Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
             gs.FillPath(&hb, &p);
