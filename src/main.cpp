@@ -6315,8 +6315,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int cardL = PaneX0(g.tePaneB) + CardX(g.tePaneB), cardR = cardL + CardW(g.tePaneB);
             int qx = std::clamp((int)p.x, cardL, max(cardL, cardR));   // the pointer in the card
             int qy = std::clamp((int)p.y, 0, g.ch);
-            int newW = max(minW, abs(qx - g_teAnchor.x));
-            int newH = max(minH, abs(qy - g_teAnchor.y));
+            int newW = max(minW, abs((int)(qx - g_teAnchor.x)));
+            int newH = max(minH, abs((int)(qy - g_teAnchor.y)));
             int nx = (g_teHandle == 0 || g_teHandle == 3) ? g_teAnchor.x - newW : g_teAnchor.x;
             int ny = (g_teHandle == 0 || g_teHandle == 1) ? g_teAnchor.y - newH : g_teAnchor.y;
             if (nx != g_teStart.left || ny != g_teStart.top ||
