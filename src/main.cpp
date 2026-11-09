@@ -4209,16 +4209,20 @@ static void AbSliderDraw(Gdiplus::Graphics& gs, const RECT& r, float vmin, float
 }
 // The tick itself. KillerPDF's BarCheck marks a literal "✓" (U+2713) TextBlock
 // at FontSize 10, Center/Center in the 15px box (AnnotationBars.cs) - WPF
-// centers the line, and the glyph reads centered. GDI's DT_VCENTER centers the
-// font's line box too, but a PUA glyph like MDL2's E73E carries ink that sits
-// off-center inside its cell, so the tick visibly drifted. So the mark is
-// placed by its own ink here: GGO_METRICS returns the glyph's black box and
-// its origin, and the pen lands so that black box centers in the check's box
-// exactly - on both axes, whatever the face's internal leading does. Segoe UI
-// owns U+2713 on every Windows this targets; Segoe UI Symbol, then MDL2's
-// E73E (the same ink-centering math), are the fallbacks.
+// centers the text line, and the glyph reads centered. GDI's DT_VCENTER
+// centers the font's LINE BOX too, but the glyph's ink can sit off-center
+// inside that line - the drift the user saw. So the tick is measured once per
+// DPI here: drawn into a scratch 15px box exactly the way the real one draws,
+// its ink bounding box scanned, and the real draw's text rect shifted by minus
+// that ink-to-center offset - the ink lands dead center BY CONSTRUCTION,
+// because the measurement and the draw share one placement path (DrawTextW's
+// rect math; no second metric convention to disagree). ANTIALIASED_QUALITY
+// matches WPF's grayscale anti-aliasing - ClearType's subpixel filter tinted
+// the thin stroke with the background's chroma. Segoe UI owns U+2713 on every
+// Windows this targets; Segoe UI Symbol, then MDL2's E73E, are the fallbacks.
 static void AbCheckGlyph(HDC dc, const RECT& box) {
     static HFONT f = nullptr; static double fd = 0; static wchar_t ch = 0;
+    static POINT off{ 0, 0 };                 // ink-center minus box-center at this dpi
     if (f && fd != g.dpi) { DeleteObject(f); f = nullptr; }
     if (!f) {
         const struct { const wchar_t* face; wchar_t ch; } tries[] = {
@@ -4227,7 +4231,7 @@ static void AbCheckGlyph(HDC dc, const RECT& box) {
         for (const auto& t : tries) {
             HFONT tf = CreateFontW(-(int)std::lround(10 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, t.face);
+                                   ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, t.face);
             HGDIOBJ of = SelectObject(dc, tf);
             WORD idx = 0xFFFF;
             GetGlyphIndicesW(dc, &t.ch, 1, &idx, 1);   // GGI_MARK_NONEXISTING_GLYPHS
@@ -4235,22 +4239,41 @@ static void AbCheckGlyph(HDC dc, const RECT& box) {
             if (idx != 0xFFFF) { f = tf; ch = t.ch; break; }
             DeleteObject(tf);
         }
+        if (f) {
+            int side = max(1, (int)(15 * g.dpi));
+            HDC m = CreateCompatibleDC(dc);
+            HBITMAP bm = CreateCompatibleBitmap(dc, side, side);
+            HGDIOBJ ob = SelectObject(m, bm);
+            RECT full{ 0, 0, side, side };
+            HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));
+            FillRect(m, &full, bg); DeleteObject(bg);
+            HGDIOBJ of2 = SelectObject(m, f);
+            SetBkMode(m, TRANSPARENT);
+            SetTextColor(m, RGB(255, 255, 255));
+            DrawTextW(m, &ch, 1, &full, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(m, of2);
+            int x0 = side, y0 = side, x1 = -1, y1 = -1;
+            for (int y = 0; y < side; y++)
+                for (int x = 0; x < side; x++) {
+                    COLORREF c = GetPixel(m, x, y);
+                    if (GetRValue(c) + GetGValue(c) + GetBValue(c) > 90) {   // ink over the black floor
+                        if (x < x0) x0 = x;
+                        if (x > x1) x1 = x;
+                        if (y < y0) y0 = y;
+                        if (y > y1) y1 = y;
+                    }
+                }
+            SelectObject(m, ob); DeleteObject(bm); DeleteDC(m);
+            off = (x1 >= x0 && y1 >= y0) ? POINT{ (x0 + x1) / 2 - side / 2, (y0 + y1) / 2 - side / 2 }
+                                         : POINT{ 0, 0 };
+        }
         fd = g.dpi;
     }
     if (!f || !ch) return;
+    RECT cr{ box.left - off.x, box.top - off.y, box.right - off.x, box.bottom - off.y };
     HGDIOBJ of = SelectObject(dc, f);
-    GLYPHMETRICS gm{}; MAT2 m{ {0,1},{0,0},{0,0},{0,1} };
     SetBkMode(dc, TRANSPARENT);
-    if (GetGlyphOutlineW(dc, ch, GGO_METRICS, &gm, 0, nullptr, &m) != GDI_ERROR &&
-        gm.gmBlackBoxX > 0 && gm.gmBlackBoxY > 0) {
-        int bw = box.right - box.left, bh = box.bottom - box.top;
-        int bx = box.left + (bw - (int)gm.gmBlackBoxX) / 2 - gm.gmptGlyphOrigin.x;
-        int by = box.top + (bh - (int)gm.gmBlackBoxY) / 2 + gm.gmptGlyphOrigin.y;
-        TextOutW(dc, bx, by, &ch, 1);
-    } else {
-        RECT cr{ box.left, box.top, box.right, box.bottom };
-        DrawTextW(dc, &ch, 1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+    DrawTextW(dc, &ch, 1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(dc, of);
 }
 static void AbCheckDraw(Gdiplus::Graphics& gs, HDC dc, const RECT& r, bool on) {
