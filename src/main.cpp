@@ -351,10 +351,9 @@ struct App {
     // byte-identical.
     std::vector<DocState> tabs[2];      // each pane's sessions, in strip order
     int act[2] = { 0, 0 };              // each pane's front session index
-    std::vector<std::vector<UndoSnap>> tabUndo[2], tabRedo[2];   // the stacks ride the session
     int tabWin[2] = { 0, 0 };           // leftmost tab in each strip (the overflow window)
     // the strip's gestures (KillerPDF's Tab_DragDown/Move/Up + Shell/PaneDrag.cs):
-    int tbHot = -1, tbHotPane = 0;      // hovered tab (visible order), -1 none
+    int tbTabHot = -1, tbTabHotPane = 0;   // hovered tab (visible order), -1 none
     int tbHotBtn = 0;                   // hovered strip element: 0 tab, 1 close x, 2 new +, 3 chevron
     int tbPending = -1;                 // pressed tab awaiting the mouse-up (the switch happens
                                         // on UP so a press can begin a drag - KillerPDF's rule)
@@ -433,6 +432,7 @@ struct App {
         std::unordered_map<int, std::vector<Annot>> annos;
     };
     std::vector<UndoSnap> undo, redo;
+    std::vector<std::vector<UndoSnap>> tabUndo[2], tabRedo[2];   // each pane's per-session stacks
     // ---- the floating annotation settings bar (KillerPDF's AnnotationBars) ----
     bool barOn = false;                 // a bar is on screen
     int barTool = -1;                   // the TOOL_* whose bar is up
@@ -592,6 +592,7 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
 static bool TabOpenInto(bool b, const std::wstring& p);   // the tabbed open (OpenInNewTab)
 static bool CloseTabAt(bool b, int idx);                  // CloseTabCore, false on a cancel
 static void TabPopPick(int row);                          // the tab menu / chevron popup's pick
+static int& Act(bool b);                                  // a pane's front session index
 // ---- edit tools, the bar and its popups (defined with their sections) ----
 static void UndoPush(bool b);           // snapshot the pane's annotations + marks before a change
 static void UndoOp();                   // Ctrl+Z
@@ -1119,7 +1120,7 @@ static void BarDraw(HDC dc, int w, int h) {
         int tool = TbToolOf(i);
         bool sel = en && tool >= 0 && DVF().tool == tool;   // SetTool's SelectionBg face,
                                                             // lit on the focused pane's tool
-        bool hot = en && !sel && g.tbHot == i;
+        bool hot = en && !sel && g.tbTabHot == i;
         bool pr = en && !sel && g.tbPressed == i;
         if (sel || hot || pr) {              // a face under the content: the active tool's
             Gdiplus::Graphics gs(dc);        // SelectionBg, or the hover/pressed tile
@@ -1249,15 +1250,15 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
         int hot = BarHit(p, r.right);
-        if (hot != g.tbHot) {            // repaints only on a hover flip
-            g.tbHot = hot;
+        if (hot != g.tbTabHot) {            // repaints only on a hover flip
+            g.tbTabHot = hot;
             if (hot >= 0) TrackLeave(h);
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.tbHot != -1) { g.tbHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (g.tbTabHot != -1) { g.tbTabHot = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -6608,7 +6609,7 @@ static void TabBandPaint(HDC dc, bool b) {
     // last; a grabbed tab sits above everything, glued to the cursor.
     bool paneFocused = g.split && b == FocusB();
     bool paneDimmed = g.split && b != FocusB();
-    int hotK = (g.tbHotPane == b) ? g.tbHot : -1;
+    int hotK = (g.tbHotPane == b) ? g.tbTabHot : -1;
     SetBkMode(dc, TRANSPARENT);
     HFONT of = (HFONT)SelectObject(dc, TabFont());
     int kEnd = min(G.start + G.cap, (int)vis.size());
@@ -6676,8 +6677,8 @@ static void TabBandPaint(HDC dc, bool b) {
             float rr = (float)rad3;
             face.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
             face.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
-            face.AddLineTo((float)fr, (float)fb2);
-            face.AddLineTo((float)fl, (float)fb2);
+            face.AddLine((float)fr, (float)ft + rr, (float)fr, (float)fb2);
+            face.AddLine((float)fr, (float)fb2, (float)fl, (float)fb2);
             face.CloseFigure();
             Gdiplus::SolidBrush faceBr(Gdiplus::Color(255, 0x14, 0x14, 0x14));   // #141414
             gs.FillPath(&faceBr, &face);
@@ -6687,8 +6688,8 @@ static void TabBandPaint(HDC dc, bool b) {
             Gdiplus::GraphicsPath stripe;
             stripe.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
             stripe.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
-            stripe.AddLineTo((float)fr, (float)ft + 3 * rr);
-            stripe.AddLineTo((float)fl, (float)ft + 3 * rr);
+            stripe.AddLine((float)fr, (float)ft + rr, (float)fr, (float)ft + 3 * rr);
+            stripe.AddLine((float)fr, (float)ft + 3 * rr, (float)fl, (float)ft + 3 * rr);
             stripe.CloseFigure();
             Gdiplus::SolidBrush st(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
             gs.FillPath(&st, &stripe);
@@ -6726,16 +6727,16 @@ static void TabBandPaint(HDC dc, bool b) {
         float rr = (float)rad3;
         face.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
         face.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
-        face.AddLineTo((float)fr, (float)fb2);
-        face.AddLineTo((float)fl, (float)fb2);
+        face.AddLine((float)fr, (float)ft + rr, (float)fr, (float)fb2);
+        face.AddLine((float)fr, (float)fb2, (float)fl, (float)fb2);
         face.CloseFigure();
         Gdiplus::SolidBrush faceBr(Gdiplus::Color(255, 0x14, 0x14, 0x14));
         gs.FillPath(&faceBr, &face);
         Gdiplus::GraphicsPath stripe;
         stripe.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
         stripe.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
-        stripe.AddLineTo((float)fr, (float)ft + 3 * rr);
-        stripe.AddLineTo((float)fl, (float)ft + 3 * rr);
+        stripe.AddLine((float)fr, (float)ft + rr, (float)fr, (float)ft + 3 * rr);
+        stripe.AddLine((float)fr, (float)ft + 3 * rr, (float)fl, (float)ft + 3 * rr);
         stripe.CloseFigure();
         Gdiplus::SolidBrush st(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
         gs.FillPath(&st, &stripe);
@@ -6823,8 +6824,8 @@ static void TabDragPaint(HDC dc) {
     float rr = (float)TABF(3);
     face.AddArc((float)gl, (float)Gs.faceTop, 2 * rr, 2 * rr, 180, 90);
     face.AddArc((float)gr - 2 * rr, (float)Gs.faceTop, 2 * rr, 2 * rr, 270, 90);
-    face.AddLineTo((float)gr, (float)Gs.faceTop + Gs.actH);
-    face.AddLineTo((float)gl, (float)Gs.faceTop + Gs.actH);
+    face.AddLine((float)gr, (float)Gs.faceTop + rr, (float)gr, (float)Gs.faceTop + Gs.actH);
+    face.AddLine((float)gr, (float)Gs.faceTop + Gs.actH, (float)gl, (float)Gs.faceTop + Gs.actH);
     face.CloseFigure();
     Gdiplus::SolidBrush fb(Gdiplus::Color(210, 0x14, 0x14, 0x14));   // TabDragGhost, Opacity .82
     gs.FillPath(&fb, &face);
@@ -6924,11 +6925,11 @@ static bool TabStripMove(HWND h, POINT p) {
             else if (what == 4) { hot = -1; hotBtn = 3; hotPane = hb; }
         }
     }
-    if (hot != g.tbHot || hotPane != g.tbHotPane || hotBtn != g.tbHotBtn) {
+    if (hot != g.tbTabHot || hotPane != g.tbHotPane || hotBtn != g.tbHotBtn) {
         bool wasPane = g.tbHotPane;               // the old and new faces repaint: a hover
-        bool wasAny = g.tbHot >= 0 || g.tbHotBtn >= 2;   // flip is two invalidations
+        bool wasAny = g.tbTabHot >= 0 || g.tbHotBtn >= 2;   // flip is two invalidations
         bool isAny = hot >= 0 || hotBtn >= 2;
-        g.tbHot = hot; g.tbHotPane = hotPane; g.tbHotBtn = hotBtn;
+        g.tbTabHot = hot; g.tbHotPane = hotPane; g.tbHotBtn = hotBtn;
         if (isAny) TrackLeave(h);
         if (wasAny) TabBandInvalidate(wasPane);
         if (isAny) TabBandInvalidate(hotPane);
@@ -7649,8 +7650,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;
     }
     case WM_MOUSELEAVE:
-        if (g.tbHot >= 0 || g.tbHotBtn >= 2) {   // the strip's hover tiles clear on leave
-            g.tbHot = -1; g.tbHotBtn = 0;
+        if (g.tbTabHot >= 0 || g.tbHotBtn >= 2) {   // the strip's hover tiles clear on leave
+            g.tbTabHot = -1; g.tbHotBtn = 0;
             InvalidateRect(h, nullptr, FALSE);
         }
         if (g.d.vHot || g.d.hHot || g.dB.vHot || g.dB.hHot || fd.hot >= 0) {
