@@ -358,6 +358,10 @@ struct App {
     int tbPending = -1;                 // pressed tab awaiting the mouse-up (the switch happens
                                         // on UP so a press can begin a drag - KillerPDF's rule)
     bool tbPendingX = false;            // the press landed on a close x, not the tab face
+    bool tbOwnRelease = false;          // the UP's own ReleaseCapture: CAPTURECHANGED fires
+                                        // inside it, and without this flag the handler wiped
+                                        // the pending press before TabStripUp could read it -
+                                        // the bug that made every tab click land nowhere
     bool tbDragging = false;            // past the 4px threshold: the tab is glued to the cursor
     int tbDragPane = 0, tbDragIdx = 0;  // the dragged tab's pane and visible index at arm time
     int tbDragGrab = 0;                 // cursor offset inside the grabbed tab
@@ -3105,12 +3109,13 @@ static void EnsureSideBack(HDC ref, int w, int h) {
 // proportional size but never shrinks below a 64px grab floor (ThumbViewportFloor,
 // floored at half the track), and its position maps the scroll linearly over the
 // free track. The track itself paints nothing - the bar is the only visible part.
-static void BarThumb(int docLen, int viewLen, int scroll, int& tlen, int& tpos) {
-    if (docLen <= viewLen || docLen <= 0 || viewLen <= 0) { tlen = 0; tpos = 0; return; }
+static void BarThumb(int docLen, int viewLen, int scroll, int& tlen, int& tpos, int range = -1) {
+    int R = range >= 0 ? range : docLen - viewLen;   // the scroll's real travel; the v-thumbs
+    if (docLen <= viewLen || docLen <= 0 || viewLen <= 0 || R <= 0) { tlen = 0; tpos = 0; return; }
     int t = (int)((long long)viewLen * viewLen / docLen);
     int fl = (int)min(64.0 * g.dpi, viewLen * 0.5);
     tlen = std::clamp(t, fl, viewLen);
-    tpos = std::clamp((int)((long long)(viewLen - tlen) * max(0, scroll) / (docLen - viewLen)), 0, viewLen - tlen);
+    tpos = std::clamp((int)((long long)(viewLen - tlen) * max(0, scroll) / R), 0, viewLen - tlen);
 }
 
 // The KillerPDF thumb: a slim rounded bar in the theme green, a third alpha at
@@ -4585,7 +4590,8 @@ static RECT AnnBarRect() {
     int inset = (int)(8 * g.dpi) + (D.n && D.docH > g.ch ? SBar() : 0);
     int x0 = cardR - inset - g.barDx - g_abW;
     x0 = std::clamp(x0, cardL + (int)(2 * g.dpi), max(cardL, cardR - (int)(2 * g.dpi) - g_abW));
-    return { x0, 0, x0 + g_abW, g_abH };
+    int y0 = BandInset(b);               // KillerPDF's bar anchors to the card's top - under
+    return { x0, y0, x0 + g_abW, y0 + g_abH };   // the tab strip's row, never over its tabs
 }
 
 // State flips repaint the bar's own footprint only (old ∪ new) - the bar sits
@@ -5761,15 +5767,17 @@ static float SdRoundRect(float px, float py, float x0, float y0, float x1, float
     return sqrtf(ax * ax + ay * ay) + min(max(qx, qy), 0.f) - r;
 }
 
-static void CardShadowStrip(BYTE* bits, int w, int h, int cx0, int cx1, int rad) {
+static void CardShadowStrip(BYTE* bits, int w, int h, int cx0, int cx1, int rad, int ty = 0) {
     const double sig = 8.0 * g.dpi;
     const double depth = 5.0 * g.dpi;                     // ShadowDepth, Direction 270
     // the silhouette: the card pushed straight down, so the falloff reads
     // stronger along the gutter's lower half, like KillerPDF's render. The
     // card may sit inset in its DIB (pane B's left shadow room), so both
     // edges of the falloff are painted - each side lands only where the
-    // gutter actually is.
-    float sx0 = (float)cx0, sy0 = (float)depth, sx1 = (float)cx1, sy1 = (float)h + depth;
+    // gutter actually is. `ty` is the card's top row inside the DIB: the
+    // tab band is a layout row, so the card - and its silhouette with it -
+    // starts below the band (KillerPDF's card tucked under the strip).
+    float sx0 = (float)cx0, sy0 = (float)ty + (float)depth, sx1 = (float)cx1, sy1 = (float)h + depth;
     // erfc falloff LUT: alpha(d) = 0.6 * Phi(-d / sig), d in [-3sig, 3sig]
     const int LUTN = 236;                // ~0.2px steps at sigma 8
     static float lut[LUTN]; static double lutSig = 0;
@@ -5813,10 +5821,10 @@ static void CardShadowStrip(BYTE* bits, int w, int h, int cx0, int cx1, int rad)
 // straights land full #555 on the outermost pixel, and the corner arcs get
 // analytic anti-aliasing that beats a bezier arc's rasterization. `cx` is the
 // card's left edge inside the DIB (pane B sits 4px in for its left shadow).
-static void CardRingBake(BYTE* bits, int w, int h, int cw, int rad, int cx) {
+static void CardRingBake(BYTE* bits, int w, int h, int cw, int rad, int cx, int ty = 0) {
     float x1 = (float)(cx + cw) - 0.5f, y1 = (float)h - 0.5f;   // outer silhouette
-    float ox0 = (float)cx - 0.5f, oy0 = -0.5f, orad = (float)rad;   //   in pixel-center space
-    float ix0 = (float)cx + 0.5f, iy0 = 0.5f, irad = (float)rad - 1;  // inner silhouette
+    float ox0 = (float)cx - 0.5f, oy0 = (float)ty - 0.5f, orad = (float)rad;   //   in pixel-center space
+    float ix0 = (float)cx + 0.5f, iy0 = (float)ty + 0.5f, irad = (float)rad - 1;  // inner silhouette
     int band2 = min(rad + 2, min(h, cw));
     auto ring = [&](int x, int y) {
         float f = -SdRoundRect((float)x, (float)y, ox0, oy0, x1, y1, orad);   // inside outer
@@ -5830,11 +5838,11 @@ static void CardRingBake(BYTE* bits, int w, int h, int cw, int rad, int cx) {
         p[1] = (BYTE)((0x55 * al + p[1] * inv) >> 8);
         p[2] = (BYTE)((0x55 * al + p[2] * inv) >> 8);
     };
-    for (int y = 0; y < band2; y++)                       // top strip, then bottom,
+    for (int y = ty; y < ty + band2 && y < h; y++)        // top strip, then bottom,
         for (int x = 0; x < w; x++) ring(x, y);
     for (int y = max(band2, h - band2); y < h; y++)
         for (int x = 0; x < w; x++) ring(x, y);
-    for (int y = band2; y < max(band2, h - band2); y++) {
+    for (int y = ty + band2; y < max(band2, h - band2); y++) {
         for (int x = 0; x < band2 + cx; x++) ring(x, y);       // left, then right - the straights'
         for (int x = max(band2, cx + cw - band2); x < w; x++) ring(x, y);   // mid pixels early-out inside
     }
@@ -5850,11 +5858,17 @@ static HBITMAP g_bdBmp[2] = { nullptr, nullptr };   // 32bpp top-down backdrops
 static HDC g_bdDC[2] = { nullptr, nullptr };
 static int g_bdW[2] = { 0, 0 }, g_bdH[2] = { 0, 0 };
 static double g_bdDpi[2] = { 0, 0 }; // the bake key: size AND dpi (PerMonitorV2 hops)
+static int g_bdIns[2] = { -1, -1 };  // ... and the card's top inset (the band's row)
 static BYTE* g_bdBits[2] = { nullptr, nullptr };
 
 static void CardBackdrop(HDC ref, int w, int h, bool b) {
     int slot = b ? 1 : 0;
-    if (g_bdBmp[slot] && g_bdW[slot] == w && g_bdH[slot] == h && g_bdDpi[slot] == g.dpi) return;
+    // the card's top row inside this DIB: the band is a layout row - KillerPDF's
+    // card sits in the row BELOW its strip, its top border tucked 1px into the
+    // band's foot so the active tab covers that pixel without a seam. One row
+    // short of BANDH keeps that border visible under the inactive tabs.
+    int ty = max(0, BandInset(b) - 1);
+    if (g_bdBmp[slot] && g_bdW[slot] == w && g_bdH[slot] == h && g_bdDpi[slot] == g.dpi && g_bdIns[slot] == ty) return;
     if (g_bdDC[slot]) { DeleteDC(g_bdDC[slot]); g_bdDC[slot] = nullptr; }
     if (g_bdBmp[slot]) { DeleteObject(g_bdBmp[slot]); g_bdBmp[slot] = nullptr; }
     g_bdW[slot] = 0; g_bdH[slot] = 0;
@@ -5878,14 +5892,14 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     RECT fr{ 0, 0, w, h };                                // the window's grain phase,
     FillRect(bdc, &fr, GrainBrush(1));                    // like every sibling pane
     if (card) {
-        CardShadowStrip(bits, w, h, cx, cx + cw, rad);
+        CardShadowStrip(bits, w, h, cx, cx + cw, rad, ty);
         Gdiplus::Graphics gs(bdc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         // the canvas interior, half a pixel in: GDI+ centers pixels on integer
         // coordinates, so the path edge must sit at the boundary between the
         // ring's outermost pixel and the canvas's first one to fill it whole
-        Gdiplus::GraphicsPath* inner = CardPath((float)cx + 0.5f, 0.5f, (float)cw - 1, (float)h - 1,
-                                                (float)rad - 1, 0);
+        Gdiplus::GraphicsPath* inner = CardPath((float)cx + 0.5f, (float)ty + 0.5f, (float)cw - 1,
+                                                (float)h - 1 - ty, (float)rad - 1, 0);
         if (Gdiplus::TextureBrush* c = GrainTex(0)) {     // the canvas, phased like GDI's
             c->TranslateTransform((float)-xoffScreen, 0.f);
             gs.FillPath(c, inner);
@@ -5895,13 +5909,13 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
             gs.FillPath(&cb, inner);
         }
         delete inner;
-        CardRingBake(bits, w, h, cw, rad, cx);            // the #555 ring, exact per pixel
+        CardRingBake(bits, w, h, cw, rad, cx, ty);        // the #555 ring, exact per pixel
     }
     SelectObject(bdc, ob);
     DeleteDC(bdc);
     g_bdBmp[slot] = bm; g_bdDC[slot] = CreateCompatibleDC(ref);
     SelectObject(g_bdDC[slot], bm);
-    g_bdBits[slot] = bits; g_bdW[slot] = w; g_bdH[slot] = h; g_bdDpi[slot] = g.dpi;
+    g_bdBits[slot] = bits; g_bdW[slot] = w; g_bdH[slot] = h; g_bdDpi[slot] = g.dpi; g_bdIns[slot] = ty;
 }
 
 // Find highlights on one visible page (KillerPDF's AddSearchHighlight): a rounded
@@ -6227,8 +6241,9 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
         FillRect(dc, &r, GrainBrush(1));
     }
     int rad = max(2, (int)(6 * g.dpi));
+    int cardTop = max(0, BandInset(thisIsB) - 1);   // the card's top row: under the band
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
-    HRGN clip = card ? CreateRoundRectRgn(xoff + cx + 2, 2, xoff + cx + cw - 2, h - 2, 2 * (rad - 2), 2 * (rad - 2)) : nullptr;
+    HRGN clip = card ? CreateRoundRectRgn(xoff + cx + 2, cardTop + 2, xoff + cx + cw - 2, h - 2, 2 * (rad - 2), 2 * (rad - 2)) : nullptr;
     if (clip) SelectClipRgn(dc, clip);   // ContentClip: two pixels inside the card, past the
                                          // region's corner steps, so pages never nick the ring
     if (extra) ExtSelectClipRgn(dc, extra, RGN_AND);   // then the pane's strip, if splitting
@@ -6348,8 +6363,12 @@ static void PaintViewBars(HDC dc, int w, int h, int xoff) {
     int gutH = hshow ? gb : 0;
     int ins = BandInset(false);          // the band is a layout row: the track starts under it
     if (vshow) {
-        int tl, tp; BarThumb(D.docH, h - ins - gutH, D.sy, tl, tp);   // the v-track stops short of
-        tp += ins;                                               // the h-bar's reserved row
+        // the thumb's length comes off the visible viewport (band out), its
+        // travel maps sy over the REAL clamp range (the under-band model) -
+        // mapped over the short range it hit its end ins pixels early; mapped
+        // over the tall viewport the track itself overshot the h-bar
+        int tl, tp; BarThumb(D.docH, h - ins - gutH, D.sy, tl, tp, D.docH - (h - gutH));
+        tp += ins;
         bool hot = D.vHot || D.vDrag;
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, xoff + cw - gb + (gb - bw) / 2, tp, bw, tl, r, hot);
@@ -6377,8 +6396,8 @@ static void PaintPaneBars(HDC dc, DocState& D, bool b, bool vhot, bool hhot) {
     int gutH = hshow ? gb : 0;
     int ins = BandInset(b);                              // the track starts under the band
     if (vshow) {
-        int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp);   // the v-track stops short
-        tp += ins;                                       // of the h-bar's reserved row
+        int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp, D.docH - (g.ch - gutH));
+        tp += ins;
         int bw = vhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, x1 - gb + (gb - bw) / 2, tp, bw, tl, r, vhot);
     }
@@ -6435,12 +6454,65 @@ static const int TAB_FLOOR = 160, TAB_CEIL = 260;   // TabFloorWidth / TabCeilin
 static const int TAB_BTN = 22, TAB_BTN_GAP = 4;     // the + and chevron cells (26px pitch)
 static int TABF(int v) { return (int)(v * g.dpi); }
 
-static HFONT TabFont() {                 // TabTitleFontSize 12, the toolbar's family
-    static HFONT f = nullptr; static double fd = 0;
-    if (f && fd != g.dpi) { DeleteObject(f); f = nullptr; }
-    if (!f) f = CaptionFont(f, 12, false, L"Killer Sans UI");
+static HFONT TabFont() {                 // TabTitleFontSize 12, KillerPDF's MonoFont family:
+    static HFONT f = nullptr; static double fd = 0;   // "Killer Sans UI, Segoe UI" - the app
+    if (f && fd != g.dpi) { DeleteObject(f); f = nullptr; }   // ships its own face, docsy cannot,
+    if (!f) f = CaptionFont(f, 12, false, L"Segoe UI");       // so the family's declared fallback
     fd = g.dpi;
     return f;
+}
+
+// The tab label, drawn with GDI+ off the bundled faces. The subsets carry no
+// hinting tables, and GDI's rasterizer grid-snaps their unhinted 12px stems
+// into mush - KillerPDF draws this exact face through WPF's renderer and it
+// reads clean, so the label takes GDI+'s own anti-aliased path instead (its
+// private collection loads the same two RCDATA faces wWinMain feeds
+// AddFontMemResourceEx). Falls back to the GDI font only if the faces are gone.
+static Gdiplus::PrivateFontCollection* TabFaces() {
+    static Gdiplus::PrivateFontCollection* pc = nullptr;
+    if (!pc) {
+        pc = new Gdiplus::PrivateFontCollection();
+        for (int id : { 201, 202 }) {
+            HRSRC hs = FindResourceW(g.hinst, MAKEINTRESOURCEW(id), (LPCWSTR)RT_RCDATA);
+            HGLOBAL hg = hs ? LoadResource(g.hinst, hs) : nullptr;
+            const void* data = hg ? LockResource(hg) : nullptr;
+            DWORD len = hs ? SizeofResource(g.hinst, hs) : 0;
+            if (data && len) pc->AddMemoryFont(const_cast<void*>(data), len);
+        }
+    }
+    return pc;
+}
+
+static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
+    Gdiplus::PrivateFontCollection* pc = TabFaces();
+    INT n = 0; pc->GetFamilyCount(&n);
+    if (!n) {                                       // no faces: the GDI fallback above
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c);
+        HFONT f = TabFont();
+        HGDIOBJ of = SelectObject(dc, f);
+        DrawTextW(dc, s.c_str(), -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dc, of);
+        return;
+    }
+    std::vector<Gdiplus::FontFamily> fams(n);
+    INT got = 0; pc->GetFamilies(n, fams.data(), &got);
+    const Gdiplus::FontFamily* ui = nullptr;
+    for (INT i = 0; i < got; i++) {
+        wchar_t nm[64]; fams[i].GetFamilyName(nm);
+        if (!lstrcmpW(nm, L"Killer Sans UI")) { ui = &fams[i]; break; }
+    }
+    if (!ui && got > 0) ui = &fams[0];
+    if (!ui) return;
+    Gdiplus::Graphics gs(dc);
+    gs.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
+    Gdiplus::Font f(ui, (REAL)(12 * g.dpi), Gdiplus::UnitPixel);   // TabTitleFontSize 12 at the DPI
+    Gdiplus::SolidBrush br(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
+    Gdiplus::RectF rf((REAL)r.left, (REAL)r.top, (REAL)(r.right - r.left), (REAL)(r.bottom - r.top));
+    Gdiplus::StringFormat sf;
+    sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap | Gdiplus::StringFormatFlagsNoFitBlackBox);
+    sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+    sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+    gs.DrawString(s.c_str(), (INT)-1, &f, rf, &sf, &br);
 }
 
 // The tab's title: the file name without its extension (KillerPDF's Title),
@@ -6553,8 +6625,10 @@ static void TabBandInvalidate(bool b) {   // the band's own strip, nothing else
 }
 
 // The band's paint. Draw order is KillerPDF's z-order: the field, the foot
-// fade, the card's tucked hairline, then the tabs - the active tab last among
-// its neighbors so its ring is never overpainted - then the + and the chevron.
+// fade, then the tabs - the active tab last among its neighbors so its face is
+// never overpainted - then the + and the chevron. The card's own ring lands at
+// the band's foot (the tucked top border CardBackdrop bakes), so the band
+// paints no hairline of its own and stops a row short of it.
 static void TabBandPaint(HDC dc, bool b) {
     if (!BandShown(b)) return;
     TabEnsure(b);
@@ -6567,8 +6641,8 @@ static void TabBandPaint(HDC dc, bool b) {
     // the field: the band paints no fill of its own - the window's grainy
     // background shows through, exactly KillerPDF's transparent strip
     int bx0 = PaneX0(b), bw0 = PaneW(b);
-    RECT bandR{ bx0, 0, bx0 + bw0, BH };
-    FillRect(dc, &bandR, GrainBrush(1));
+    RECT bandR{ bx0, 0, bx0 + bw0, BH - 1 };   // the field stops at the band's foot: the card's
+    FillRect(dc, &bandR, GrainBrush(1));       // tucked ring owns the foot's last row
     // the foot fade (TabStripFade): transparent to 45%, #59000000 at the foot,
     // the whole gradient at BarShadowOpacity 0.38
     {
@@ -6579,41 +6653,15 @@ static void TabBandPaint(HDC dc, bool b) {
         Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
         gfade.FillRectangle(&fadeBr, fadeR);
     }
-    // the card's tucked top border: the hairline at the band's foot. The ends
-    // round at the active tab's radius (CardCorners.AtTabBand) unless the
-    // first/last visible tab is the active one - that tab's own edge is flat
-    // and flush, and a curve under it would cut a notch out of the join.
+    // the active tab's visible slot, for the paint order and the drag ghost
     int actVis = -1;
     for (int k = 0; k < (int)vis.size(); k++) if (vis[k] == Act(b)) { actVis = k; break; }
-    bool firstActive = G.cap > 0 && actVis == G.start;
-    // the trailing corner is the active tab's only when it truly sits on the
-    // strip's edge - with the chevron showing, the last visible tab is a
-    // middle tab in every way that matters (RebuildTabStrip's IsLast rule)
-    bool lastActive = !G.chev && G.cap > 0 && actVis == G.start + G.cap - 1;
     int r3 = (int)(3 * g.dpi);
-    int hlL = cardL + (firstActive ? 0 : r3), hlR = cardR - (lastActive ? 0 : r3);
-    {
-        // exact #555555, one pixel, GDI+ so the ends meet the corner arcs
-        Gdiplus::Graphics ghl(dc);
-        ghl.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::Color hairC((BYTE)255, (BYTE)0x55, (BYTE)0x55, (BYTE)0x55);
-        Gdiplus::SolidBrush hairBr(hairC);
-        ghl.FillRectangle(&hairBr, Gdiplus::RectF((float)hlL, (float)BH - 1.f, (float)(hlR - hlL), 1.f));
-        Gdiplus::Pen hairPen(hairC, 1.f);
-        if (!firstActive) ghl.DrawArc(&hairPen, Gdiplus::RectF((float)cardL - 0.5f, (float)BH - 1.f - r3 - 0.5f,
-                                    (float)(2 * r3), (float)(2 * r3)), 180.f, 90.f);
-        if (!lastActive)  ghl.DrawArc(&hairPen, Gdiplus::RectF((float)cardR - 1.f - 2 * r3 - 0.5f,
-                                    (float)BH - 1.f - r3 - 0.5f, (float)(2 * r3), (float)(2 * r3)), 270.f, 90.f);
-    }
-    // the tabs. The focused pane's ring is solid accent; the unfocused pane's
-    // drops to the card's border color; a lone pane's melts into its face -
-    // UpdatePaneFocusRing's three states. Painted inactive-first, active
-    // last; a grabbed tab sits above everything, glued to the cursor.
-    bool paneFocused = g.split && b == FocusB();
-    bool paneDimmed = g.split && b != FocusB();
+    // the tabs. Painted inactive-first, active last; a grabbed tab sits above
+    // everything, glued to the cursor. The active tab is the menu tier's face
+    // alone - KillerPDF's accent ring on top reads as decoration docsy's
+    // reader never asked for, and the strip is chrome, not a status light.
     int hotK = (g.tbTabHotPane == b) ? g.tbTabHot : -1;
-    SetBkMode(dc, TRANSPARENT);
-    HFONT of = (HFONT)SelectObject(dc, TabFont());
     int kEnd = min(G.start + G.cap, (int)vis.size());
     auto glideDx = [&](int k) -> int {           // a swapping neighbor or a released
         if (g.tbGlideIdx == k && g.tbGlidePane == b && g.tbGlideT0) {   // tab easing home
@@ -6657,10 +6705,8 @@ static void TabBandPaint(HDC dc, bool b) {
                 gs.FillRectangle(&db, Gdiplus::RectF((float)fr - 1.f, (float)G.faceTop, 1.f, (float)G.faceH));
             }
             // the label, dirty dot included, ellipsized before the close x
-            std::wstring title = TabTitle(b, si);
             RECT tr{ fl + TABF(10), G.faceTop, fr - TABF(24) - TABF(6), G.faceTop + G.faceH };
-            SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
-            DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            TabLabel(dc, TabTitle(b, si), tr, RGB(0xa3, 0xa3, 0xa3));
             // the close x: muted, danger red under the cursor (TabCloseButton)
             int xr = fr - TABF(2) - TABF(12), cy = G.faceTop + G.faceH / 2;
             drawCloseX(xr, cy, hotK == k && g.tbHotBtn == 1);
@@ -6684,34 +6730,9 @@ static void TabBandPaint(HDC dc, bool b) {
             face.CloseFigure();
             Gdiplus::SolidBrush faceBr(Gdiplus::Color((BYTE)255, 0x14, 0x14, 0x14));   // #141414
             gs.FillPath(&faceBr, &face);
-            // the accent stripe: the top 3px, then the sides - solid on the
-            // focused pane, the card's border color on the dimmed one, and a
-            // fade to clear on a lone pane (TabActiveRingFadeBrush)
-            Gdiplus::GraphicsPath stripe;
-            stripe.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
-            stripe.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
-            stripe.AddLine((float)fr, (float)ft + rr, (float)fr, (float)ft + 3 * rr);
-            stripe.AddLine((float)fr, (float)ft + 3 * rr, (float)fl, (float)ft + 3 * rr);
-            stripe.CloseFigure();
-            Gdiplus::SolidBrush stripeBr(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
-            gs.FillPath(&stripeBr, &stripe);
-            BYTE sr = 0x22, sg = 0xbb, sb = 0x56;
-            if (paneDimmed) { sr = sg = sb = 0x55; }
-            if (paneFocused) {
-                Gdiplus::SolidBrush side(Gdiplus::Color((BYTE)255, sr, sg, sb));
-                gs.FillRectangle(&side, Gdiplus::RectF((float)fl, (float)ft, 1.f, (float)(fb2 - ft)));
-                gs.FillRectangle(&side, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)(fb2 - ft)));
-            } else if (!paneDimmed) {
-                Gdiplus::LinearGradientBrush sideBr(Gdiplus::PointF(0, (float)ft), Gdiplus::PointF(0, (float)fb2),
-                                                Gdiplus::Color((BYTE)255, sr, sg, sb), Gdiplus::Color((BYTE)0, sr, sg, sb));
-                gs.FillRectangle(&sideBr, Gdiplus::RectF((float)fl, (float)ft, 1.f, (float)(fb2 - ft)));
-                gs.FillRectangle(&sideBr, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)(fb2 - ft)));
-            }
             // the label and the x on the active face
-            std::wstring title = TabTitle(b, vis[actVis]);
             RECT tr{ fl + TABF(10), ft, fr - TABF(24) - TABF(6), fb2 };
-            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-            DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            TabLabel(dc, TabTitle(b, vis[actVis]), tr, RGB(0xe0, 0xe0, 0xe0));
             int xr = fr - TABF(2) - TABF(12), cy = ft + G.faceH / 2;
             drawCloseX(xr, cy, hotK == actVis && g.tbHotBtn == 1);
         }
@@ -6734,22 +6755,11 @@ static void TabBandPaint(HDC dc, bool b) {
         face.CloseFigure();
         Gdiplus::SolidBrush faceBr(Gdiplus::Color((BYTE)255, 0x14, 0x14, 0x14));
         gs.FillPath(&faceBr, &face);
-        Gdiplus::GraphicsPath stripe;
-        stripe.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
-        stripe.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
-        stripe.AddLine((float)fr, (float)ft + rr, (float)fr, (float)ft + 3 * rr);
-        stripe.AddLine((float)fr, (float)ft + 3 * rr, (float)fl, (float)ft + 3 * rr);
-        stripe.CloseFigure();
-        Gdiplus::SolidBrush stripeBr(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
-        gs.FillPath(&stripeBr, &stripe);
-        std::wstring title = TabTitle(b, vis[g.tbDragIdx]);
         RECT tr{ fl + TABF(10), ft, fr - TABF(24) - TABF(6), fb2 };
-        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-        DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        TabLabel(dc, TabTitle(b, vis[g.tbDragIdx]), tr, RGB(0xe0, 0xe0, 0xe0));
         int xr = fr - TABF(2) - TABF(12), cy = ft + G.faceH / 2;
         drawCloseX(xr, cy, false);
     }
-    SelectObject(dc, of);
     // the "+" (NewTabBtn): a new blank document in this pane, RowHover under
     // the cursor
     int btnR = cardR - TABF(2);
@@ -6831,17 +6841,14 @@ static void TabDragPaint(HDC dc) {
     face.CloseFigure();
     Gdiplus::SolidBrush fb(Gdiplus::Color((BYTE)210, 0x14, 0x14, 0x14));   // TabDragGhost, Opacity .82
     gs.FillPath(&fb, &face);
-    SetBkMode(dc, TRANSPARENT);
-    HFONT of = (HFONT)SelectObject(dc, TabFont());
     RECT tr{ gl + TABF(10), Gs.faceTop, gr - TABF(24), Gs.faceTop + Gs.faceH };
-    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-    DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    SelectObject(dc, of);
-    // the caret: 2px accent at the insertion slot's leading edge
+    TabLabel(dc, title, tr, RGB(0xe0, 0xe0, 0xe0));
+    // the caret: 2px rule at the insertion slot's leading edge - neutral chrome
+    // gray, the strip carries no accent of its own any more
     if (g.tbCaret >= 0) {
         int cx = G.x0 + g.tbCaret * G.cell;
         cx = std::clamp(cx, G.x0, G.x0 + G.hostW);
-        Gdiplus::SolidBrush cb(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
+        Gdiplus::SolidBrush cb(Gdiplus::Color((BYTE)255, 0x8a, 0x8a, 0x8a));
         gs.FillRectangle(&cb, Gdiplus::RectF((float)cx, (float)G.faceTop, 2.f, (float)G.faceH));
     }
 }
@@ -7341,7 +7348,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int cardL = PaneX0(inB) + CardX(inB);
             if (vshow && p.x >= cardR - gb && p.x < cardR) { // the v-bar hugs the card's edge
                 int ins = BandInset(inB);
-                int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;   // under the band
+                int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp,
+                                     D.docH - (g.ch - gutH)); tp += ins;   // under the band
                 if (p.y >= tp && p.y < tp + tl) { D.vDrag = true; D.vGrab = p.y - tp; }   // short
                 else ScrollPane(inB, D.sx, D.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
                 return 0;
@@ -7361,7 +7369,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         int gutH = hshow ? gb : 0;
         if (vshow && p.x >= cw - gb && p.x < cw) {   // the vertical bar: inside the card's edge
             int ins = BandInset(false);
-            int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;   // under the band
+            int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp,
+                                 D.docH - (g.ch - gutH)); tp += ins;   // under the band
             if (p.y >= tp && p.y < tp + tl) { D.vDrag = true; D.vGrab = p.y - tp; }
             else ScrollTo(D.sx, D.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
             return 0;
@@ -7608,7 +7617,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (D.n && D.docH > g.ch && p.x >= cardR - gb && p.x < cardR) {
                 int gutH = (D.n && D.docW > ViewW(D, inB)) ? gb : 0;
                 int ins = BandInset(inB);
-                int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;
+                int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp,
+                                     D.docH - (g.ch - gutH)); tp += ins;
                 vhot = p.y >= tp && p.y < tp + tl;
             }
             if (D.n && D.docW > ViewW(D, inB) && p.y >= g.ch - gb && p.x >= cardL && p.x < cardR - ((D.docH > g.ch) ? gb : 0)) {
@@ -7629,7 +7639,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (vhot) {
             int gutH = (D.n && D.docW > cw - SBar()) ? SBar() : 0;
             int ins = BandInset(false);
-            int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;
+            int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp,
+                                 D.docH - (g.ch - gutH)); tp += ins;
             vhot = p.y >= tp && p.y < tp + tl;
         }
         bool hhot = !vhot && D.n && D.docW > cw - (D.docH > g.ch ? SBar() : 0) && p.y >= g.ch - SBar() && p.x < cw - (vhot ? SBar() : 0);
@@ -7671,7 +7682,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         if (g.tbPending >= -3 && (g.tbPending != -1 || g.tbDragging)) {
-            ReleaseCapture();                    // the strip's pending press answers here
+            g.tbOwnRelease = true;               // the release is ours: CAPTURECHANGED fires
+            ReleaseCapture();                    // synchronously inside it and must not eat
+            g.tbOwnRelease = false;              // the press this UP is about to answer
             TabStripUp(h, p);
             return 0;
         }
@@ -7749,7 +7762,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
     case WM_CAPTURECHANGED:
         fd.drag = false;                       // someone else took it (a modal loop, a close)
-        if (g.tbPending >= -3) {               // the strip's pending press dies with it:
+        if (g.tbOwnRelease) {                  // our own LBUTTONUP release: the pending press
+            g.tbOwnRelease = false;            // survives it - TabStripUp answers right after
+        } else if (g.tbPending >= -3) {        // the strip's pending press dies with it:
             g.tbPending = -1; g.tbPendingX = false;   // a stolen capture is a click off the band
             g.tbDragging = false; g.tbGhostPane = -1; g.tbCaret = -1;
         }
@@ -7793,6 +7808,26 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
+            {   // the strip's pointers first (KillerPDF's Cursor=Hand on the tab border
+                // and the ToolbarButton style): the hand over every tab, its close x,
+                // the + and the chevron; the arrow over the band's own field - and
+                // never the page tools' cursors, which would peek through the chrome
+                POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+                if (p.y < BANDH() && !g.full) {
+                    bool hb = g.split ? PaneB(p.x) : false;
+                    if (BandShown(hb)) {
+                        TabEnsure(hb);
+                        TabStripGeo G; TabStripLayout(hb, G);
+                        std::vector<int> vis;
+                        for (int i = 0; i < (int)Tabs(hb).size(); i++)
+                            if ((i == Act(hb) ? DV(hb).n : Tabs(hb)[i].n) > 0) vis.push_back(i);
+                        int slot;
+                        SetCursor(LoadCursorW(nullptr,
+                                   TabBandHitAt(hb, G, vis, p, slot) ? IDC_HAND : IDC_ARROW));
+                        return TRUE;
+                    }
+                }
+            }
             if (g.barOn) {                     // the bar's cells take the hand (the bar wins
                 POINT p; GetCursorPos(&p); ScreenToClient(h, &p);   // its pixels in the press
                 if (AnnBarHit(p) != AB_OUT) { SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE; }   // path too)
@@ -9267,13 +9302,15 @@ static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c, bool shadow = t
 // AlphaBlended over whatever the rail has drawn - both paint paths, icons included,
 // which is KillerPDF's own z-order: the shadow's pane renders above the sidebar's.
 static HBITMAP g_rshbm = nullptr; static HDC g_rshdc = nullptr;
-static int g_rshw = 0, g_rshh = 0; static double g_rshdpi = 0;
+static int g_rshw = 0, g_rshh = 0, g_rshins = -1; static double g_rshdpi = 0;
 
 static void DrawRailShadow(HDC dc, int w, int h) {
     if (w <= 0 || h <= 0) return;
     int sw = min(w, (int)(20 * g.dpi) + 2);   // the visible reach: ~2.5 sigma, past this
                                               // the falloff is under one percent of ink
-    if (!g_rshbm || g_rshw != sw || g_rshh != h || g_rshdpi != g.dpi) {
+    int ins = max(0, BandInset(false) - 1);   // the card's top row: the halo fades in where
+                                              // the card starts, under the band when one shows
+    if (!g_rshbm || g_rshw != sw || g_rshh != h || g_rshdpi != g.dpi || g_rshins != ins) {
         BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), sw, -h, 1, 32, BI_RGB };
         BYTE* px = nullptr;
         HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
@@ -9281,9 +9318,10 @@ static void DrawRailShadow(HDC dc, int w, int h) {
             const double sig = 8.0 * g.dpi, depth = 5.0 * g.dpi;
             int rad = max(2, (int)(6 * g.dpi));
             for (int y = 0; y < h; y++) {
-                double vy = Phi((y - depth) / sig);      // the silhouette starts 5px down:
-                                                         // the halo fades in over its top
-                double cy = max(0.0, (double)y - depth); // height past that top edge
+                double vy = Phi((y - ins - depth) / sig);   // the silhouette starts 5px down
+                                                            // of the card's top: the halo
+                                                            // fades in over its top edge
+                double cy = max(0.0, (double)y - ins - depth);   // height past that top edge
                 double c = cy < rad ? rad - std::sqrt((double)rad * rad - (rad - cy) * (rad - cy))
                                     : 0.0;               // the corner's pull-in, footer-style
                 BYTE* row = px + (size_t)y * sw * 4;
@@ -9300,7 +9338,7 @@ static void DrawRailShadow(HDC dc, int w, int h) {
             if (g_rshbm) DeleteObject(g_rshbm);
             g_rshbm = bm;
             SelectObject(g_rshdc, g_rshbm);
-            g_rshw = sw; g_rshh = h; g_rshdpi = g.dpi;
+            g_rshw = sw; g_rshh = h; g_rshdpi = g.dpi; g_rshins = ins;
         }
     }
     if (g_rshbm) {
@@ -10862,7 +10900,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_stchev) { DeleteObject(g_stchev); g_stchev = nullptr; }
         for (int slot = 0; slot < 2; slot++)      // both panes' backdrop bakes die: they
             if (g_bdBmp[slot]) { DeleteObject(g_bdBmp[slot]); g_bdBmp[slot] = nullptr;   // re-bake at the new DPI
-                                 g_bdW[slot] = g_bdH[slot] = 0; g_bdDpi[slot] = 0; }
+                                 g_bdW[slot] = g_bdH[slot] = 0; g_bdDpi[slot] = 0; g_bdIns[slot] = -1; }
         if (g_fntEdit) { DeleteObject(g_fntEdit); g_fntEdit = nullptr; }
         if (g_fntOpt) { DeleteObject(g_fntOpt); g_fntOpt = nullptr; }
         if (g_fntAb) { DeleteObject(g_fntAb); g_fntAb = nullptr; }
