@@ -110,6 +110,7 @@ using winrt::Windows::Data::Pdf::PdfDocument;
 using winrt::Windows::Data::Pdf::PdfPageRenderOptions;
 using winrt::Windows::Storage::StorageFile;
 using winrt::Windows::Storage::Streams::InMemoryRandomAccessStream;
+using winrt::Windows::Storage::Streams::DataWriter;
 
 struct Ent { HBITMAP b; int w, h; int rot = 0; unsigned long long t; };   // rot: the Transform
                                            // quarter-turns + flip bits baked in
