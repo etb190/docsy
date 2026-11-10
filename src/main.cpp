@@ -9185,7 +9185,7 @@ struct WebTab {
     unsigned long long captureDue = 0;
     std::wstring pending;                  // the URL a brand-new tab opens once its
                                            // controller finishes building
-    EventRegistrationToken tkNavS{}, tkNavC{}, tkSrc{}, tkTitle{}, tkHist{};
+    EventRegistrationToken tkNavS{}, tkNavC{}, tkSrc{}, tkTitle{}, tkHist{}, tkDl{};
     HBITMAP thumb = nullptr; int thumbW = 0, thumbH = 0; double ar = 0.0;
 };
 static std::vector<WebTab> g_wt;
@@ -10047,7 +10047,21 @@ static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the U
     if (!j->ok) { WxNotifyFail(j->err); return; }
     std::wstring id = j->id, dir = j->dir;
     WxAddFolder(dir, [id, dir](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
-        if (FAILED(hr) || !ext) { WxNotifyFail(L"WebView2 could not load this extension."); WxRmTree(dir); return; }
+        if (FAILED(hr) || !ext) {                          // the reason travels with the failure:
+            wchar_t why[160];                              // policy, old runtime, bad manifest - the
+            if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED))   // toast should say which one it hit
+                swprintf_s(why, L"Extensions are turned off on this machine (0x%08lX).",
+                           (unsigned long)hr);
+            else if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
+                swprintf_s(why, L"This extension unpacked wrong (0x%08lX). Try again.",
+                           (unsigned long)hr);
+            else
+                swprintf_s(why, L"WebView2 could not load this extension (0x%08lX).",
+                           (unsigned long)hr);
+            WxNotifyFail(why);
+            WxRmTree(dir);
+            return;
+        }
         int old = WxFind(id);
         if (old >= 0) { if (g_wx[old].icon) delete g_wx[old].icon; g_wx.erase(g_wx.begin() + old); }
         WebExt e; e.id = id; e.dir = dir; e.ext = ext;
@@ -10116,9 +10130,28 @@ static const wchar_t* const kWxStoreScript = LR"JS((function(){
     btn.style.cursor=(done||work)?'default':'pointer';
   }
   window.__docsySet=function(l){have=l||[];busy=null;failed=false;paint();};
-  window.__docsyFail=function(){busy=null;failed=true;paint();};
+  window.__docsyFail=function(m){busy=null;failed=true;if(m)btn.title=String(m);paint();};
   setInterval(paint,500);
   document.addEventListener('DOMContentLoaded',paint);
+  // the store's own "Add to Chrome" dead-ends here (no chrome.webstore in a
+  // webview) - a capture-phase click on it installs through docsy instead,
+  // so the muscle-memory button does the right thing
+  document.addEventListener('click',function(ev){
+    var p=ev.target,txt='';
+    for(var k=0;k<5&&p;k++,p=p.parentElement){
+      txt=((p.textContent||'')+'').trim();
+      if(txt.length>60)break;
+      var on=p.getAttribute&&(p.getAttribute('aria-label')||'')+'';
+      if(/^add to (chrome|edge|brave|firefox|browser)$/i.test(txt)||/^(zu chrome hinzuf\u00fcgen|a\u00f1adir a chrome|ajouter \u00e0 chrome|adicionar ao ?chrome|aggiungi a chrome|chrome\u306b\u8ffd\u52a0|添加至 ?chrome|添加到 ?chrome|chrome에 추가|установить в chrome)$/i.test(txt.trim())||/^add to (chrome|edge|brave|firefox|browser)$/i.test(on)){
+        ev.preventDefault();ev.stopPropagation();
+        var i=cur();if(!i||busy)return;
+        if(have.indexOf(i)>=0)return;
+        failed=false;busy=i;paint();
+        try{window.chrome.webview.postMessage('docsy-install:'+i);}catch(e){busy=null;failed=true;paint();}
+        return;
+      }
+    }
+  },true);
 })();)JS";
 
 // ---- the popup window ----
@@ -11084,6 +11117,38 @@ static void WebEnsureController(int i) {
                                 }
                                 return S_OK;
                             }).Get(), &tkm); }
+                // a .crx arriving in the webview is an install click that got as
+                // far as the update service: docsy takes the download's id, cancels
+                // it, and runs its own installer - one more road that cannot be
+                // blocked by page UI or script
+                {   wrl::ComPtr<ICoreWebView2_4> w4;
+                    if (SUCCEEDED(t->web->QueryInterface(IID_PPV_ARGS(&w4))) && w4) {
+                        w4->add_DownloadStarting(
+                            Microsoft::WRL::Callback<ICoreWebView2DownloadStartingEventHandler>(
+                                [](ICoreWebView2*, ICoreWebView2DownloadStartingEventArgs* a) -> HRESULT {
+                                    wrl::ComPtr<ICoreWebView2DownloadOperation> op;
+                                    if (FAILED(a->get_DownloadOperation(&op)) || !op) return S_OK;
+                                    LPWSTR u = nullptr;
+                                    if (SUCCEEDED(op->get_Uri(&u)) && u) {
+                                        std::wstring low = u; CoTaskMemFree(u);
+                                        for (auto& c : low) c = (wchar_t)towlower(c);
+                                        std::wstring sid;              // x=id%3D<32 a-p> in the update URL
+                                        size_t p = low.find(L"id%3d");
+                                        if (p != std::wstring::npos) {
+                                            p += 5;
+                                            while (p < low.size() && sid.size() < 32)
+                                                if (low[p] >= L'a' && low[p] <= L'p') sid += low[p++];
+                                                else break;
+                                        }
+                                        if (!sid.empty()) {
+                                            a->put_Handled(TRUE); a->put_Cancel(TRUE);
+                                            WxInstall(sid);
+                                        }
+                                    }
+                                    return S_OK;
+                                }).Get(), &t->tkDl);
+                    }
+                }
                 t->web->add_NavigationStarting(
                     Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
                         [id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*) -> HRESULT {
