@@ -878,8 +878,9 @@ static void EnsureInfoBack(HDC ref, int w, int h) {
 // Undo, Redo and the Open/Save split chevrons stay off docsy's row, their
 // actions riding the keyboard shortcuts instead.
 // Labels are the reference's own strings (Str_Lbl_*); glyphs are the buttons'
-// own MDL2 codepoints from MainWindow.xaml - Transform draws its composed
-// icon (a frame + the E7C2 move glyph), like its XAML and DrawToolbarGlyph.
+// own MDL2 codepoints at the runtime restyle's size (ToolbarStyle's
+// BuildToolbarContent, GlyphLarge 20) - Transform draws its composed icon
+// (the 20px frame + four vector arrows), DrawToolbarGlyph's TransformBoxMove.
 enum { TB_CLOSE, TB_OPEN, TB_SAVE,   // the file cluster
        TB_SELECT, TB_TEXT, TB_HIGHLIGHT, TB_LINE, TB_SHAPE, TB_DRAW,
        TB_TRANSFORM, TB_CLEAR, TB_FIND, TB_COUNT };
@@ -972,60 +973,32 @@ static int BarHit(POINT p, int w) {
     return -1;
 }
 
-// The composed Transform icon's inner glyph, ink-centered (AbCheckGlyph's
-// technique): drawn once into a scratch frame-sized box exactly the way the
-// real draw draws it, its ink bbox scanned, and the real draw's rect shifted
-// by minus the ink-to-center offset - the E7C2 move arrows land dead center
-// in their frame BY CONSTRUCTION (DrawTextW's line-box math had thrown them
-// onto the frame's edges). ANTIALIASED_QUALITY is what the reference shows:
-// the ToolbarButton ContentPresenter's DropShadowEffect renders this content
-// in grayscale AA - ClearType's subpixel filter read as chroma mush at 9px.
-static HFONT g_tfFont = nullptr;
-static double g_tfFontDpi = 0;
-static POINT g_tfInkOff{ 0, 0 };       // ink-center minus box-center at this dpi
-static void TfMoveGlyph(HDC dc, const RECT& box, COLORREF c) {
-    if (!g_tfFont || g_tfFontDpi != g.dpi) {
-        if (g_tfFont) DeleteObject(g_tfFont);
-        g_tfFont = CreateFontW(-(int)std::lround(9 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                               L"Segoe MDL2 Assets");
-        g_tfInkOff = { 0, 0 };
-        int bw = max(1, (int)(box.right - box.left)), bh = max(1, (int)(box.bottom - box.top));
-        HDC m = CreateCompatibleDC(dc);
-        HBITMAP bm = CreateCompatibleBitmap(dc, bw, bh);
-        HGDIOBJ ob = SelectObject(m, bm);
-        RECT full{ 0, 0, bw, bh };
-        HBRUSH bg = CreateSolidBrush(RGB(0, 0, 0));
-        FillRect(m, &full, bg); DeleteObject(bg);
-        HGDIOBJ of = SelectObject(m, g_tfFont);
-        SetBkMode(m, TRANSPARENT);
-        SetTextColor(m, RGB(255, 255, 255));
-        DrawTextW(m, L"\uE7C2", -1, &full, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        SelectObject(m, of);
-        int x0 = bw, y0 = bh, x1 = -1, y1 = -1;
-        for (int y = 0; y < bh; y++)
-            for (int x = 0; x < bw; x++) {
-                COLORREF p2 = GetPixel(m, x, y);
-                if (GetRValue(p2) + GetGValue(p2) + GetBValue(p2) > 90) {   // ink over black
-                    if (x < x0) x0 = x;
-                    if (x > x1) x1 = x;
-                    if (y < y0) y0 = y;
-                    if (y > y1) y1 = y;
-                }
-            }
-        SelectObject(m, ob); DeleteObject(bm); DeleteDC(m);
-        if (x1 >= x0 && y1 >= y0)
-            g_tfInkOff = { (x0 + x1) / 2 - bw / 2, (y0 + y1) / 2 - bh / 2 };
-        g_tfFontDpi = g.dpi;
+// The composed Transform icon's arrows: DrawToolbarGlyph's vector strokes, not
+// a font glyph - "The Segoe MDL2 move glyph shrunk to fit the box rendered its
+// bottom arrowhead as a single pixel, so it read as cut off" is the reference's
+// own reason for drawing them. The 12 segments live in the path's 11x11 unit
+// space (center 8,8); the path box is 70% of the glyph size (14px at
+// GlyphLarge 20), so units scale by 14/11 and center on the frame.
+// StrokeThickness 1 stays 1 (Shape.Stretch scales the geometry, never the pen),
+// square caps, miter joins - a 1px GDI line lands on the same pixels.
+static void TfArrows(HDC dc, int cx, int cy, COLORREF c) {
+    static const float seg[12][4] = {   // x0,y0,x1,y1 in the path's unit space:
+        { 8, 2.5f, 8, 6 },      { 8, 10, 8, 13.5f },        // the four stems...
+        { 2.5f, 8, 6, 8 },      { 10, 8, 13.5f, 8 },
+        { 6, 4.5f, 8, 2.5f },   { 8, 2.5f, 10, 4.5f },      // ...the four heads,
+        { 6, 11.5f, 8, 13.5f }, { 8, 13.5f, 10, 11.5f },    // two strokes each
+        { 4.5f, 6, 2.5f, 8 },   { 2.5f, 8, 4.5f, 10 },      // meeting at the tip
+        { 11.5f, 6, 13.5f, 8 }, { 13.5f, 8, 11.5f, 10 },
+    };
+    const float s = 14.0f / 11.0f * (float)g.dpi;   // 11x11 units -> the 14px path box
+    HPEN p = CreatePen(PS_SOLID, 1, c);
+    HGDIOBJ og = SelectObject(dc, p);
+    for (auto& q : seg) {
+        MoveToEx(dc, cx + (int)std::lround((q[0] - 8) * s), cy + (int)std::lround((q[1] - 8) * s), nullptr);
+        LineTo(dc, cx + (int)std::lround((q[2] - 8) * s), cy + (int)std::lround((q[3] - 8) * s));
     }
-    RECT cr{ box.left - g_tfInkOff.x, box.top - g_tfInkOff.y,
-             box.right - g_tfInkOff.x, box.bottom - g_tfInkOff.y };
-    HGDIOBJ of = SelectObject(dc, g_tfFont);
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, c);
-    DrawTextW(dc, L"\uE7C2", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, of);
+    SelectObject(dc, og);
+    DeleteObject(p);
 }
 
 static void BarDraw(HDC dc, int w, int h) {
@@ -1102,12 +1075,13 @@ static void BarDraw(HDC dc, int w, int h) {
                                   : accent ? RGB(0x1e, 0xa5, 0x4c) : RGB(0xe0, 0xe0, 0xe0))
                         : (danger ? RGB(0x77, 0x33, 0x33)
                                   : accent ? RGB(0x18, 0x63, 0x2e) : RGB(0x6a, 0x6a, 0x6a));
-        if (!TbGlyph[i][0]) {                // the composed icon. ToolRotateBtn's XAML: a
-                                             // 16x16 Grid holding a 14x14 1px Border with
-                                             // the E7C2 "Move" MDL2 glyph at FontSize 9
-                                             // centered inside - the font's own outlines
-                                             // ARE the four arrows, so the font draws them
-            int fw2 = (int)(14 * g.dpi), fh2 = (int)(14 * g.dpi);
+        if (!TbGlyph[i][0]) {                // the composed icon: DrawToolbarGlyph's
+                                             // TransformBoxMove at GlyphLarge 20 - a 20x20
+                                             // 1px Border whose four move arrows are VECTOR
+                                             // STROKES (the inline XAML's E7C2 glyph is
+                                             // overridden at runtime; the font glyph read as
+                                             // cut off, the reference's own comment says so)
+            int fw2 = (int)(20 * g.dpi), fh2 = (int)(20 * g.dpi);
             int gx = b.left + (b.right - b.left - fw2) / 2;
             int gy = gr.top + (gh - fh2) / 2;
             auto drawTf = [&](COLORREF c, int ox, int oy) {
@@ -1118,8 +1092,8 @@ static void BarDraw(HDC dc, int w, int h) {
                 Rectangle(dc, fr2.left, fr2.top, fr2.right, fr2.bottom);
                 SelectObject(dc, ob);
                 SelectObject(dc, og); DeleteObject(fr);
-                TfMoveGlyph(dc, fr2, c);     // the glyph, ink-centered in the frame
-            };
+                TfArrows(dc, gx + ox + fw2 / 2, gy + oy + fh2 / 2, c);   // the vector arrows,
+            };                                           // centered on the frame
             if (!sel) drawTf(RGB(16, 16, 16), 0, 1);   // Direction 270: the shadow hangs
             drawTf(fg, 0, 0);                          // BELOW the icon, never beside it
         } else {
@@ -3034,6 +3008,12 @@ static void TextEditOpen(bool b, int pg, float tx, float ty, float tw, const wch
     SendMessageW(g.tedit, WM_SETFONT, (WPARAM)f, TRUE);   // the font slot rides the edit
     g.teditDef = (WNDPROC)SetWindowLongPtrW(g.tedit, GWLP_WNDPROC, (LONG_PTR)TextEditProc);
     SetFocus(g.tedit);
+    SendMessageW(g.tedit, EM_SETSEL, 0, -1);   // KillerPDF opens every box select-all
+                                               // (QueueTextEditorFocus selectAll: true):
+                                               // Del wipes the whole content in one press
+                                               // and the empty re-edit commit drops the
+                                               // box - the reference's own delete-the-
+                                               // textbox flow, no nibbling letter by letter
     SetStatusHold(L"Editing text. Change size/color above, Enter to save");
     InvalidateRect(g.view, nullptr, FALSE);   // the composite paints the ring the edit's
                                               // punch-out exposes (WS_CLIPCHILDREN owns
