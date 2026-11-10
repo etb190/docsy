@@ -3045,7 +3045,7 @@ static void TabMoveToPane(bool from, int idx, bool to, int insertAt) {
     if (!(idx == Act(from) ? DV(from).n : Tabs(from)[idx].n)) return;
     bool wasLive = idx == Act(from);
     DocState s;
-    std::vector<UndoSnap> us, rs;
+    std::vector<App::UndoSnap> us, rs;
     if (wasLive) {
         s = std::move(DV(from));
         us = std::move(g.undo); rs = std::move(g.redo);
@@ -6609,7 +6609,7 @@ static void TabBandPaint(HDC dc, bool b) {
     // last; a grabbed tab sits above everything, glued to the cursor.
     bool paneFocused = g.split && b == FocusB();
     bool paneDimmed = g.split && b != FocusB();
-    int hotK = (g.tbHotPane == b) ? g.tbTabHot : -1;
+    int hotK = (g.tbTabHotPane == b) ? g.tbTabHot : -1;
     SetBkMode(dc, TRANSPARENT);
     HFONT of = (HFONT)SelectObject(dc, TabFont());
     int kEnd = min(G.start + G.cap, (int)vis.size());
@@ -6752,7 +6752,7 @@ static void TabBandPaint(HDC dc, bool b) {
     // the cursor
     int btnR = cardR - TABF(2);
     int plusL = btnR - TABF(TAB_BTN);
-    bool plusHot = g.tbHotPane == b && g.tbHotBtn == 2;
+    bool plusHot = g.tbTabHotPane == b && g.tbHotBtn == 2;
     if (plusHot) {
         Gdiplus::Graphics gs(dc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -6779,7 +6779,7 @@ static void TabBandPaint(HDC dc, bool b) {
     // the overflow chevron, only while tabs are collapsed out of the strip
     if (G.chev) {
         int chevL = plusL - TABF(TAB_BTN_GAP) - TABF(TAB_BTN);
-        bool chevHot = g.tbHotPane == b && g.tbHotBtn == 3;
+        bool chevHot = g.tbTabHotPane == b && g.tbHotBtn == 3;
         if (chevHot) {
             Gdiplus::Graphics gs(dc);
             Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
@@ -6925,11 +6925,11 @@ static bool TabStripMove(HWND h, POINT p) {
             else if (what == 4) { hot = -1; hotBtn = 3; hotPane = hb; }
         }
     }
-    if (hot != g.tbTabHot || hotPane != g.tbHotPane || hotBtn != g.tbHotBtn) {
-        bool wasPane = g.tbHotPane;               // the old and new faces repaint: a hover
+    if (hot != g.tbTabHot || hotPane != g.tbTabHotPane || hotBtn != g.tbHotBtn) {
+        bool wasPane = g.tbTabHotPane;               // the old and new faces repaint: a hover
         bool wasAny = g.tbTabHot >= 0 || g.tbHotBtn >= 2;   // flip is two invalidations
         bool isAny = hot >= 0 || hotBtn >= 2;
-        g.tbTabHot = hot; g.tbHotPane = hotPane; g.tbHotBtn = hotBtn;
+        g.tbTabHot = hot; g.tbTabHotPane = hotPane; g.tbHotBtn = hotBtn;
         if (isAny) TrackLeave(h);
         if (wasAny) TabBandInvalidate(wasPane);
         if (isAny) TabBandInvalidate(hotPane);
