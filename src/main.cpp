@@ -1004,20 +1004,21 @@ static void EnsureInfoBack(HDC ref, int w, int h) {
 // own MDL2 codepoints at the runtime restyle's size (ToolbarStyle's
 // BuildToolbarContent, GlyphLarge 20) - Transform draws its composed icon
 // ============================================================
-//  The browser (build-110), skinned after radon-browser: a full web mode
+//  The browser, dressed like Safari: a full web mode
 //  beside the PDF reader, one toolbar button toggling between the two. The
 //  engine is Windows' own WebView2 - Evergreen Chromium, preinstalled with
 //  the OS and shared with Edge, so the exe carries zero bytes of browser and
-//  only the loader glue. Radon's order holds: the nav row (back/forward, the
-//  search pill, the menu) rides the strip window on top, the Fluent tab row
-//  rides the toolbar window under it. The module itself lives after the
-//  status bar; the toolbar row, the sidebar, the footer, the layout and the
+//  only the loader glue. Safari's order holds: the toolbar (reader, back/forward,
+//  the address field, the menu) rides the strip window on top, the tab band -
+//  the reader's own tab strip - rides the toolbar window under it. The module
+//  itself lives after the status bar; the toolbar row, the sidebar, the footer, the layout and the
 //  main keys all branch on the mode, so their entry points are declared here.
 // ============================================================
 static bool g_webOn = false;             // the browser owns the window chrome
 static bool g_webFail = false;           // the WebView2 runtime is missing (rare)
-static HWND g_wstrip = nullptr;          // the browser's Radon nav row (on top)
-static int WEBSTRIPH() { return g_webOn ? (int)(40 * g.dpi) : 0; }   // the nav band
+static HWND g_wstrip = nullptr;          // the browser's Safari toolbar (on top)
+static int WEBSTRIPH() { return g_webOn ? (int)(44 * g.dpi) : 0; }   // the toolbar band (Safari)
+static int WEBTABH() { return (int)(34 * g.dpi); }   // the tab band: the reader's 3px inset + 29px face + 1px foot
 static void WebToggle(bool on);           // the Web / Reader buttons
 static bool WebBtnEnabled(int id);        // the web row's buttons arm without a document
 static void WebNewTab(std::wstring url, bool makeCurrent);
@@ -1057,50 +1058,25 @@ static void WebRepaintChrome();           // nav + tabs + footer + rail in one c
 static void WebCardRect(RECT& c);         // the rounded card the webview rides in
 static void WebCardPaint(HDC dc, int w, int h);   // the card's field, face and ring
 
-// Radon's own palette (radon-browser's Cube.UI dark theme): one Mica sheet
-// under the nav row and the tab row, the #282828 search pill, the #1c1c1c
-// content card, and Fluent's hover/pressed layers on top of the sheet. It
-// lives here, before the reader's own windows, because the view's paint now
-// draws the content card's face and ring in these colors too.
+// The browser's palette: Safari's dark appearance. One flat toolbar sheet, the
+// address field a step lighter than the sheet (Safari lays a 10% white veil
+// over it), Apple's system grays for the hover/pressed layers, and the page
+// card below. The tab band under the toolbar is NOT in this table - it wears
+// the reader's own tab strip (grain field, #555 dividers, green rule), see
+// WebBarDraw. It lives here, before the reader's own windows, because the
+// view's paint draws the content card's face and ring in these colors too.
 namespace wvb {
-constexpr COLORREF StripBg  = RGB(0x20, 0x20, 0x20);   // MicaBrush: the whole top sheet
-constexpr COLORREF Toolbar  = RGB(0x20, 0x20, 0x20);   // the tab row: the same sheet
-constexpr COLORREF Card     = RGB(0x1c, 0x1c, 0x1c);   // FABrush: the content card face
-constexpr COLORREF Omnibox  = RGB(0x28, 0x28, 0x28);   // SearchBrush: the pill
-constexpr COLORREF Hover    = RGB(0x33, 0x33, 0x33);   // Fluent's hover layer on the sheet
-constexpr COLORREF Pressed  = RGB(0x3d, 0x3d, 0x3d);
-constexpr COLORREF TabHover = RGB(0x33, 0x33, 0x33);   // an inactive tab's hover tile
-constexpr COLORREF Ink      = RGB(0xff, 0xff, 0xff);   // icons + active title
-constexpr COLORREF InkDim   = RGB(0x9a, 0x9a, 0x9a);   // padlock, globe, placeholder
-constexpr COLORREF InkOff   = RGB(0x61, 0x61, 0x61);   // disabled arrows
-constexpr COLORREF Inactive = RGB(0xc8, 0xc8, 0xc8);   // inactive tab titles
-constexpr COLORREF Sep      = RGB(0x34, 0x34, 0x34);   // the tabs' 1px separators
-constexpr COLORREF Border   = RGB(0x4a, 0x4a, 0x4a);   // MicaBorderBrush: the card's ring
-}
-
-// Radon paints its tab pill and focus underline with the user's own accent
-// (SystemAccentColorLight*), so docsy reads the DWM colorization - the same
-// accent the Settings app shows - once, and leans on it. advapi32 is already
-// linked; no new dependency, and the default is Radon's blue on any machine
-// where the value is absent.
-static COLORREF WvAccent() {
-    static COLORREF a = []() -> COLORREF {
-        DWORD v = 0, sz = sizeof v;
-        if (SUCCEEDED(RegGetValueW(HKEY_CURRENT_USER,
-                                   L"Software\\Microsoft\\Windows\\DWM",
-                                   L"ColorizationColor", RRF_RT_REG_DWORD,
-                                   nullptr, &v, &sz)) && sz == sizeof v) {
-            int r = (int)(v & 0xff), g = (int)((v >> 8) & 0xff), b = (int)((v >> 16) & 0xff);
-            return RGB(r, g, b);                       // the value is ABGR
-        }
-        return RGB(0x4c, 0xc2, 0xff);                  // Radon's blue when all else fails
-    }();
-    return a;
-}
-static COLORREF WvAccentSoft() {                       // the gradient's middle stop: the
-    COLORREF c = WvAccent();                           // accent leaned a fifth toward white
-    auto L = [](int x) { return x + (255 - x) / 5; };
-    return RGB(L(GetRValue(c)), L(GetGValue(c)), L(GetBValue(c)));
+constexpr COLORREF StripBg  = RGB(0x2b, 0x2b, 0x2d);   // the unified toolbar sheet
+constexpr COLORREF Card     = RGB(0x1c, 0x1c, 0x1c);   // the page card face
+constexpr COLORREF Omnibox  = RGB(0x3c, 0x3c, 0x3e);   // the address field
+constexpr COLORREF Hover    = RGB(0x48, 0x48, 0x4a);   // a button's hover tile
+constexpr COLORREF Pressed  = RGB(0x56, 0x56, 0x59);
+constexpr COLORREF Ink      = RGB(0xe8, 0xe8, 0xea);   // icons + the address
+constexpr COLORREF InkDim   = RGB(0x9a, 0x9a, 0xa0);   // padlock, placeholder
+constexpr COLORREF InkOff   = RGB(0x66, 0x66, 0x6a);   // disabled arrows
+constexpr COLORREF Border   = RGB(0x3a, 0x3a, 0x3c);   // the card's ring
+constexpr COLORREF Edge     = RGB(0x1b, 0x1b, 0x1d);   // the hairline under the toolbar
+constexpr COLORREF Blue     = RGB(0x0a, 0x84, 0xff);   // Safari's focus ring + progress
 }
 
 // the sidebar's web state - the same fields sd carries, pointed at the tabs.
@@ -1111,6 +1087,7 @@ static struct {
     int cw = 0, ch = 0, tw = 0, docH = 0, scroll = 0, cur = -1, hover = -1;
     int hit = -1, moved = 0; POINT dp{}; bool barDrag = false, barHot = false, barGrab = 0;
     int sHot = -1;                         // the TAB ROW's hover (tab index or 1000+n for +)
+    bool sHotX = false;                    // ...and whether the cursor is over that tab's close x
     std::vector<int> top;                  // separate from the nav row's hover above
 } ws;
 
@@ -1422,8 +1399,8 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_webOn) {                     // the tab row's hover lives in ws.sHot, never
             bool cl = false;               // in g.tbTabHot - the nav row above owns that
             int hot = WebTabRowHit(p, r.right, r.bottom, cl);
-            if (hot != ws.sHot) {
-                ws.sHot = hot;
+            if (hot != ws.sHot || cl != ws.sHotX) {
+                ws.sHot = hot; ws.sHotX = cl;
                 if (hot >= 0) TrackLeave(h);
                 InvalidateRect(h, nullptr, FALSE);
             }
@@ -1439,7 +1416,7 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSELEAVE:
         if (g_webOn) {
-            if (ws.sHot != -1) { ws.sHot = -1; InvalidateRect(h, nullptr, FALSE); }
+            if (ws.sHot != -1 || ws.sHotX) { ws.sHot = -1; ws.sHotX = false; InvalidateRect(h, nullptr, FALSE); }
             return 0;
         }
         if (g.tbTabHot != -1) { g.tbTabHot = -1; InvalidateRect(h, nullptr, FALSE); }
@@ -1510,7 +1487,7 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         break;
     }
-    case WM_MBUTTONUP: {               // middle-click closes, like Chrome and Radon
+    case WM_MBUTTONUP: {               // middle-click closes, like the reader's strip
         if (g_webOn) {
             POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             RECT r; GetClientRect(h, &r);
@@ -9014,22 +8991,20 @@ static void DrawPaneShadow(HDC dc, int w, int h) {
 }
 
 // ============================================================
-//  The browser (build-110). One toolbar button toggles between the PDF
-//  reader and a web mode skinned after radon-browser (imscythra's Radon):
-//  its design layer ported point for point - Cube.UI's Mica dark sheet
-//  (#202020), the Safari-style nav row ABOVE the tabs (back/forward, the
-//  #282828 search pill with the padlock left and refresh right inside,
-//  centered URL text that left-aligns and selects all on focus), Fluent
-//  tabs (radius-4 hover tiles, a transparent selected tab wearing the
-//  system-accent pill at its foot), and the WebView in a rounded #1c1c1c
-//  card with Radon's MicaBorder ring. Radon itself is C#/UWP XAML, so its
-//  components cannot link into this exe - what is reused is its look, its
-//  geometry and its engine: the engine is the same WebView2 Evergreen
-//  Chromium the OS ships and shares with Edge, so the exe carries no
+//  The browser. One toolbar button toggles between the PDF reader and a web
+//  mode dressed like Safari (dark appearance): a flat unified toolbar on top
+//  (reader button, back/forward chevrons, a centered address field that shows
+//  the site while idle - padlock hugging the name - and opens to the full URL
+//  with a blue focus ring, reload/stop inside its right edge, a progress line
+//  along its foot while a page loads, the menu at the far right), and under
+//  it the READER'S OWN tab strip, carried over unchanged for the web tabs:
+//  the grainy field, #555 dividers, the 1px green rule over the open tab, the
+//  muted close x that turns red, the + at the right. The WebView rides in the
+//  same rounded card the reader's pages sit in. The engine is Windows' own
+//  WebView2 - Evergreen Chromium, shared with Edge - so the exe carries no
 //  browser bytes at all, only this glue. docsy's page-thumbnail rail keeps
-//  showing the OPEN WEB TABS, captured live with CapturePreview. No
-//  runtime (rare): the mode still toggles and explains itself, nothing
-//  else changes.
+//  showing the OPEN WEB TABS, captured live with CapturePreview. No runtime
+//  (rare): the mode still toggles and explains itself, nothing else changes.
 // ============================================================
 
 struct WebTab {
@@ -9093,37 +9068,81 @@ static bool WebBtnEnabled(int id) {
     return false;
 }
 
-// ---- the tab row (under the nav), Fluent style ----
+// ---- small helpers the Safari chrome shares ----
 
-static int WebTabTH() { return (int)(32 * g.dpi); }      // Radon's TabViewItem height
-
-static int WebStripTabAt(POINT p, int n, int tw, int y0, bool& close) {   // -1 none; close: x zone
-    close = false;
-    if (p.y < y0 - (int)(4 * g.dpi) || p.y >= y0 + WebTabTH() + (int)(4 * g.dpi)) return -1;
-    int x = (int)(8 * g.dpi);
-    for (int i = 0; i < n; i++, x += tw) {
-        if (p.x >= x - (int)(4 * g.dpi) && p.x < x + tw + (int)(4 * g.dpi)) {
-            close = p.x >= x + tw - (int)(22 * g.dpi) && p.x < x + tw - (int)(6 * g.dpi);
-            return i;
-        }
+static HFONT WebGlyphFont(int px) {                // Segoe MDL2 at px (dpi-scaled), cached per size:
+    static HFONT f[3] = {}; static int sz[3] = {}; static double fd = 0;   // CaptionFont's slot keeps
+    if (fd != g.dpi) {                             // the FIRST size it was asked for, so the
+        for (auto& hf : f) if (hf) { DeleteObject(hf); hf = nullptr; }     // browser keeps its own
+        fd = g.dpi;
     }
-    return -1;
+    for (int i = 0; i < 3; i++) if (f[i] && sz[i] == px) return f[i];
+    for (int i = 0; i < 3; i++) if (!f[i]) {
+        f[i] = CreateFontW(-(int)std::lround(px * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                           DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                           CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe MDL2 Assets");
+        sz[i] = px;
+        return f[i];
+    }
+    return f[0];
 }
-static bool WebStripPlusAt(POINT p, int n, int tw, int y0) {
-    if (p.y < y0 - (int)(4 * g.dpi) || p.y >= y0 + WebTabTH() + (int)(4 * g.dpi)) return false;
-    int x = (int)(8 * g.dpi) + n * tw;
-    return p.x >= x && p.x < x + (int)(30 * g.dpi);
+
+// What the idle address field shows: Safari prints the site, not the URL -
+// "duckduckgo.com", no scheme, no "www.", no path. Anything that is not a
+// plain web address (about:, edge:) is shown whole.
+static std::wstring WebHostOf(const std::wstring& u) {
+    if (u.rfind(L"https://", 0) != 0 && u.rfind(L"http://", 0) != 0) return u;
+    std::wstring r = u.substr(u.find(L"://") + 3);
+    size_t e = r.find_first_of(L"/?#");
+    if (e != std::wstring::npos) r.resize(e);
+    size_t at = r.find(L'@');
+    if (at != std::wstring::npos) r.erase(0, at + 1);
+    if (r.rfind(L"www.", 0) == 0) r.erase(0, 4);
+    return r;
+}
+
+// ---- the tab band: the reader's own tab strip (TabBandPaint), carried over ----
+// Same faces, same numbers: a 3px inset, 29px faces on the window's grain,
+// 1px #555 dividers, a 1px green rule over the open tab, the muted close x
+// that turns danger-red under the cursor, and the + at the band's right edge.
+// Cells share the width equally up to the reader's 260px ceiling; past the
+// floor the strip scrolls just far enough to keep the open tab on screen.
+
+struct WebTabGeo { int x0, cell, plusL, limit, faceTop, faceH, n, vis, start; };
+static WebTabGeo WebTabLayout(int w) {
+    WebTabGeo G;
+    G.n = (int)g_wt.size();
+    G.faceTop = TABF(3); G.faceH = TABF(29);
+    G.x0 = TABF(8);
+    G.plusL = w - TABF(8) - TABF(TAB_BTN);
+    G.limit = G.plusL - TABF(TAB_BTN_GAP);          // the faces end where the + begins
+    int avail = max(0, G.limit - G.x0);
+    G.cell = G.n > 0 ? std::clamp(avail / G.n, TABF(48), TABF(TAB_CEIL)) : 0;
+    G.vis = G.n > 0 ? max(1, min(G.n, avail / max(1, G.cell))) : 0;
+    G.start = 0;
+    if (G.vis < G.n && g_wtCur >= G.vis) G.start = min(g_wtCur - G.vis + 1, G.n - G.vis);
+    return G;
 }
 
 // the tab row's whole hit test: a tab index, 1000+n for the +, -1 for bare
-// sheet - the toolbar window's mouse handlers speak this one language
+// sheet - the toolbar window's mouse handlers speak this one language. `close`
+// is the reader's 24px close-x zone at the face's right edge.
 static int WebTabRowHit(POINT p, int w, int h, bool& close) {
-    int n = (int)g_wt.size();
-    int th = WebTabTH(), y0 = (h - th) / 2;
-    int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (w - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
-    int hit = WebStripTabAt(p, n, tw, y0, close);
-    if (hit < 0 && WebStripPlusAt(p, n, tw, y0)) return 1000 + n;
-    return hit;
+    (void)h;
+    close = false;
+    WebTabGeo G = WebTabLayout(w);
+    if (p.x >= G.plusL && p.x < G.plusL + TABF(TAB_BTN) && p.y >= TABF(4) && p.y < TABF(24))
+        return 1000 + G.n;
+    if (p.y < G.faceTop || p.y >= G.faceTop + G.faceH) return -1;
+    for (int k = 0; k < G.vis; k++) {
+        int x = G.x0 + k * G.cell;
+        if (p.x >= x && p.x < x + G.cell) {
+            int xr = x + G.cell - TABF(2);
+            close = p.x >= xr - TABF(24) && p.x < xr;
+            return G.start + k;
+        }
+    }
+    return -1;
 }
 
 // the nav row's buttons, in strip coords; empty rects (the + no longer rides
@@ -9136,126 +9155,138 @@ static int WebNavHit(POINT p) {
     return -1;
 }
 
-// Fluent's hover layer: a radius-4 rounded tile, the shape Cube.UI's
-// ToolbarButton wears (CornerRadius 4), not Chrome's circle
-static void WebTile(HDC dc, const RECT& r, COLORREF c) {
+static void WebRound(Gdiplus::GraphicsPath& p, float l, float t, float r, float b, float rr) {
+    p.AddArc(l, t, 2 * rr, 2 * rr, 180, 90);
+    p.AddArc(r - 2 * rr, t, 2 * rr, 2 * rr, 270, 90);
+    p.AddArc(r - 2 * rr, b - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+    p.AddArc(l, b - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+    p.CloseFigure();
+}
+
+// a rounded, antialiased fill; `rad` is in dp
+static void WebTileC(HDC dc, const RECT& r, Gdiplus::Color c, float rad) {
     if (r.right <= r.left || r.bottom <= r.top) return;
     Gdiplus::Graphics gs(dc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::SolidBrush b(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
+    Gdiplus::SolidBrush b(c);
     Gdiplus::GraphicsPath p;
-    float rr = 4.0f * (float)g.dpi;
-    p.AddArc((Gdiplus::REAL)r.left, (Gdiplus::REAL)r.top, 2 * rr, 2 * rr, 180, 90);
-    p.AddArc((Gdiplus::REAL)(r.right - 2 * rr), (Gdiplus::REAL)r.top, 2 * rr, 2 * rr, 270, 90);
-    p.AddArc((Gdiplus::REAL)(r.right - 2 * rr), (Gdiplus::REAL)(r.bottom - 2 * rr), 2 * rr, 2 * rr, 0, 90);
-    p.AddArc((Gdiplus::REAL)r.left, (Gdiplus::REAL)(r.bottom - 2 * rr), 2 * rr, 2 * rr, 90, 90);
-    p.CloseFigure();
+    WebRound(p, (float)r.left, (float)r.top, (float)r.right, (float)r.bottom, rad * (float)g.dpi);
     gs.FillPath(&b, &p);
 }
 
-// Radon's selected-tab signature: a 2px system-accent pill across the tab's
-// foot, the gradient SystemAccentLight3 -> Light2 -> Light3 (TabView.xaml's
-// Pill), drawn antialiased with Gdiplus like every other fill here
-static void WebAccentPill(HDC dc, int x, int y, int w) {
-    if (w <= 0) return;
-    Gdiplus::Graphics gs(dc);
-    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::GraphicsPath p;
-    float h = 2.0f * (float)g.dpi;
-    Gdiplus::RectF rc((Gdiplus::REAL)x, (Gdiplus::REAL)y, (Gdiplus::REAL)w, h);
-    p.AddRectangle(rc);
-    COLORREF a = WvAccent(), s = WvAccentSoft();
-    Gdiplus::Color sts[] = { Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)),
-                             Gdiplus::Color(255, GetRValue(s), GetGValue(s), GetBValue(s)),
-                             Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)) };
-    Gdiplus::REAL pos[] = { 0.0f, 0.5f, 1.0f };   // Light3 -> Light2 -> Light3, Radon's Pill
-    Gdiplus::LinearGradientBrush br(rc,
-        Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)),
-        Gdiplus::Color(255, GetRValue(s), GetGValue(s), GetBValue(s)),
-        Gdiplus::LinearGradientModeHorizontal);
-    br.SetInterpolationColors(sts, pos, 3);       // the preset blend wants the stops AND
-    gs.FillPath(&br, &p);                         // their positions, like SetGradientStops
+// a toolbar button's hover/pressed layer: a soft 6dp tile
+static void WebTile(HDC dc, const RECT& r, COLORREF c) {
+    WebTileC(dc, r, Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 6.0f);
 }
 
-// ---- the nav row (Radon's MainPage titlebar): logo, back/forward, the
-// search pill with padlock and refresh inside, the menu at the right ----
+// Safari's focus ring: a 2dp blue outline hugging the address field
+static void WebRing(HDC dc, const RECT& r, float rad, float wdp, Gdiplus::Color c) {
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float wpx = max(1.0f, wdp * (float)g.dpi), hw = wpx / 2;
+    Gdiplus::GraphicsPath p;
+    WebRound(p, (float)r.left + hw, (float)r.top + hw, (float)r.right - hw, (float)r.bottom - hw,
+             rad * (float)g.dpi);
+    Gdiplus::Pen pen(c, wpx);
+    gs.DrawPath(&pen, &p);
+}
+
+// ---- the toolbar (Safari's unified bar): sidebar/reader button and back /
+// forward chevrons on the left, the address field centered, the menu at the
+// right. The field names the site while idle (padlock hugging the text), opens
+// up to the full address with a blue focus ring when clicked, and carries the
+// reload/stop button inside its right edge and a sweeping progress line along
+// its foot while a page loads. ----
 
 static void WebStripPaint(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     HBRUSH bg = CreateSolidBrush(wvb::StripBg);
-    FillRect(dc, &bar, bg); DeleteObject(bg);          // one Mica sheet, no grain
+    FillRect(dc, &bar, bg); DeleteObject(bg);          // one flat sheet, no grain
+    RECT edge{ 0, h - 1, w, h };                       // the hairline between toolbar and tabs
+    HBRUSH eb = CreateSolidBrush(wvb::Edge);
+    FillRect(dc, &edge, eb); DeleteObject(eb);
     SetBkMode(dc, TRANSPARENT);
-    HFONT gf = CaptionFont(g_tbglyph, 16, false, L"Segoe MDL2 Assets");
+    HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE72B", L"\uE72A", nullptr, L"\uE710", L"\uE712"
-    };                                                 // the reload glyph rides the pill
-    // the nav buttons: radius-4 Fluent tiles that light on hover and press
+        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712"
+    };                                                 // the reload glyph rides the field
+    // the buttons: soft rounded tiles that light on hover and press
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
-        if (i == WB_RELOAD) continue;                  // its tile draws after the pill fill
+        if (i == WB_RELOAD) continue;                  // its tile draws inside the field
         bool en = WebBtnEnabled(i);
         bool hot = en && g.tbTabHot == i, pr = en && g.tbPressed == i;
         if (hot || pr) WebTile(dc, g_wbR[i], pr ? wvb::Pressed : wvb::Hover);
-        COLORREF c = !en ? wvb::InkOff : wvb::Ink;
         SelectObject(dc, gf);
-        SetTextColor(dc, c);
+        SetTextColor(dc, !en ? wvb::InkOff : wvb::Ink);
         RECT rc = g_wbR[i];
         DrawTextW(dc, gl[i], -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    // the search pill: SearchBrush fill, radius 8, padlock left, refresh right
-    HBRUSH ob = CreateSolidBrush(wvb::Omnibox);
-    HGDIOBJ op = SelectObject(dc, ob), open2 = SelectObject(dc, GetStockObject(NULL_PEN));
-    RoundRect(dc, g_webOmni.left, g_webOmni.top, g_webOmni.right, g_webOmni.bottom,
-              (int)(8 * g.dpi), (int)(8 * g.dpi));
-    SelectObject(dc, open2); SelectObject(dc, op); DeleteObject(ob);
+    // the address field: a step lighter than the sheet
+    WebTileC(dc, g_webOmni, Gdiplus::Color(255, GetRValue(wvb::Omnibox), GetGValue(wvb::Omnibox),
+                                           GetBValue(wvb::Omnibox)), 8.0f);
     bool editFocus = g_wedit && GetFocus() == g_wedit;
-    if (editFocus) {                                   // Radon's focus story: a 2px accent
-        WebAccentPill(dc, g_webOmni.left + (int)(8 * g.dpi),   // underline under the URL
-                      g_webOmni.bottom - (int)(2 * g.dpi),
-                      g_webOmni.right - g_webOmni.left - (int)(16 * g.dpi));
-    }
-    if (g_webFail) {                                   // no engine: the pill explains itself
+    if (editFocus)                                     // Safari's focus story: a blue ring
+        WebRing(dc, g_webOmni, 8.0f, 2.0f, Gdiplus::Color(235, 0x0a, 0x84, 0xff));
+    if (g_webFail) {                                   // no engine: the field explains itself
         SelectObject(dc, CaptionFont(g_tbcap, 12, false, L"Killer Sans"));
         SetTextColor(dc, wvb::InkDim);
-        RECT tr = g_webOmni; tr.left += (int)(14 * g.dpi);
+        RECT tr = g_webOmni;
         DrawTextW(dc, L"web engine missing", -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         return;
     }
-    SelectObject(dc, gf);
-    SetTextColor(dc, wvb::InkDim);
-    RECT lk{ g_webOmni.left + (int)(4 * g.dpi), g_webOmni.top,
-             g_webOmni.left + (int)(26 * g.dpi), g_webOmni.bottom };
-    DrawTextW(dc, L"\uE72E", -1, &lk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);   // the padlock
     WebTab* t = WebCur();
-    RECT rf{ g_webOmni.right - (int)(26 * g.dpi), g_webOmni.top,
-             g_webOmni.right - (int)(4 * g.dpi), g_webOmni.bottom };
-    if (t && t->loading) {                             // the stop X while a page loads
-        if (g.tbTabHot == WB_RELOAD) {
-            HBRUSH hb = CreateSolidBrush(wvb::Hover);
-            HGDIOBJ o = SelectObject(dc, hb), on = SelectObject(dc, GetStockObject(NULL_PEN));
-            Ellipse(dc, rf.left + 2, rf.top + 2, rf.right - 2, rf.bottom - 2);
-            SelectObject(dc, on); SelectObject(dc, o); DeleteObject(hb);
+    // the padlock: hugging the centered site name while idle, pinned to the
+    // field's left edge while it is being edited; only secure pages wear one
+    bool secure = t && t->url.rfind(L"https://", 0) == 0;
+    if (secure) {
+        int lockX = g_webOmni.left + TABF(10);
+        if (!editFocus && g_wedit) {
+            wchar_t tx[512] = L"";
+            int len = GetWindowTextW(g_wedit, tx, 512);
+            if (len > 0) {
+                HGDIOBJ of0 = SelectObject(dc, g_webEditFont);
+                SIZE sz{}; GetTextExtentPoint32W(dc, tx, len, &sz);
+                SelectObject(dc, of0);
+                int cx = (g_webOmni.left + g_webOmni.right) / 2;
+                lockX = max((int)g_webOmni.left + TABF(10), cx - (int)sz.cx / 2 - TABF(18));
+            }
         }
-        SetTextColor(dc, wvb::Ink);
-        DrawTextW(dc, L"\uE711", -1, &rf, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    } else {                                           // the refresh arrow at rest
-        if (g.tbTabHot == WB_RELOAD) {
-            HBRUSH hb = CreateSolidBrush(wvb::Hover);
-            HGDIOBJ o = SelectObject(dc, hb), on = SelectObject(dc, GetStockObject(NULL_PEN));
-            Ellipse(dc, rf.left + 2, rf.top + 2, rf.right - 2, rf.bottom - 2);
-            SelectObject(dc, on); SelectObject(dc, o); DeleteObject(hb);
-        }
-        SetTextColor(dc, wvb::Ink);
-        DrawTextW(dc, L"\uE72C", -1, &rf, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, WebGlyphFont(11));
+        SetTextColor(dc, wvb::InkDim);
+        RECT lk{ lockX, g_webOmni.top, lockX + TABF(14), g_webOmni.bottom };
+        DrawTextW(dc, L"\uE72E", -1, &lk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    // the placeholder: Radon's own string, centered like the idle URL text
+    // reload at rest, stop while loading - a tile under the cursor, inside the field
+    RECT rf = g_wbR[WB_RELOAD];
+    if (g.tbTabHot == WB_RELOAD) WebTile(dc, rf, wvb::Hover);
+    SelectObject(dc, WebGlyphFont(13));
+    SetTextColor(dc, wvb::Ink);
+    DrawTextW(dc, (t && t->loading) ? L"\uE711" : L"\uE72C", -1, &rf,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (t && t->loading) {                             // the progress line: a blue segment sweeping
+        int pw = (int)(g_webOmni.right - g_webOmni.left) - 2 * TABF(10);   // along the field's foot
+        if (pw > 8) {
+            int seg2 = max(8, pw / 4);
+            int ph = (int)(GetTickCount64() % 900);
+            int sx = (int)g_webOmni.left + TABF(10) + (int)((long long)(pw + seg2) * ph / 900) - seg2;
+            int x0 = max(sx, (int)g_webOmni.left + TABF(10));
+            int x1 = min(sx + seg2, (int)g_webOmni.left + TABF(10) + pw);
+            if (x1 > x0) {
+                Gdiplus::Graphics gp(dc);
+                Gdiplus::SolidBrush pb(Gdiplus::Color(255, 0x0a, 0x84, 0xff));
+                gp.FillRectangle(&pb, x0, (int)g_webOmni.bottom - max(2, TABF(2)) - TABF(1),
+                                 x1 - x0, max(2, TABF(2)));
+            }
+        }
+    }
+    // the placeholder, centered like the idle site name
     wchar_t has[8] = L"";
-    if (g_wedit && GetFocus() != g_wedit && GetWindowTextW(g_wedit, has, 2) == 0) {
+    if (g_wedit && !editFocus && GetWindowTextW(g_wedit, has, 2) == 0) {
         SelectObject(dc, g_webEditFont);
         SetTextColor(dc, wvb::InkDim);
-        RECT pr{ g_webOmni.left + (int)(30 * g.dpi), g_webOmni.top,
-                 g_webOmni.right - (int)(30 * g.dpi), g_webOmni.bottom };
-        DrawTextW(dc, L"Search the web or enter a URL", -1, &pr,
+        RECT pr{ g_webOmni.left + TABF(30), g_webOmni.top, g_webOmni.right - TABF(30), g_webOmni.bottom };
+        DrawTextW(dc, L"Search or enter website name", -1, &pr,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 }
@@ -9268,7 +9299,7 @@ static void WebStripSpin() {
     else KillTimer(g_wstrip, 3);
 }
 
-// the nav row's window: Radon's titlebar strip. The buttons press with the
+// the toolbar's window: Safari's unified bar. The buttons press with the
 // toolbar's own capture-held story (g.tbTabHot / g.tbPressed - the tab row
 // under this window keeps its hover in ws.sHot instead, so the two never
 // collide), the pill answers a click by focusing the omnibox edit, and the
@@ -9357,26 +9388,28 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 // the nav row's geometry: the buttons and the pill live in the strip window's
-// coords now (Radon's order - nav on top, tabs under). The reload button IS
+// coords now (Safari's order - toolbar on top, tabs under). The reload button IS
 // the pill's right zone, so its hit rect lands inside the pill; the + rides
 // the tab row below and its nav rect stays empty.
 static void WebBarLayout() {
     if (!g_wstrip || !g_webOn) return;
     RECT r; GetClientRect(g_wstrip, &r);
-    int d = (int)(32 * g.dpi), cy = (r.bottom - d) / 2, pitch = (int)(36 * g.dpi);
-    int ph = (int)(28 * g.dpi), py = (r.bottom - ph) / 2;
-    int x = (int)(8 * g.dpi);
+    int d = TABF(30), cy = (r.bottom - d) / 2, pitch = TABF(32);
+    int ph = TABF(28), py = (r.bottom - ph) / 2;
+    int x = TABF(12);
     g_wbR[WB_READER] = { x, cy, x + d, cy + d };
-    x += pitch; g_wbR[WB_BACK] = { x, cy, x + d, cy + d };
+    x += pitch + TABF(8); g_wbR[WB_BACK] = { x, cy, x + d, cy + d };
     x += pitch; g_wbR[WB_FWD] = { x, cy, x + d, cy + d };
-    int mx = r.right - (int)(8 * g.dpi);
+    int mx = r.right - TABF(12);
     g_wbR[WB_MENU] = { mx - d, cy, mx, cy + d };
-    g_wbR[WB_NEWTAB] = { 0, 0, 0, 0 };             // the + lives in the tab row
-    g_webOmni = { g_wbR[WB_FWD].right + (int)(10 * g.dpi), py,
-                  g_wbR[WB_MENU].left - (int)(10 * g.dpi), py + ph };
-    g_wbR[WB_RELOAD] = { g_webOmni.right - (int)(26 * g.dpi), g_webOmni.top + (int)(2 * g.dpi),
-                         g_webOmni.right - (int)(2 * g.dpi), g_webOmni.bottom - (int)(2 * g.dpi) };
-    if (!g_webEditFont) g_webEditFont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+    g_wbR[WB_NEWTAB] = { 0, 0, 0, 0 };             // the + lives in the tab band
+    int lo = g_wbR[WB_FWD].right + TABF(16), hi = g_wbR[WB_MENU].left - TABF(16);
+    int pw = max(10, min(hi - lo, TABF(620)));     // the field: centered in the window, capped
+    int pl = std::clamp((int)r.right / 2 - pw / 2, lo, max(lo, hi - pw));
+    g_webOmni = { pl, py, pl + pw, py + ph };
+    g_wbR[WB_RELOAD] = { g_webOmni.right - TABF(28), g_webOmni.top + TABF(2),
+                         g_webOmni.right - TABF(4), g_webOmni.bottom - TABF(2) };
+    if (!g_webEditFont) g_webEditFont = CreateFontW(-(int)(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans");
     if (!g_wedit) {
@@ -9389,9 +9422,9 @@ static void WebBarLayout() {
         }
     }
     if (g_wedit) {
-        MoveWindow(g_wedit, g_webOmni.left + (int)(28 * g.dpi), g_webOmni.top + (int)(2 * g.dpi),
-                   max(10, (int)g_webOmni.right - (int)g_webOmni.left - (int)(56 * g.dpi)),
-                   max(4, ph - (int)(4 * g.dpi)), TRUE);   // the foot's 2px strip: the focus underline
+        int eh = max(4, TABF(20));                 // one text line, centered in the field
+        MoveWindow(g_wedit, g_webOmni.left + TABF(28), g_webOmni.top + (ph - eh) / 2,
+                   max(10, (int)g_webOmni.right - (int)g_webOmni.left - TABF(56)), eh, TRUE);
         ShowWindow(g_wedit, g_webFail ? SW_HIDE : SW_SHOW);
     }
     WebSyncOmnibox();
@@ -9400,7 +9433,8 @@ static void WebBarLayout() {
 static void WebSyncOmnibox() {
     if (!g_wedit || GetFocus() == g_wedit) return;
     WebTab* t = WebCur();
-    SetWindowTextW(g_wedit, t ? t->url.c_str() : L"");
+    SetWindowTextW(g_wedit, t ? WebHostOf(t->url).c_str() : L"");   // idle: the site, like Safari
+    if (g_wstrip) InvalidateRect(g_wstrip, nullptr, FALSE);         // the padlock hugs the text
 }
 
 static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
@@ -9417,12 +9451,15 @@ static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         }
     }
-    if (m == WM_SETFOCUS) {                        // Radon's SearchBar: focus selects all
-        LRESULT r = CallWindowProcW(g_weditPrev, h, m, wp, lp);   // and the URL left-aligns
+    if (m == WM_SETFOCUS) {                        // focus opens the field to the full address,
+        WebTab* ft = WebCur();                     // selects all, and left-aligns it
+        SetWindowTextW(h, ft ? ft->url.c_str() : L"");
+        LRESULT r = CallWindowProcW(g_weditPrev, h, m, wp, lp);
         LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
         if (s & ES_CENTER) SetWindowLongPtrW(h, GWL_STYLE, s & ~ES_CENTER);
         PostMessageW(h, EM_SETSEL, 0, -1);
         InvalidateRect(h, nullptr, TRUE);
+        if (g_wstrip) InvalidateRect(g_wstrip, nullptr, FALSE);   // the ring + padlock follow
         return r;
     }
     if (m == WM_KILLFOCUS) {                       // the blur puts the pill back the way
@@ -9439,7 +9476,8 @@ static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 static void WebSyncOmniboxForce() {
     if (!g_wedit) return;
     WebTab* t = WebCur();
-    SetWindowTextW(g_wedit, t ? t->url.c_str() : L"");
+    SetWindowTextW(g_wedit, t ? WebHostOf(t->url).c_str() : L"");
+    if (g_wstrip) InvalidateRect(g_wstrip, nullptr, FALSE);
 }
 
 static HBRUSH WebEditColors(HDC dc, HWND ctl) {
@@ -9449,88 +9487,89 @@ static HBRUSH WebEditColors(HDC dc, HWND ctl) {
     return g_webEditBrush;
 }
 
-static void WebCircle(HDC dc, const RECT& r, bool hot, bool pr, bool en) {
-    if (!hot && !pr) return;
-    HBRUSH b = CreateSolidBrush(pr ? wvb::Pressed : (en ? wvb::Hover : wvb::Omnibox));
-    HGDIOBJ o = SelectObject(dc, b);
-    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_PEN));
-    Ellipse(dc, r.left, r.top, r.right, r.bottom);
-    SelectObject(dc, ob); SelectObject(dc, o); DeleteObject(b);
+static void WebTabX(HDC dc, int xr, int cy, bool hot) {   // the reader's close x
+    HPEN xp = CreatePen(PS_SOLID, max(1, (int)std::lround(1.2 * g.dpi)),
+                        hot ? RGB(0xE0, 0x44, 0x44) : RGB(0xa3, 0xa3, 0xa3));
+    HGDIOBJ op = SelectObject(dc, xp);
+    int g2 = TABF(4);                              // the 8px cross inside the 24px zone
+    MoveToEx(dc, xr - g2, cy - g2, nullptr); LineTo(dc, xr + g2, cy + g2);
+    MoveToEx(dc, xr + g2, cy - g2, nullptr); LineTo(dc, xr - g2, cy + g2);
+    SelectObject(dc, op);
+    DeleteObject(xp);
 }
 
-// ---- the tab row: Radon's TabView. Equal-width Fluent tabs on the Mica
-// sheet - a radius-4 hover tile, an active tab that wears NO fill, only the
-// 2px system-accent pill at its foot, the favicon spinner in the accent, a
-// close x that lights (with its little circle) under the cursor's tab, and
-// the + after the last one. The old flared Chrome silhouette is gone.
+// ---- the tab band, painted exactly like the reader's strip: the window's
+// grain, the foot fade, inactive faces with a 1px #555 divider and a muted
+// label, the open tab with its brighter label and a 1px green rule along its
+// top edge, the + at the right. A loading page shows a small green spinner
+// ahead of its title; the hovered inactive tab picks up a faint tile. ----
 static void WebBarDraw(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
-    HBRUSH bg = CreateSolidBrush(wvb::Toolbar);        // the same Mica sheet as the nav
-    FillRect(dc, &bar, bg); DeleteObject(bg);
+    FillRect(dc, &bar, GrainBrush(1));                 // the field the reader's band shows through
+    {   // the foot fade (TabStripFade): transparent to 45%, #22000000 at the foot
+        Gdiplus::Graphics gfade(dc);
+        Gdiplus::Color c0((BYTE)0, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::Color c1((BYTE)0x22, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::RectF fadeR(0.f, (float)h * 0.45f, (float)w, (float)h * 0.55f);
+        Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
+        gfade.FillRectangle(&fadeBr, fadeR);
+    }
     SetBkMode(dc, TRANSPARENT);
-    int n = (int)g_wt.size();
-    int th = WebTabTH(), y0 = (h - th) / 2;
-    int plusW = (int)(30 * g.dpi);
-    int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (w - plusW - (int)(12 * g.dpi)) / n)) : 0;
+    WebTabGeo G = WebTabLayout(w);
     Gdiplus::Graphics gs(dc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    HFONT tf = CaptionFont(g_tbcap, 12, false, L"Killer Sans");
-    HFONT gf = CaptionFont(g_tbglyph, 12, false, L"Segoe MDL2 Assets");
-    int x = (int)(8 * g.dpi);
-    for (int i = 0; i < n; i++, x += tw) {
-        WebTab& t = g_wt[i];
+    auto drawTab = [&](int i) {
+        int k = i - G.start;
+        const WebTab& t = g_wt[i];
         bool act = i == g_wtCur;
-        // the tabs' separators: 1px, only between awake inactive neighbors
-        if (!act && i + 1 < n && i + 1 != g_wtCur && i != g_wtCur - 1) {
-            RECT s{ x - 1, y0 + (th - (int)(16 * g.dpi)) / 2, x, y0 + (th + (int)(16 * g.dpi)) / 2 };
-            HBRUSH sb = CreateSolidBrush(wvb::Sep);
-            FillRect(dc, &s, sb); DeleteObject(sb);
+        int fl = G.x0 + k * G.cell, fr = fl + G.cell;
+        int ft = G.faceTop, fb = ft + G.faceH;
+        if (!act) {
+            if (i == ws.sHot && !g_webFail)            // the hovered face: a faint tile
+                WebTileC(dc, RECT{ fl + TABF(2), ft + TABF(2), fr - TABF(3), fb - TABF(1) },
+                         Gdiplus::Color(20, 255, 255, 255), 3.0f);
+            if (k != G.vis - 1) {                      // the divider, dropped on the last face
+                Gdiplus::SolidBrush db(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+                gs.FillRectangle(&db, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)G.faceH));
+            }
         }
-        if (!act && i == ws.sHot && !g_webFail)        // the inactive tab's radius-4 tile
-            WebTile(dc, RECT{ x, y0, x + tw, y0 + th }, wvb::TabHover);
-        // the favicon slot: a live accent spinner while loading, a globe at rest
-        int fx = x + (int)(10 * g.dpi), fy = y0 + th / 2;
-        if (t.loading) {
-            float r = 5.0f * g.dpi;
+        int lead = TABF(10);
+        if (t.loading) {                               // the green spinner ahead of the title
+            float rr = 5.0f * (float)g.dpi;
+            float cx = (float)(fl + lead) + rr, cy = (float)ft + G.faceH / 2.0f;
             int a0 = (int)((GetTickCount64() / 6) % 360);
-            COLORREF ac = WvAccent();
-            Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(ac), GetGValue(ac), GetBValue(ac)), 2.0f * g.dpi);
-            gs.DrawArc(&pen, fx - r, fy - r, 2 * r, 2 * r, (Gdiplus::REAL)a0, 270);
-        } else {
-            SelectObject(dc, gf); SetTextColor(dc, wvb::InkDim);
-            RECT gr{ fx - (int)(7 * g.dpi), fy - (int)(7 * g.dpi), fx + (int)(7 * g.dpi), fy + (int)(7 * g.dpi) };
-            DrawTextW(dc, L"\uE774", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            Gdiplus::Pen pen(Gdiplus::Color(255, 0x22, 0xbb, 0x56), 1.6f * (float)g.dpi);
+            gs.DrawArc(&pen, cx - rr, cy - rr, 2 * rr, 2 * rr, (Gdiplus::REAL)a0, 270.0f);
+            lead += TABF(18);
         }
-        // the title, then the close x, which lights - circle and all - under the
-        // cursor's tab, the way Radon's close button appears on the tab's hover
-        RECT tr{ fx + (int)(12 * g.dpi), y0, x + tw - (int)(24 * g.dpi), y0 + th };
-        SelectObject(dc, tf);
-        SetTextColor(dc, act ? wvb::Ink : wvb::Inactive);
-        DrawTextW(dc, t.title.c_str(), -1, &tr,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        bool hotClose = i == ws.sHot;
-        if (hotClose)
-            WebCircle(dc, RECT{ x + tw - (int)(24 * g.dpi), y0 + th / 2 - (int)(9 * g.dpi),
-                                x + tw - (int)(4 * g.dpi), y0 + th / 2 + (int)(9 * g.dpi) },
-                      true, false, true);
-        SelectObject(dc, gf);
-        SetTextColor(dc, hotClose ? wvb::Ink : wvb::InkDim);
-        RECT cr{ x + tw - (int)(22 * g.dpi), y0, x + tw - (int)(6 * g.dpi), y0 + th };
-        DrawTextW(dc, L"\uE8BB", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        if (act) WebAccentPill(dc, x, y0 + th - (int)(2 * g.dpi), tw);   // the foot's accent
-    }
-    // the + button after the last tab
-    int px = (int)(8 * g.dpi) + n * tw + (int)(2 * g.dpi), py = y0 + th / 2;
-    if (n >= 0 && px + plusW < w) {
-        if (ws.sHot == 1000 + n) {
-            HBRUSH hb = CreateSolidBrush(wvb::Hover);
-            HGDIOBJ o = SelectObject(dc, hb);
-            Ellipse(dc, px, py - (int)(13 * g.dpi), px + (int)(26 * g.dpi), py + (int)(13 * g.dpi));
-            SelectObject(dc, o); DeleteObject(hb);
+        std::wstring ttl = t.title;
+        if (ttl.empty()) ttl = WebHostOf(t.url);
+        if (ttl.empty()) ttl = L"New Tab";
+        RECT tr{ fl + lead, ft, fr - TABF(24) - TABF(6), fb };
+        TabLabel(dc, ttl, tr, act ? RGB(0xe0, 0xe0, 0xe0) : RGB(0xa3, 0xa3, 0xa3));
+        WebTabX(dc, fr - TABF(2) - TABF(12), ft + G.faceH / 2, i == ws.sHot && ws.sHotX);
+        if (act) {                                     // the green rule over the open tab
+            Gdiplus::SolidBrush acc(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+            gs.FillRectangle(&acc, Gdiplus::RectF((float)fl, (float)ft,
+                                                  (float)(fr - fl), (float)max(1, TABF(1))));
         }
-        SelectObject(dc, gf); SetTextColor(dc, wvb::Ink);
-        RECT pr{ px, py - (int)(12 * g.dpi), px + (int)(26 * g.dpi), py + (int)(12 * g.dpi) };
-        DrawTextW(dc, L"\uE710", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    };
+    for (int k = 0; k < G.vis; k++) if (G.start + k != g_wtCur) drawTab(G.start + k);   // inactive first,
+    if (g_wtCur >= G.start && g_wtCur < G.start + G.vis) drawTab(g_wtCur);             // the open tab last
+    // the + : the reader's NewTabBtn - a rounded 40-gray tile under the cursor
+    bool plusHot = ws.sHot == 1000 + G.n;
+    if (plusHot)
+        WebTileC(dc, RECT{ G.plusL, TABF(4), G.plusL + TABF(TAB_BTN), TABF(24) },
+                 Gdiplus::Color(255, 0x40, 0x40, 0x40), 3.0f);
+    {
+        int cx = G.plusL + TABF(TAB_BTN) / 2, cy = (TABF(4) + TABF(24)) / 2;
+        int g2 = TABF(5);                              // the 11px plus glyph
+        HPEN xp = CreatePen(PS_SOLID, 1, plusHot ? RGB(0xe0, 0xe0, 0xe0) : RGB(0xa3, 0xa3, 0xa3));
+        HGDIOBJ op = SelectObject(dc, xp);
+        MoveToEx(dc, cx - g2, cy, nullptr); LineTo(dc, cx + g2, cy);
+        MoveToEx(dc, cx, cy - g2, nullptr); LineTo(dc, cx, cy + g2);
+        SelectObject(dc, op);
+        DeleteObject(xp);
     }
 }
 
@@ -9867,8 +9906,8 @@ static void WebSwitchTo(int i) {
     WebRepaintChrome();
 }
 
-// the card the webview rides in: Radon's content grid - the page floats in a
-// rounded #1c1c1c card with Radon's MicaBorder ring, a 4dpi margin of sheet
+// the card the webview rides in: the page floats in a rounded #1c1c1c card
+// with a hairline ring, a 4dpi margin of the window's field
 // showing around it. The webview's own corners stay square (an HWND cannot
 // take a path), so the ring is drawn one pixel OUTSIDE the controller's
 // bounds and the card's face fills the corner notches behind it.
@@ -9900,7 +9939,7 @@ static void WebCardPaint(HDC dc, int w, int h) {
     Gdiplus::Pen ring(Gdiplus::Color(255, GetRValue(wvb::Border),
                                      GetGValue(wvb::Border), GetBValue(wvb::Border)),
                       1.0f);
-    gs.DrawPath(&ring, &cp);         // Radon's MicaBorder ring
+    gs.DrawPath(&ring, &cp);         // the card's hairline ring
     if (g_webFail) WebFailCard(dc, w, h);
 }
 
@@ -12448,9 +12487,9 @@ static void LayoutMain() {
     int sw = g_webOn ? SW() : ((g.sideOn && DVF().n && !g.full) ? SW() : 0);   // the sidebar shows the FOCUSED
     int rw = RW();                              // pane's pages; the rail always rides between
     int cap = CAP();
-    int tb = g_webOn ? (int)(40 * g.dpi) : TBH();   // browser mode: the tab row's band,
-                                                    // sized for Radon's 32dpi tabs
-    int ws_ = WEBSTRIPH();                      // the browser's Radon nav row rides above it
+    int tb = g_webOn ? WEBTABH() : TBH();       // browser mode: the tab band, the same
+                                                // 34px the reader's own tab strip takes
+    int ws_ = WEBSTRIPH();                      // the browser's toolbar rides above it
     int sh = g.full ? 0 : SBH();                // full screen hides the footer too
     int ch = max(0, h - cap - ws_ - tb - sh);   // the children sit below caption + strip + toolbar
     sd.w = sw;
@@ -12588,7 +12627,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.rail = CreateWindowExW(0, L"DocsyRail", nullptr,
                                  WS_CHILD | WS_VISIBLE,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
-        g_wstrip = CreateWindowExW(0, L"DocsyWebStrip", nullptr,   // the browser's Radon nav row,
+        g_wstrip = CreateWindowExW(0, L"DocsyWebStrip", nullptr,   // the browser's Safari toolbar,
                                    WS_CHILD, 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);   // hidden until Web
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
         DwmApply(h);   // rounded corners + themed 1px border (Windows 11; no-op before)
@@ -13095,7 +13134,7 @@ static int Shot(const wchar_t* out, int w, int h) {
     int sw = g_webOn ? sd.w : ((g.sideOn && DVF().n && !g.full) ? sd.w : 0);   // web: the rail
     int rw = RW();                                  // always shows the OPEN WEB TABS
     int cap = CAP(), sh = SBH();
-    int tb = g_webOn ? (int)(40 * g.dpi) : TBH();   // browser mode: the tab row's band
+    int tb = g_webOn ? WEBTABH() : TBH();           // browser mode: the tab band
     int ws_ = WEBSTRIPH();                          // the nav row rides between caption and tabs
     int ch = max(1, h - cap - ws_ - tb - sh);
     // the children render above the caption row and below it, so composite them shifted
@@ -13206,7 +13245,7 @@ static int Shot(const wchar_t* out, int w, int h) {
         BitBlt(dc, 0, cap + ws_, w, tb, m4, 0, 0, SRCCOPY);
         SelectObject(m4, o4); DeleteObject(b4); DeleteDC(m4);
     }
-    if (!g.full && ws_ > 0) {                  // the browser's Radon nav row, topmost
+    if (!g.full && ws_ > 0) {                  // the browser's Safari toolbar, topmost
         HDC m8 = CreateCompatibleDC(dc);
         HBITMAP b8 = CreateCompatibleBitmap(dc, w, ws_);
         HGDIOBJ o8 = SelectObject(m8, b8);
@@ -13289,7 +13328,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     bc.lpszClassName = L"DocsyBar";
     RegisterClassExW(&bc);
 
-    WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Radon nav row (top): the
+    WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Safari toolbar (top): the
     wbc.style = CS_DBLCLKS;                         // logo, back/forward, the search pill,
     wbc.lpfnWndProc = WebStripProc; wbc.hInstance = hi;
     wbc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -13522,8 +13561,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 g_askShots = true;
             }
         // CI preview seed 11: web=1 dresses the window in the browser mode's
-        // chrome and nothing else - the Radon nav row, the Fluent tab row with
-        // the accent pill on the front tab, and the empty rounded content card.
+        // chrome and nothing else - the Safari toolbar, the reader's tab strip with
+        // the green rule on the front tab, and the empty rounded content card.
         // The two web tabs carry titles but NO controller, so no engine is
         // created, nothing loads and no network is touched - the frame is as
         // deterministic as the reader's own (WebToggle itself is barred in shot
@@ -13531,10 +13570,10 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
         for (int a = 3; a < argc; a++)
             if (!wcscmp(argv[a], L"web=1")) {
                 WebTab t1; t1.id = g_wtIds++;
-                t1.url = L"https://duckduckgo.com/"; t1.title = L"Radon Browser";
+                t1.url = L"https://duckduckgo.com/"; t1.title = L"DuckDuckGo";
                 WebTab t2; t2.id = g_wtIds++;
-                t2.url = L"https://github.com/imscythra/radon-browser";
-                t2.title = L"GitHub - imscythra/radon-browser: Radon Browser";
+                t2.url = L"https://github.com/etb190/docsy";
+                t2.title = L"GitHub - etb190/docsy";
                 g_wt.push_back(std::move(t1)); g_wt.push_back(std::move(t2));
                 g_wtCur = 0;
                 g_webOn = true;
@@ -13543,7 +13582,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 WebBarLayout();
                 if (g_wedit) SetWindowTextW(g_wedit, L"");   // the edit's pixels are not part of
                                                              // the composite: an empty pill paints
-                                                             // Radon's centered placeholder instead
+                                                             // the field's centered placeholder instead
                 WebSideLayout(); WebSideSync();
                 WebRepaintChrome();
                 if (g.view) InvalidateRect(g.view, nullptr, FALSE);
