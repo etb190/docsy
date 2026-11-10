@@ -68,6 +68,8 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
+#include <mutex>
+#include <condition_variable>
 #include <string>
 #include <cwctype>
 #include <cmath>
@@ -202,6 +204,13 @@ struct DocState {
     unsigned long long scrollTick = 0;  // last scroll stamp: defers the text pre-warm until settling
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
+    long long cacheBytes = 0;           // the page cache's byte weight (w*h*4 per entry):
+                                        // the LRU evicts against this, not a page count, so
+                                        // a 3,000-page doc keeps hundreds of light pages and
+                                        // a giant zoom keeps only what memory allows
+    int id = 0;                         // stable handle the render worker answers to (the
+                                        // tabs vector reallocates, so jobs carry this, never
+                                        // a DocState*)
     unsigned long long tabTick = 0;     // last time this session was the front tab: the
                                         // render-bitmap LRU keeps the three newest (PdfViewer.Tabs.cs
                                         // RenderCacheTabCap) and drops the rest's page bitmaps
@@ -301,6 +310,7 @@ struct App {
     std::wstring hint;                  // transient on-page hint (full screen entry)
     unsigned long long hintUntil = 0;
     bool quiet = false, busy = false, sideOn = false;
+    int nextDocId = 0;                  // handed to each opened document for the render queue
     int cw = 0, ch = 0;                 // the view's client size (both panes share the height)
     int sideW = 0;                      // user-sized sidebar width (0 = KillerPDF's 180px default)
     bool resizing = false;              // splitter drag: defer refits and thumb rebuilds
@@ -465,6 +475,9 @@ struct Side {
     int barGrab = 0;
     POINT dp{};                         // last drag position
     unsigned long long hold = 0, tick = 0;
+    long long thBytes = 0;              // the thumb cache's byte weight, evicted like the
+                                        // page cache: thousands of small thumbs stay, huge
+                                        // dpi-scaled ones give way
     std::vector<int> top;               // pixel top of each sidebar item
     std::unordered_map<int, Ent> th;
     HDC bdc = nullptr; HBITMAP bbm = nullptr, bold = nullptr; int bw = 0, bh = 0;
@@ -1433,6 +1446,15 @@ static HBRUSH GrainBrush(int which) {
 static void ClearCache(DocState& D) {
     for (auto& kv : D.cache) DeleteObject(kv.second.b);
     D.cache.clear();
+    D.cacheBytes = 0;
+}
+
+static void CacheDrop(DocState& D, int i) {   // one entry out, byte weight with it
+    auto it = D.cache.find(i);
+    if (it == D.cache.end()) return;
+    D.cacheBytes -= (long long)it->second.w * it->second.h * 4;
+    DeleteObject(it->second.b);
+    D.cache.erase(it);
 }
 
 static HFONT UiFont() {
@@ -1444,26 +1466,84 @@ static HFONT UiFont() {
     return g_uifont;
 }
 
-static HBITMAP Render(DocState& D, int i, int w, int h) {
+// The BMP the engine encodes is a plain 32bpp file: parse its headers straight
+// into a DIB section instead of paying a GDI+ decode AND a GetHBITMAP copy on
+// every page - the pixel copy is the only work left. Anything unexpected
+// (palette, RLE, odd masks, absurd sizes, a short read) answers nullptr and
+// the caller falls back to the GDI+ path, so this can stay naive about
+// everything it does not recognize.
+static HBITMAP BmpStreamToDib(IStream* is) {
+    BITMAPFILEHEADER fh{};
+    ULONG got = 0;
+    if (!is || FAILED(is->Read(&fh, sizeof fh, &got)) || got != sizeof fh || fh.bfType != 0x4D42)
+        return nullptr;
+    BITMAPINFOHEADER ih{};
+    if (FAILED(is->Read(&ih, sizeof ih, &got)) || got != sizeof ih || ih.biSize < sizeof ih)
+        return nullptr;
+    if (ih.biSize > sizeof ih) {                        // V4/V5 header: the shape is the
+        LARGE_INTEGER skip{};                           // same 40-byte base plus extra fields
+        skip.QuadPart = (LONGLONG)(ih.biSize - sizeof ih);
+        if (FAILED(is->Seek(skip, STREAM_SEEK_CUR, nullptr))) return nullptr;
+    }
+    if (ih.biPlanes != 1 || ih.biBitCount != 32) return nullptr;
+    if (ih.biCompression != BI_RGB && ih.biCompression != BI_BITFIELDS) return nullptr;
+    if (ih.biCompression == BI_BITFIELDS) {             // only the standard BGRx masks ride -
+        DWORD m[3]{};                                   // they sit right after the base header
+        if (FAILED(is->Read(m, sizeof m, &got)) || got != sizeof m) return nullptr;   // in both the
+        if (m[0] != 0x00FF0000u || m[1] != 0x0000FF00u || m[2] != 0x000000FFu) return nullptr;   // 40-byte and V4/V5 shapes
+    }
+    if (ih.biWidth <= 0 || ih.biWidth > 30000 || ih.biHeight == 0 ||
+        ih.biHeight > 30000 || ih.biHeight < -30000) return nullptr;
+    int w = (int)ih.biWidth, hh = (int)labs((long)ih.biHeight);
+    long long stride = (long long)w * 4, bytes = stride * (long long)hh;
+    if (bytes <= 0 || bytes > (512LL << 20)) return nullptr;
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -hh;                        // top-down DIB: rows in scan order
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HDC tdc = CreateCompatibleDC(nullptr);
+    HBITMAP hb = tdc ? CreateDIBSection(tdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    if (tdc) DeleteDC(tdc);
+    if (!hb || !bits) { if (hb) DeleteObject(hb); return nullptr; }
+    std::vector<BYTE> buf((size_t)bytes);
+    if (FAILED(is->Read(buf.data(), (ULONG)bytes, &got)) || (long long)got != bytes) {
+        DeleteObject(hb);
+        return nullptr;
+    }
+    BYTE* dst = (BYTE*)bits;
+    if (ih.biHeight < 0) memcpy(dst, buf.data(), (size_t)bytes);      // already top-down
+    else for (int y = 0; y < hh; y++)                                 // bottom-up: flip
+        memcpy(dst + (size_t)y * stride, buf.data() + (size_t)(hh - 1 - y) * stride, (size_t)stride);
+    return hb;
+}
+
+static HBITMAP RenderCore(winrt::Windows::Data::Pdf::PdfDocument doc, int page, int w, int h,
+                          int rot, int flip) {
     try {
         // the Transform's quarter-turns and flips bake into the render: the page
         // rasterizes at its UNROTATED aspect, then GDI+ rotates/flips into the
         // caller's (already swapped) bitmap, so every downstream path - layout,
         // hit tests, annotation painting - reads ordinary w x h pixels
-        int rot = D.prot.count(i) ? D.prot[i] : 0;
-        int flip = D.pflip.count(i) ? D.pflip[i] : 0;
         int rw = (rot % 2 == 0) ? w : h, rh = (rot % 2 == 0) ? h : w;
-        auto page = D.doc.GetPage((uint32_t)i);
+        auto pageObj = doc.GetPage((uint32_t)page);
         PdfPageRenderOptions o;
         o.DestinationWidth((uint32_t)max(1, rw));
         o.DestinationHeight((uint32_t)max(1, rh));
         o.BackgroundColor(winrt::Windows::UI::Color{ 255, 255, 255, 255 });
         o.BitmapEncoderId(winrt::Windows::Graphics::Imaging::BitmapEncoder::BmpEncoderId()); // raw BMP: no PNG cost
         InMemoryRandomAccessStream st;
-        page.RenderToStreamAsync(st, o).get();
+        pageObj.RenderToStreamAsync(st, o).get();
         st.Seek(0);
         winrt::com_ptr<IStream> is;
         winrt::check_hresult(CreateStreamOverRandomAccessStream(winrt::get_unknown(st), winrt::guid_of<IStream>(), is.put_void()));
+        if (rot == 0 && flip == 0) {
+            HBITMAP fast = BmpStreamToDib(is.get());   // one copy, no GDI+ decode:
+            if (fast) return fast;                     // misses fall through to GDI+
+        }
         Gdiplus::Bitmap bmp(is.get());
         if (bmp.GetLastStatus() != Gdiplus::Ok) return nullptr;
         HBITMAP hb = nullptr;
@@ -1487,16 +1567,117 @@ static HBITMAP Render(DocState& D, int i, int w, int h) {
     } catch (...) { return nullptr; }
 }
 
+static HBITMAP Render(DocState& D, int i, int w, int h) {
+    int rot = D.prot.count(i) ? D.prot[i] : 0;
+    int flip = D.pflip.count(i) ? D.pflip[i] : 0;
+    return RenderCore(D.doc, i, w, h, rot, flip);
+}
+
+// ---- the async render pipeline ----
+// Every page and thumbnail renders on one background worker: the UI thread
+// asks (GetBmp / SidePump), gets a placeholder the same frame, and results
+// land through a posted message whose drain inserts them into the same caches
+// the sync path used. Shot mode (g_sync) keeps the old synchronous behavior -
+// the CI previews composite one frame directly, so they must have every pixel
+// now. Jobs carry the document's stable id and an agile PdfDocument ref, never
+// a DocState*: the tabs vector reallocates, and the agile ref keeps the engine
+// object alive even when the tab closes mid-render (the drain then finds no
+// owner and frees the pixels).
+static bool g_sync = false;                 // shot mode: render inside the asking call
+static std::mutex g_rqM;
+static std::condition_variable g_rqCv;
+static bool g_rqQuit = false;
+static HANDLE g_rqThread = nullptr;
+static unsigned long long g_rqSeq = 0;      // bump on every ask; the worker answers the newest first
+enum { RJ_PAGE, RJ_THUMB };
+struct RJob {
+    int docId, page, kind;
+    int w, h, rot, flip;                    // rot: quarter-turns; flip: 1=X 2=Y (RenderCore's own bits)
+    winrt::agile_ref<winrt::Windows::Data::Pdf::PdfDocument> doc;
+    unsigned long long seq;
+};
+struct RRes {
+    int docId, page, kind;
+    int w, h, rot, flip;                    // pages: rot = the packed Ent key (quarter | flip<<4)
+    HBITMAP b;                              // may be null: a failed thumb caches its null as a placeholder
+    unsigned long long seq;
+};
+static std::vector<RJob> g_rq;              // pending, consumed by the worker
+static std::vector<RRes> g_rqDone;          // finished, drained on the UI thread
+static bool RqSame(const RJob& j, int docId, int page, int kind, int w, int h, int rot, int flip) {
+    return j.docId == docId && j.page == page && j.kind == kind &&
+           j.w == w && j.h == h && j.rot == rot && j.flip == flip;
+}
+static void RqEnqueue(DocState& D, int i, int kind, int w, int h, int rot, int flip) {
+    if (!D.id || !D.doc) return;
+    std::lock_guard<std::mutex> lk(g_rqM);
+    for (size_t k = 0; k < g_rq.size(); k++) {          // supersede a stale-size job for
+        if (g_rq[k].docId == D.id && g_rq[k].page == i && g_rq[k].kind == kind) {   // the same slot
+            if (RqSame(g_rq[k], D.id, i, kind, w, h, rot, flip)) {
+                g_rq[k].seq = ++g_rqSeq;                // already asked: just raise its turn
+                return;
+            }
+            g_rq[k] = g_rq.back(); g_rq.pop_back(); k--;    // old size is wasted work now
+        }
+    }
+    for (auto& r : g_rqDone)                            // a matching result is waiting to
+        if (r.docId == D.id && r.page == i && r.kind == kind &&
+            r.w == w && r.h == h && r.rot == rot && r.flip == flip) return;   // drain: no second render
+    g_rq.push_back(RJob{ D.id, i, kind, w, h, rot, flip, winrt::make_agile(D.doc), ++g_rqSeq });
+    g_rqCv.notify_one();
+}
+static DWORD WINAPI RqWorker(LPVOID) {
+    try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
+    for (;;) {
+        RJob j;
+        {
+            std::unique_lock<std::mutex> lk(g_rqM);
+            g_rqCv.wait(lk, [] { return g_rqQuit || !g_rq.empty(); });
+            if (g_rqQuit) break;
+            size_t best = 0;                            // the most recently asked job: what
+            for (size_t k = 1; k < g_rq.size(); k++)    // the eye is on wins the worker
+                if (g_rq[k].seq > g_rq[best].seq) best = k;
+            j = g_rq[best];
+            g_rq[best] = g_rq.back(); g_rq.pop_back();
+        }
+        HBITMAP b = nullptr;
+        try { b = RenderCore(j.doc.get(), j.page, j.w, j.h, j.rot, j.flip); } catch (...) {}
+        {
+            std::lock_guard<std::mutex> lk(g_rqM);
+            int protp = j.rot, flipp = j.flip;
+            g_rqDone.push_back(RRes{ j.docId, j.page, j.kind, j.w, j.h,
+                                     j.kind == RJ_PAGE ? (protp | (flipp << 4)) : 0, flipp, b, j.seq });
+        }
+        if (g.view) PostMessageW(g.view, WM_APP + 2, 0, 0);   // the drain paints the result
+    }
+    return 0;
+}
+static void RqEnsureThread() {
+    if (!g_rqThread) g_rqThread = CreateThread(nullptr, 0, RqWorker, nullptr, 0, nullptr);
+}
+static void RqShutdown() {
+    HANDLE t;
+    { std::lock_guard<std::mutex> lk(g_rqM); g_rqQuit = true; t = g_rqThread; g_rqThread = nullptr; }
+    g_rqCv.notify_all();
+    if (t) { WaitForSingleObject(t, 3000); CloseHandle(t); }
+}
+
 static HBITMAP GetBmp(DocState& D, int i, int w, int h) {
     auto it = D.cache.find(i);
     int rot = (D.prot.count(i) ? D.prot[i] : 0) | (D.pflip.count(i) ? D.pflip[i] << 4 : 0);
     if (it != D.cache.end()) {
         if (it->second.w == w && it->second.h == h && it->second.rot == rot) { it->second.t = ++D.tick; return it->second.b; }
-        DeleteObject(it->second.b); D.cache.erase(it);
+        CacheDrop(D, i);
+    }
+    if (!g_sync) {                                     // live: the worker owns the render -
+        RqEnqueue(D, i, RJ_PAGE, w, h, rot & 3, rot >> 4);   // this frame paints the placeholder,
+        RqEnsureThread();                              // the drain lands the pixels
+        return nullptr;
     }
     HBITMAP b = Render(D, i, w, h);
     if (!b) return nullptr;
     D.cache[i] = Ent{ b, w, h, rot, ++D.tick };
+    D.cacheBytes += (long long)w * h * 4;
     return b;
 }
 
@@ -1552,12 +1733,16 @@ static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D,
     } catch (...) { return nullptr; }
 }
 
+static const long long PAGE_CACHE_BUDGET = 160LL << 20;   // per document: hundreds of
+                                          // light pages survive; giant zoomed pages cap it
+static const long long TAB_CACHE_BUDGET = 640LL << 20;    // across a pane's whole tab strip
 static void Evict(DocState& D, int lo, int hi) {
-    while (D.cache.size() > 24) {
+    while ((D.cacheBytes > PAGE_CACHE_BUDGET && D.cache.size() > 24) || D.cache.size() > 4096) {
         int k = -1; unsigned long long best = ~0ULL;
         for (auto& kv : D.cache)
             if ((kv.first < lo - 1 || kv.first > hi + 1) && kv.second.t < best) { best = kv.second.t; k = kv.first; }
         if (k < 0) break;
+        D.cacheBytes -= (long long)D.cache[k].w * D.cache[k].h * 4;
         DeleteObject(D.cache[k].b); D.cache.erase(k);
     }
 }
@@ -1963,9 +2148,9 @@ static TxtPage* TtFor(DocState& D, int i) {
     TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
     pt.tick = ++D.tick;
     D.txt[i] = std::move(pt);
-    while (D.txt.size() > 48) {             // LRU: drop the stalest page's geometry
-        auto oldest = D.txt.end();
-        for (auto x = D.txt.begin(); x != D.txt.end(); ++x)
+    while (D.txt.size() > 256) {            // LRU: drop the stalest page's geometry (a
+        auto oldest = D.txt.end();          // 2,000-cell page is ~100KB, so 256 pages ride
+        for (auto x = D.txt.begin(); x != D.txt.end(); ++x)   // comfortably under 30MB)
             if (x->first != i && (oldest == D.txt.end() || x->second.tick < oldest->second.tick)) oldest = x;
         if (oldest == D.txt.end()) break;
         D.txt.erase(oldest);
@@ -2267,7 +2452,7 @@ static void FocusPane(bool b) {
     if (!g.split || b == FocusB()) return;
     g.splitA = !b;
     for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);   // the sidebar's thumbs
-    sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0;              // belong to the focused
+    sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0;              // belong to the focused
     sd.cw = 0; sd.ch = 0;                                                // pane's document now
     SideLayout();
     UpdateTitle();
@@ -2318,6 +2503,7 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         if (sl != std::wstring::npos) nm = nm.substr(sl + 1);
         ClearCache(D);
         D.doc = d; D.n = (int)n; D.pw = w; D.ph = h; D.name = nm; D.path = full;
+        D.id = ++g.nextDocId;               // the render queue's stable handle for this document
         D.sx = D.sy = 0; D.zoom = 1.0; D.fitMode = 2; D.cur = -1;   // every document opens
                                                       // at 100%; -1 so LayoutMain's UpdateTitle
                                                       // sees the change and syncs the sidebar highlight
@@ -2338,7 +2524,7 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         }
         if (&D == &DVF()) {                          // the sidebar shows the FOCUSED pane's pages:
             for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);   // a drop or open
-            sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;   // into the pane
+            sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;   // into the pane
             sd.cw = 0; sd.ch = 0;                    // you read rebuilds the ring around it
             g.sideOn = true;
             if (g.side) ShowWindow(g.side, SW_SHOWNOACTIVATE);
@@ -2363,15 +2549,25 @@ static void OpenDlg() {                          // the dialog opens into the FO
     if (GetOpenFileNameW(&o)) TabOpenInto(FocusB(), f);   // OpenInNewTab: the dialog lands in
 }
 
-static void HandleDrop(HDROP d, HWND h) {        // the pane under the drop takes the file:
-    wchar_t f[MAX_PATH * 2];                     // the view maps the point to its pane, a
-    if (DragQueryFileW(d, 0, f, (UINT)_countof(f))) {   // drop on the sidebar or the frame goes
-        POINT p; DragQueryPoint(d, &p);          // to the pane the reader is working in
-        bool b = FocusB();
-        if (h == g.view) b = PaneB(p.x);
-        TabOpenInto(b, f);                       // a new tab in the pane it landed on
+// The drop queue: every dropped file waits here and opens one per posted
+// message, so a folder drop of tens of PDFs loads in sequence while the window
+// keeps painting between loads - no single giant freeze.
+static std::vector<std::wstring> g_dropQ;
+static std::vector<bool> g_dropPane;
+
+static void HandleDrop(HDROP d, HWND h) {        // the pane under the drop takes the files:
+    UINT n = DragQueryFileW(d, 0xFFFFFFFF, nullptr, 0);   // the view maps the point to its
+    POINT p; DragQueryPoint(d, &p);              // pane, a drop on the sidebar or the frame
+    bool b = FocusB();                           // goes to the pane the reader is working in
+    if (h == g.view) b = PaneB(p.x);
+    for (UINT i = 0; i < n; i++) {
+        wchar_t f[MAX_PATH * 2];
+        if (!DragQueryFileW(d, i, f, (UINT)_countof(f))) continue;
+        g_dropQ.push_back(f);
+        g_dropPane.push_back(b);
     }
     DragFinish(d);
+    if (!g_dropQ.empty()) PostMessageW(g.main, WM_APP + 3, 0, 0);   // one open per message
 }
 
 // ---------------- file cluster (KillerPDF's FileOperations.cs) ----------------
@@ -2433,8 +2629,10 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
     auto pageJpeg = [&](int i, std::vector<BYTE>& out) -> bool {
         int w = std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400);
         int h = max(1, (int)std::lround((float)w * D.ph[i] / max(1.f, D.pw[i])));
-        HBITMAP b = GetBmp(D, i, w, h);
-        if (!b) return false;
+        HBITMAP b = Render(D, i, w, h);    // the writer renders synchronously: save needs
+        if (!b) return false;              // every page's pixels now, not on the worker's
+                                           // queue (and a save-sized 2x render never
+                                           // pollutes the view cache the way GetBmp did)
         // the burn-in lands on a private 32bpp DIB section, and the JPEG encoder
         // reads the section's OWN memory (Bitmap over scan0). The old path handed
         // GDI+ an HBITMAP that was selected into a DC - GetDIBits, which GDI+
@@ -2454,10 +2652,11 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         if (!dib || !bits) { if (dib) DeleteObject(dib); return false; }
         HDC ddc = CreateCompatibleDC(nullptr);
         HGDIOBJ od = SelectObject(ddc, dib);
-        HDC sdc = CreateCompatibleDC(nullptr);         // the cache bitmap is a read-only
+        HDC sdc = CreateCompatibleDC(nullptr);         // the fresh render is a read-only
         HGDIOBJ osel = SelectObject(sdc, b);           // source: a plain blit, never drawn into
         BitBlt(ddc, 0, 0, w, h, sdc, 0, 0, SRCCOPY);
         SelectObject(sdc, osel); DeleteDC(sdc);
+        DeleteObject(b);                   // the fresh render was this call's own
         float k = (float)w / max(1.f, D.pw[i]);
         PaintAnnots(ddc, D, i, 0, 0, k);               // annotations burn in
         CLSID jpg{}; UINT cnt = 0, bytes = 0;
@@ -2629,7 +2828,7 @@ static void SideLayout() {
         if (sd.tw != tw) {                         // KillerPDF's ~134px stretch-to-width card
             sd.tw = tw;
             for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-            sd.th.clear();
+            sd.th.clear(); sd.thBytes = 0;
         }
         // KillerPDF's page item: a full-width ListBoxItem band (Padding 8,6) around a
         // StackPanel (Margin 8,2) holding the thumb and the label line. Consecutive
@@ -2647,33 +2846,56 @@ static void SideLayout() {
     SetTimer(g.side, 2, 25, nullptr);
 }
 
-// Renders the visible thumbnail closest to the viewport centre. Returns true
-// while visible thumbs are still missing, so a 25 ms timer can pump the rest.
+// The rail's thumb LRU: evicts farthest-off-screen first, oldest first,
+// against a byte budget and a hard entry ceiling - so a 2,000-page document
+// keeps a couple thousand light thumbs resident while a giant-dpi strip gives
+// memory back.
+static const long long THUMB_CACHE_BUDGET = 96LL << 20;
+static void SideThEvict(int first, int last) {
+    for (;;) {
+        if (sd.thBytes <= THUMB_CACHE_BUDGET && sd.th.size() <= 4096) return;
+        int k = -1; unsigned long long best = ~0ULL;
+        for (auto& kv : sd.th)
+            if ((kv.first < first - 2 || kv.first > last + 2) && kv.second.t < best) { best = kv.second.t; k = kv.first; }
+        if (k < 0) return;                       // everything left is on screen
+        if (sd.th[k].b) { sd.thBytes -= (long long)sd.th[k].w * sd.th[k].h * 4; DeleteObject(sd.th[k].b); }
+        sd.th.erase(k);
+    }
+}
+
+// Asks for every visible thumbnail (the worker renders them in recency order,
+// results land through the drain). Returns true while visible thumbs are still
+// missing, so a 25 ms timer can re-pump the strip as the scroll reveals more.
+// Shot mode keeps the old one-thumb-per-call contract - the startup loop
+// expects to fill the rail synchronously before its one composite.
 static bool SidePump() {
     DocState& D = DVF();                    // thumbs render from the FOCUSED pane's document
     if (!D.n || sd.ch <= 0 || sd.docH <= 0) return false;
     if (!(g.side && (GetWindowLongW(g.side, GWL_STYLE) & WS_VISIBLE))) return false;   // nothing to pump while hidden (shot mode shows it first)
     int first = SidePageAt(sd.scroll), last = first;
     while (last + 1 < D.n && sd.top[last + 1] < sd.scroll + sd.ch) last++;
-    int pick = -1, bestd = INT_MAX, center = (first + last) / 2;
+    if (g_sync) {
+        int pick = -1, bestd = INT_MAX, center = (first + last) / 2;
+        for (int i = max(0, first - 1); i <= min(D.n - 1, last + 1); i++) {
+            if (sd.th.find(i) != sd.th.end()) continue;
+            int d = abs(i - center);
+            if (d < bestd) { bestd = d; pick = i; }
+        }
+        if (pick < 0) return false;
+        HBITMAP b = Render(D, pick, sd.tw, STH(pick));
+        sd.th[pick] = Ent{ b, sd.tw, STH(pick), 0, ++sd.tick };   // b may be null: stays a placeholder, no retry spin
+        if (b) sd.thBytes += (long long)sd.tw * STH(pick) * 4;
+        SideThEvict(first, last);
+        InvalidateRect(g.side, nullptr, FALSE);
+        return true;
+    }
+    int missing = 0;
     for (int i = max(0, first - 1); i <= min(D.n - 1, last + 1); i++) {
         if (sd.th.find(i) != sd.th.end()) continue;
-        int d = abs(i - center);
-        if (d < bestd) { bestd = d; pick = i; }
+        missing++;
+        RqEnqueue(D, i, RJ_THUMB, sd.tw, STH(i), 0, 0);
     }
-    if (pick < 0) return false;
-    HBITMAP b = Render(D, pick, sd.tw, STH(pick));
-    sd.th[pick] = Ent{ b, sd.tw, STH(pick), 0, ++sd.tick };   // b may be null: stays a placeholder, no retry spin
-    while (sd.th.size() > 256) {                            // LRU: drop farthest off-screen, oldest first
-        int k = -1; unsigned long long best = ~0ULL;
-        for (auto& kv : sd.th)
-            if ((kv.first < first - 2 || kv.first > last + 2) && kv.second.t < best) { best = kv.second.t; k = kv.first; }
-        if (k < 0) break;
-        if (sd.th[k].b) DeleteObject(sd.th[k].b);
-        sd.th.erase(k);
-    }
-    InvalidateRect(g.side, nullptr, FALSE);
-    return true;
+    return missing > 0;
 }
 
 // Keeps the sidebar highlight in step with the view and follows the current
@@ -2716,6 +2938,57 @@ static void SideSync() {
 static std::vector<DocState>& Tabs(bool b) { return b ? g.tabs[1] : g.tabs[0]; }
 static int& Act(bool b) { return b ? g.act[1] : g.act[0]; }
 static unsigned long long g_tabTick = 0;
+
+static DocState* DocById(int id) {          // the render results' owner lookup: the tabs
+    if (!id) return nullptr;                // vector moves, so the drain re-resolves by id
+    for (int p = 0; p < 2; p++)
+        for (auto& t : Tabs(p != 0))
+            if (t.id == id) return &t;
+    return nullptr;
+}
+
+// The worker's finished renders land here on the UI thread: each result
+// re-validated against what the owner still wants (the page may have been
+// zoomed, rotated or closed meanwhile) and inserted into the very cache the
+// sync path used. Pages repaint the view; thumbs repaint just their own strip.
+static void RqDrain() {
+    std::vector<RRes> done;
+    { std::lock_guard<std::mutex> lk(g_rqM); done.swap(g_rqDone); }
+    if (done.empty()) return;
+    bool viewInv = false;
+    for (auto& r : done) {
+        if (r.kind == RJ_PAGE) {
+            DocState* D = DocById(r.docId);
+            if (!D || r.page < 0 || r.page >= D->n) { if (r.b) DeleteObject(r.b); continue; }
+            int want = (D->prot.count(r.page) ? D->prot[r.page] : 0) |
+                       (D->pflip.count(r.page) ? D->pflip[r.page] << 4 : 0);
+            if (r.w != PW(*D, r.page) || r.h != PH(*D, r.page) || r.rot != want) {
+                if (r.b) DeleteObject(r.b);            // stale size or transform: the next
+                continue;                              // paint re-asked at the right shape
+            }
+            CacheDrop(*D, r.page);
+            D->cache[r.page] = Ent{ r.b, r.w, r.h, r.rot, ++D->tick };
+            D->cacheBytes += (long long)r.w * r.h * 4;
+            Evict(*D, r.page, r.page);
+            viewInv = true;
+        } else {
+            DocState* D = DocById(r.docId);
+            if (!D || D != &DVF() || r.page < 0 || r.page >= D->n || r.w != sd.tw || r.h != STH(r.page)) {
+                if (r.b) DeleteObject(r.b);
+                continue;                              // the strip moved to another document
+            }
+            sd.th[r.page] = Ent{ r.b, r.w, r.h, 0, ++sd.tick };
+            if (r.b) sd.thBytes += (long long)r.w * r.h * 4;
+            SideThEvict(SidePageAt(sd.scroll), SidePageAt(sd.scroll + sd.ch - 1));
+            if (g.side && sd.top.size() > (size_t)r.page) {
+                RECT tr{ 0, sd.top[r.page] - sd.scroll, max(1, sd.cw),
+                         sd.top[r.page] - sd.scroll + STH(r.page) + (int)(36 * g.dpi) };
+                InvalidateRect(g.side, &tr, FALSE);    // just the card that arrived
+            }
+        }
+    }
+    if (viewInv && g.view) InvalidateRect(g.view, nullptr, FALSE);
+}
 
 // The strip counts DOCUMENTS, not slots: a pane's blank start state is not a
 // tab, and the front slot is a stale husk while its document is live, so the
@@ -2792,16 +3065,23 @@ static void TabApply(bool b, int idx) {
     DV(b).tabTick = ++g_tabTick;
 }
 
-// TouchRenderLru: three tabs keep their rendered page bitmaps; older sessions
-// re-render on return. ClearCache runs per session, exactly the per-tab cache
-// KillerPDF clears when a tab falls out of the LRU window.
+// TouchRenderLru: three tabs keep their rendered page bitmaps no matter what
+// (KillerPDF's RenderCacheTabCap window), and MORE tabs stay warm as long as
+// the pane's whole strip fits the byte budget - ten light documents come back
+// instantly, memory still has a hard ceiling. ClearCache runs per session,
+// exactly the per-tab cache KillerPDF clears when a tab falls out of the LRU.
 static void TabTrimCaches(bool b) {
     std::vector<DocState>& T = Tabs(b);
     std::vector<std::pair<unsigned long long, int>> v;
     for (int i = 0; i < (int)T.size(); i++)
         if (i != Act(b) && !T[i].cache.empty()) v.push_back({ T[i].tabTick, i });
     std::sort(v.begin(), v.end(), [](auto& a, auto& c) { return a.first > c.first; });
-    for (int k = 3; k < (int)v.size(); k++) { ClearCache(T[v[k].second]); T[v[k].second].txt.clear(); }
+    long long total = 0;
+    for (auto& t : T) total += t.cacheBytes;
+    for (int k = 3; k < (int)v.size() && total > TAB_CACHE_BUDGET; k++) {
+        total -= T[v[k].second].cacheBytes;
+        ClearCache(T[v[k].second]); T[v[k].second].txt.clear();
+    }
 }
 
 // The surfaces that read the FOCUSED pane's document after its identity
@@ -2813,7 +3093,7 @@ static void TabChrome(bool b) {
         return;
     }
     for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-    sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;
+    sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;
     sd.cw = 0; sd.ch = 0;
     SideLayout();
     UpdateTitle();
@@ -7308,6 +7588,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         KillTimer(h, 1); Prefetch(DVF()); return 0;
     case WM_MOUSEWHEEL: ViewWheel(wp, lp); return 0;
+    case WM_APP + 2: RqDrain(); return 0;   // the render worker's finished pages and thumbs
     case WM_MOUSEHWHEEL: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) }; ScreenToClient(g.view, &p);
         bool b = PaneB(p.x);
@@ -9595,7 +9876,7 @@ static void ToggleSplit() {
             // the sidebar exactly where it was - KillerPDF's close does not
             // touch it either.
             for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-            sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.cw = 0; sd.ch = 0;
+            sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.cw = 0; sd.ch = 0;
         }
         SideLayout();
         UpdateTitle();
@@ -10949,7 +11230,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_askBang) { DeleteObject(g_askBang); g_askBang = nullptr; }
         if (g_fedit) SendMessageW(g_fedit, WM_SETFONT, (WPARAM)FdFontEdit(), TRUE);
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-        sd.th.clear(); sd.tw = 0;
+        sd.th.clear(); sd.thBytes = 0; sd.tw = 0;
         SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
         LayoutMain();
         return 0;
@@ -11129,6 +11410,17 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;                                 // (buffered, so an unchanged band reblits
                                                // identically and cannot strobe)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
+    case WM_APP + 3: {                        // the drop queue's drain: one document per
+        if (!g_dropQ.empty()) {               // message, so the window paints between loads
+            std::wstring p = std::move(g_dropQ.front());
+            bool pb = g_dropPane.front();
+            g_dropQ.erase(g_dropQ.begin());
+            g_dropPane.erase(g_dropPane.begin());
+            TabOpenInto(pb, p);
+            if (!g_dropQ.empty()) PostMessageW(h, WM_APP + 3, 0, 0);
+        }
+        return 0;
+    }
     case WM_CLOSE: {
         // KillerPDF's quit prompt (Str_Dlg_UnsavedExit through KillerDialog.
         // AskToSave): unsaved work asks before the window dies. Save writes
@@ -11178,7 +11470,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (r == 2 || r == 1) DestroyWindow(h);   // Save / Don't Save close; Cancel stays
         return 0;
     }
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY:
+        RqShutdown();                        // the render worker ends before the queues die
+        PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(h, m, wp, lp);
 }
@@ -11246,7 +11540,7 @@ static void TransformApply(bool b, int page, int turns, bool flipH, bool flipV) 
     }
     D.prot[page] = rot;
     D.txt.clear();                           // the text layer re-reads the new raster
-    D.cache.erase(page);                     // GetBmp re-renders with the new rot bits
+    CacheDrop(D, page);                      // GetBmp re-renders with the new rot bits
     g.annSelPage = -1; g.annSelIdx = -1;
     SelClear(D);
     Layout(D, b);
@@ -11394,7 +11688,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     Gdiplus::GdiplusStartup(&tok, &gi, nullptr);
     int argc = 0; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool shot = argc >= 4 && !lstrcmpW(argv[1], L"--shot");
-    g.quiet = shot; g.hinst = hi;
+    g.quiet = shot; g.hinst = hi; g_sync = shot;   // shots render synchronously: the
+                                                   // preview composites one frame directly
 
     // The bundled Killer Sans faces (KillerPDF's BrandSansFont / UiFont, OFL,
     // subset to latin-1 + dashes in src/fonts). Loading them from memory keeps
