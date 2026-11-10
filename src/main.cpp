@@ -1521,9 +1521,20 @@ static HBITMAP BmpStreamToDib(IStream* is) {
     return hb;
 }
 
+// Every rasterizer of a PdfDocument - the worker's RenderCore and the UI
+// thread's own renders (the OCR pass in RenderSoft, the save writer, shot
+// mode) - queues behind this one gate: Windows.Data.Pdf does not survive two
+// concurrent RenderToStreamAsync calls on one document, and before the gate a
+// pre-warm OCR 250ms after a page settled raced the worker's render of the
+// same page and took the process down. The wait is bounded by ONE page render
+// (the lock is taken per call, never across the queue), and no path holds it
+// together with the job-queue mutex, so the worker and the drain cannot cycle.
+static std::mutex g_renderM;
+
 static HBITMAP RenderCore(winrt::Windows::Data::Pdf::PdfDocument doc, int page, int w, int h,
                           int rot, int flip) {
     try {
+        std::lock_guard<std::mutex> lk(g_renderM);
         // the Transform's quarter-turns and flips bake into the render: the page
         // rasterizes at its UNROTATED aspect, then GDI+ rotates/flips into the
         // caller's (already swapped) bitmap, so every downstream path - layout,
@@ -1687,7 +1698,8 @@ static HBITMAP GetBmp(DocState& D, int i, int w, int h) {
 // new coordinate space and selection keeps working there.
 static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D, int i, int w, int h) {
     try {
-        int rot = D.prot.count(i) ? D.prot[i] : 0;
+        std::lock_guard<std::mutex> lk(g_renderM);   // the same gate: this render runs on the
+        int rot = D.prot.count(i) ? D.prot[i] : 0;   // UI thread beside the worker's own
         int flip = D.pflip.count(i) ? D.pflip[i] : 0;
         int rw = (rot % 2 == 0) ? w : h, rh = (rot % 2 == 0) ? h : w;
         auto page = D.doc.GetPage((uint32_t)i);
@@ -2941,8 +2953,10 @@ static unsigned long long g_tabTick = 0;
 
 static DocState* DocById(int id) {          // the render results' owner lookup: the tabs
     if (!id) return nullptr;                // vector moves, so the drain re-resolves by id
-    for (int p = 0; p < 2; p++)
-        for (auto& t : Tabs(p != 0))
+    if (g.d.id == id) return &g.d;          // the front document lives in the working set,
+    if (g.dB.id == id) return &g.dB;        // OUTSIDE the tab vectors, until a switch parks
+    for (int p = 0; p < 2; p++)             // it there - the drain must find it in g.d/g.dB
+        for (auto& t : Tabs(p != 0))        // or every on-screen page renders white forever
             if (t.id == id) return &t;
     return nullptr;
 }
@@ -2967,6 +2981,11 @@ static void RqDrain() {
                 continue;                              // paint re-asked at the right shape
             }
             CacheDrop(*D, r.page);
+            if (!r.b) continue;            // a failed page render stays uncached and unpainted:
+                                           // a null entry would make every later paint a hit
+                                           // that returns nothing, the page white for good -
+                                           // the next paint asks again, the sync path's own
+                                           // behavior. Thumbs keep their deliberate placeholder
             D->cache[r.page] = Ent{ r.b, r.w, r.h, r.rot, ++D->tick };
             D->cacheBytes += (long long)r.w * r.h * 4;
             Evict(*D, r.page, r.page);
