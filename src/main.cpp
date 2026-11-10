@@ -9080,7 +9080,7 @@ static void WebStripPaint(HDC dc, int w, int h) {
             float r = 5.0f * g.dpi;
             int a0 = (int)((GetTickCount64() / 6) % 360);
             Gdiplus::Pen pen(Gdiplus::Color(255, 0x8a, 0xb4, 0xf8), 2.0f * g.dpi);
-            gs.DrawArc(&pen, fx - r, fy - r, 2 * r, 2 * r, (REAL)a0, 270);
+            gs.DrawArc(&pen, fx - r, fy - r, 2 * r, 2 * r, (Gdiplus::REAL)a0, 270);
         } else {
             SelectObject(dc, gf); SetTextColor(dc, wvb::InkDim);
             RECT gr{ fx - (int)(7 * g.dpi), fy - (int)(7 * g.dpi), fx + (int)(7 * g.dpi), fy + (int)(7 * g.dpi) };
@@ -9144,7 +9144,7 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RECT r; GetClientRect(h, &r);
         int n = (int)g_wt.size();
         int th = (int)(34 * g.dpi);
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
+        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
         bool close = false;
         int hot = WebStripTabAt(p, n, tw, close);
         if (hot < 0 && WebStripPlusAt(p, n, tw)) hot = 1000 + n;
@@ -9162,7 +9162,7 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
         int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
+        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
         bool close = false;
         int hit = WebStripTabAt(p, n, tw, close);
         if (hit >= 0 && hit != g_wtCur && !close) WebSwitchTo(hit);   // Chrome switches on press
@@ -9172,7 +9172,7 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
         int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
+        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
         bool close = false;
         int hit = WebStripTabAt(p, n, tw, close);
         if (hit >= 0 && close) WebCloseTabAt(hit);
@@ -9183,7 +9183,7 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
         int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
+        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
         bool close = false;
         if (WebStripTabAt(p, n, tw, close) < 0 && !WebStripPlusAt(p, n, tw))
             WebNewTab(L"https://duckduckgo.com/", true);
@@ -9193,7 +9193,7 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
         int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
+        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
         bool close = false;
         int hit = WebStripTabAt(p, n, tw, close);
         if (hit >= 0) WebCloseTabAt(hit);
@@ -9237,7 +9237,7 @@ static void WebBarLayout() {
     }
     if (g_wedit) {
         MoveWindow(g_wedit, g_webOmni.left + (int)(26 * g.dpi), g_webOmni.top,
-                   max(10, g_webOmni.right - g_webOmni.left - (int)(32 * g.dpi)),
+                   max(10, (int)g_webOmni.right - (int)g_webOmni.left - (int)(32 * g.dpi)),
                    g_webOmni.bottom - g_webOmni.top, TRUE);
         ShowWindow(g_wedit, g_webFail ? SW_HIDE : SW_SHOW);
     }
@@ -9292,7 +9292,8 @@ static void WebCircle(HDC dc, const RECT& r, bool hot, bool pr, bool en) {
 static void WebGlyph(HDC dc, const RECT& r, const wchar_t* g, COLORREF c) {
     SelectObject(dc, CaptionFont(g_tbglyph, 16, false, L"Segoe MDL2 Assets"));
     SetTextColor(dc, c);
-    DrawTextW(dc, g, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT rc = r;                                   // DrawTextW wants a mutable rect
+    DrawTextW(dc, g, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 static void WebBarDraw(HDC dc, int w, int h) {
@@ -9493,8 +9494,8 @@ static void WebThumbDecode(int id, IStream* st) {
     int TW2 = (int)(160 * g.dpi), TH2 = max(1, (int)((long long)TW2 * bh / bw));
     BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), TW2, -TH2, 1, 32, BI_RGB };
     void* bits = nullptr;
-    HBITMAP small = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (small) {
+    HBITMAP scaled = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (scaled) {
         HDC m = CreateCompatibleDC(nullptr), s = CreateCompatibleDC(nullptr);
         HGDIOBJ o1 = SelectObject(m, small), o2 = SelectObject(s, full);
         SetStretchBltMode(m, HALFTONE); SetBrushOrgEx(m, 0, 0, nullptr);
@@ -9502,11 +9503,11 @@ static void WebThumbDecode(int id, IStream* st) {
         SelectObject(m, o1); SelectObject(s, o2); DeleteDC(m); DeleteDC(s);
     }
     DeleteObject(full);
-    if (!small) return;
+    if (!scaled) return;
     WebTab* t = WebTabById(id);
-    if (!t) { DeleteObject(small); return; }
+    if (!t) { DeleteObject(scaled); return; }
     if (t->thumb) DeleteObject(t->thumb);
-    t->thumb = small; t->thumbW = TW2; t->thumbH = TH2;
+    t->thumb = scaled; t->thumbW = TW2; t->thumbH = TH2;
     t->ar = (double)bh / max(1, bw);
     if (g_webOn) { WebSideLayout(); InvalidateRect(g.side, nullptr, FALSE); }
 }
