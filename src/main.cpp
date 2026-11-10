@@ -6465,20 +6465,19 @@ static HFONT TabFont() {                 // TabTitleFontSize 12, KillerPDF's Mon
 // The tab label, drawn with GDI+ off the bundled faces. The subsets carry no
 // hinting tables, and GDI's rasterizer grid-snaps their unhinted 12px stems
 // into mush - KillerPDF draws this exact face through WPF's renderer and it
-// reads clean, so the label takes GDI+'s own anti-aliased path instead (its
-// private collection loads the same two RCDATA faces wWinMain feeds
-// AddFontMemResourceEx). Falls back to the GDI font only if the faces are gone.
+// reads clean, so the label takes GDI+'s own anti-aliased path instead.
+// The collection is the UI face ALONE: a shared collection pairs the slanted
+// Killer Sans brand face with it, a name lookup there once missed and the
+// labels slid into the brand's lean - one face in, one family out, no lookup.
 static Gdiplus::PrivateFontCollection* TabFaces() {
     static Gdiplus::PrivateFontCollection* pc = nullptr;
     if (!pc) {
         pc = new Gdiplus::PrivateFontCollection();
-        for (int id : { 201, 202 }) {
-            HRSRC hs = FindResourceW(g.hinst, MAKEINTRESOURCEW(id), (LPCWSTR)RT_RCDATA);
-            HGLOBAL hg = hs ? LoadResource(g.hinst, hs) : nullptr;
-            const void* data = hg ? LockResource(hg) : nullptr;
-            DWORD len = hs ? SizeofResource(g.hinst, hs) : 0;
-            if (data && len) pc->AddMemoryFont(const_cast<void*>(data), len);
-        }
+        HRSRC hs = FindResourceW(g.hinst, MAKEINTRESOURCEW(202), (LPCWSTR)RT_RCDATA);
+        HGLOBAL hg = hs ? LoadResource(g.hinst, hs) : nullptr;
+        const void* data = hg ? LockResource(hg) : nullptr;
+        DWORD len = hs ? SizeofResource(g.hinst, hs) : 0;
+        if (data && len) pc->AddMemoryFont(data, len);   // KillerSansUI-sub.ttf
     }
     return pc;
 }
@@ -6486,7 +6485,7 @@ static Gdiplus::PrivateFontCollection* TabFaces() {
 static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
     Gdiplus::PrivateFontCollection* pc = TabFaces();
     INT n = pc->GetFamilyCount();
-    if (!n) {                                       // no faces: the GDI fallback above
+    if (!n) {                                       // no face: the GDI fallback below
         SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c);
         HFONT f = TabFont();
         HGDIOBJ of = SelectObject(dc, f);
@@ -6495,18 +6494,12 @@ static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
         SelectObject(dc, of);
         return;
     }
-    std::vector<Gdiplus::FontFamily> fams(n);
-    INT got = 0; pc->GetFamilies(n, fams.data(), &got);
-    const Gdiplus::FontFamily* ui = nullptr;
-    for (INT i = 0; i < got; i++) {
-        wchar_t nm[64]; fams[i].GetFamilyName(nm);
-        if (!lstrcmpW(nm, L"Killer Sans UI")) { ui = &fams[i]; break; }
-    }
-    if (!ui && got > 0) ui = &fams[0];
-    if (!ui) return;
+    Gdiplus::FontFamily fam;                        // the collection's only family
+    INT got = 0; pc->GetFamilies(1, &fam, &got);
+    if (!got) return;
     Gdiplus::Graphics gs(dc);
     gs.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    Gdiplus::Font f(ui, (float)(12 * g.dpi), Gdiplus::UnitPixel);   // TabTitleFontSize 12 at the DPI
+    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::UnitPixel);   // TabTitleFontSize 12 at the DPI
     Gdiplus::SolidBrush br(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
     Gdiplus::RectF rf((float)r.left, (float)r.top, (float)(r.right - r.left), (float)(r.bottom - r.top));
     Gdiplus::StringFormat sf;
