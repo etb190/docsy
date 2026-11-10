@@ -6465,13 +6465,12 @@ static HFONT TabFont() {                 // the GDI emergency face: TabTitleFont
 // The tab label, drawn with GDI+ so the face renders like KillerPDF's WPF text:
 // GDI's rasterizer grid-snaps the bundled subsets' unhinted 12px stems into fat
 // blur, which the reader read as broken. The collection carries the UI face
-// ALONE (a shared collection pairs it with the slanted brand face); the Font
-// pins every argument - unit UnitWorld (0) and style FontStyleRegular (0), both
-// zero, so whichever order this SDK's ctor declares the pair in, the em lands
-// at 12*dpi world units = pixels and the style stays Regular. The two builds
-// that passed UnitPixel as the third argument rendered exactly what that value
-// means as a style: FontStyleItalic - a synthetic oblique at Point-scaled size
-// - on a face whose outlines and metadata are perfectly upright.
+// ALONE (a shared collection pairs it with the slanted brand face). The Font's
+// argument order is the SDK header's own, not the docs': Font(family, emSize,
+// STYLE, UNIT) - builds 97/98 passed UnitPixel(2) as the third argument and the
+// rasterizer obeyed it as FontStyleItalic, shearing a perfectly upright face
+// into a synthetic oblique at the Point default's 16px. Style and unit are now
+// named explicitly and in the header's order: Regular, pixel-sized at 12*dpi.
 static Gdiplus::PrivateFontCollection* TabFaces() {
     static Gdiplus::PrivateFontCollection* pc = nullptr;
     if (!pc) {
@@ -6489,7 +6488,7 @@ static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
     Gdiplus::PrivateFontCollection* pc = TabFaces();
     Gdiplus::FontFamily fam;                        // the collection's only family
     INT got = 0; pc->GetFamilies(1, &fam, &got);
-    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::UnitWorld, Gdiplus::FontStyleRegular);
+    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     if (!got || fam.GetLastStatus() != Gdiplus::Ok || f.GetLastStatus() != Gdiplus::Ok) {
         SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c);   // no face: GDI's Segoe UI
         HFONT gf = TabFont();
