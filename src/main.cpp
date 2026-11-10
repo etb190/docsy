@@ -227,9 +227,51 @@ struct DocState {
     // the page's own DIP space, so annotations rotate with it):
     std::unordered_map<int, int> prot;  // quarter-turns CW the cache bakes (0-3)
     std::unordered_map<int, BYTE> pflip; // the Transform's flips: bit1 H, bit2 V
+    // the saved checkpoint (KillerPDF's CaptureSavedCheckpoint): the state a
+    // save would write - the annotations plus the page transforms - copied at
+    // open and after each successful save. Dirtiness is a compare against it
+    // (DocDirty below), not an event flag, so no mutation site can be
+    // forgotten and Undo back to the checkpoint reads clean again.
+    std::unordered_map<int, std::vector<Annot>> savedAnnos;
+    std::unordered_map<int, int> savedProt;
+    std::unordered_map<int, BYTE> savedPflip;
 };
 enum { TOOL_SELECT, TOOL_TEXT, TOOL_HIGHLIGHT, TOOL_LINE, TOOL_SHAPE, TOOL_DRAW,
        TOOL_COUNT };
+
+// ---- dirty tracking (KillerPDF's saved checkpoint, snapshot-based) ----
+// The saved PDF is the pages' renders (the document plus its transforms) with
+// the annotations composited, so "clean" is exactly annos + prot + pflip
+// matching the checkpoint. AnnotEq walks every field a save burns.
+static void SnapClean(DocState& D) {
+    D.savedAnnos = D.annos;
+    D.savedProt = D.prot;
+    D.savedPflip = D.pflip;
+}
+static bool AnnotEq(const Annot& a, const Annot& b) {
+    return a.type == b.type && a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h
+        && a.lines == b.lines && a.ix == b.ix && a.iy == b.iy
+        && a.width == b.width && a.fsize == b.fsize && a.color == b.color
+        && a.alpha == b.alpha && a.text == b.text && a.fill == b.fill
+        && a.fillA == b.fillA && a.font == b.font && a.bold == b.bold
+        && a.italic == b.italic && a.strike == b.strike && a.under == b.under
+        && a.spacing == b.spacing;
+}
+static bool AnnosDirty(const std::unordered_map<int, std::vector<Annot>>& s,
+                       const std::unordered_map<int, std::vector<Annot>>& c) {
+    if (s.size() != c.size()) return true;
+    for (const auto& kv : c) {
+        auto it = s.find(kv.first);
+        if (it == s.end() || it->second.size() != kv.second.size()) return true;
+        for (size_t i = 0; i < kv.second.size(); i++)
+            if (!AnnotEq(kv.second[i], it->second[i])) return true;
+    }
+    return false;
+}
+static bool DocDirty(const DocState& D) {   // any byte the next save would write differently?
+    return D.n && (AnnosDirty(D.savedAnnos, D.annos) || D.savedProt != D.prot
+                   || D.savedPflip != D.pflip);
+}
 
 struct App {
     HWND main = nullptr, view = nullptr, side = nullptr, status = nullptr;
@@ -494,6 +536,8 @@ static void CommitTextEdit(bool commit = true, bool restore = false);   // the T
 static void NewBlank();                 // Ctrl+N: a blank document into the focused pane
 static void CloseDoc();                 // the Close button: the focused pane's document leaves
 static void SaveDoc(bool saveAs);       // the Save button + Ctrl+S / Ctrl+Shift+S
+static int AskPrompt3(const wchar_t* qualifier, const wchar_t* msg,    // KillerDialog's themed
+                      const wchar_t* b0, const wchar_t* b1, const wchar_t* b2);   // question box
 static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err);
 // ---- edit tools, the bar and its popups (defined with their sections) ----
 static void UndoPush(bool b);           // snapshot the pane's annotations + marks before a change
@@ -2200,6 +2244,7 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
                                      // open path restores the toolbar
         g.annSelPage = -1; g.annSelIdx = -1;   // and the Select tool's ring has nothing to hold
         SelClear(D);
+        SnapClean(D);                          // a fresh open IS the saved checkpoint
         bool mine = fd.pane == (&D == &g.dB);        // the find dies only when ITS document
         if (mine && fd.open) {                       // dies; the other pane's scan keeps going
             if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
@@ -2288,11 +2333,24 @@ static void CloseDoc() {
     DocState& D = DVF();
     if (!D.n) return;
     if (g.tedit) CommitTextEdit();
+    if (DocDirty(D)) {                         // KillerPDF's tab close asks first
+        int r = AskPrompt3(L"", L"This file has unsaved changes. Save them before closing it?",
+                           L"Cancel", L"Don't Save", L"Save");
+        if (r == 0) return;                    // Cancel: the document stays open
+        if (r == 2) {                          // Save: a failed write keeps it open too
+            std::wstring err;
+            if (!WriteAnnotatedPdf(D, D.path, err)) {
+                SetStatusHold(std::wstring(L"Save failed: ") + err);
+                return;
+            }
+        }
+    }
     ClearCache(D);
     D.doc = nullptr; D.n = 0; D.pw.clear(); D.ph.clear();
     D.name.clear(); D.path.clear();
     D.sx = D.sy = 0; D.zoom = 1.0; D.fitMode = 2; D.cur = -1;
     D.txt.clear(); D.annos.clear(); D.prot.clear(); D.pflip.clear();
+    D.savedAnnos.clear(); D.savedProt.clear(); D.savedPflip.clear();   // the checkpoint dies with the document
     D.tool = TOOL_SELECT;
     g.annSelPage = -1; g.annSelIdx = -1;
     SelClear(D);
@@ -2447,9 +2505,13 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
     return true;
 }
 
-// Save_Click: no document -> "Open a file first"; a real path -> the same
-// Yes/No/Cancel overwrite confirm (Yes saves in place, No falls to Save As);
-// Save As (Ctrl+Shift+S or the chevron) always asks, and adopts the new path.
+// Save_Click: no document -> "Open a file first"; a real path -> KillerPDF's
+// save prompt, but only over CHANGES - a document matching its checkpoint has
+// nothing to replace, so Ctrl+S stays quiet ("No changes to save"). The
+// prompt is the themed KillerDialog box, "Replace {name}?" answered with
+// Overwrite (saves in place), Save As (the file dialog, then the new path is
+// adopted) or Cancel; Save As (Ctrl+Shift+S or the chevron) always asks and
+// always writes - export semantics, no dirty gate.
 static void SaveDoc(bool saveAs) {
     DocState& D = DVF();
     if (!D.n) { SetStatusHold(L"Open a file first"); return; }
@@ -2466,15 +2528,17 @@ static void SaveDoc(bool saveAs) {
         if (!GetSaveFileNameW(&o)) { SetStatusHold(L"Save canceled (no file written)"); return; }
         file = buf;
     } else {
-        int choice = MessageBoxW(g.main, (std::wstring(L"Overwrite ") + D.name + L"?").c_str(),
-                                 L"Save", MB_YESNOCANCEL | MB_ICONQUESTION);
-        if (choice == IDCANCEL) { SetStatusHold(L"Save canceled"); return; }
-        if (choice == IDNO) { SaveDoc(true); return; }
+        if (!DocDirty(D)) { SetStatusHold(L"No changes to save"); return; }
+        int r = AskPrompt3(L" - Save", (std::wstring(L"Replace ") + D.name + L"?").c_str(),
+                           L"Cancel", L"Save As", L"Overwrite");
+        if (r == 1) { SaveDoc(true); return; }          // Save As asks for the new path
+        if (r != 2) { SetStatusHold(L"Save canceled"); return; }   // Cancel or dismissed
     }
     std::wstring err;
     if (!WriteAnnotatedPdf(D, file, err)) { SetStatusHold(std::wstring(L"Save failed: ") + err); return; }
-    if (file != D.path) {                          // Save As adopts its file (KillerPDF's
-        D.path = file;                             // SaveAsWithName lands the doc on it)
+    SnapClean(D);                                // this state is now the checkpoint
+    if (file != D.path) {                        // Save As adopts its file (KillerPDF's
+        D.path = file;                           // SaveAsWithName lands the doc on it)
         size_t sl = file.find_last_of(L"\\/");
         D.name = sl == std::wstring::npos ? file : file.substr(sl + 1);
         UpdateTitle();
@@ -8918,6 +8982,308 @@ static LRESULT CALLBACK InfoDlgProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, m, wp, lp);
 }
 
+// ---------------- the save prompts (KillerDialog's themed question box) ----------------
+// KillerPDF never asks with a MessageBox: KillerDialog.Show is the app's own
+// chrome at 390 DIP - the family caption (wordmark, qualifier, close glyph),
+// the notice body (a 28px amber "!" ring in a 38px column beside the wrapped
+// 13px message, margins 24/18) and the button row right-aligned with 8px gaps
+// ("the way out first and the action last, at the right edge", 28px tall,
+// >=80 wide, the accent hollow at rest and filled on hover, Enter on the
+// accent, Esc on Cancel). Docsy's Document Info dialog already carries this
+// chrome; the prompts are the same paint with three buttons:
+//  * the Save click over changes - KillerPDF's Str_Dlg_OverwriteMsg
+//    "Replace {name}?" answered Cancel | Save As | Overwrite, and
+//  * the close prompts - Str_Dlg_UnsavedClose / Str_Dlg_UnsavedExit answered
+//    Cancel | Don't Save | Save.
+// Every caller gates on DocDirty: the prompt only exists over changes.
+struct AskDlg {
+    std::wstring qualifier;              // caption text after the wordmark
+    std::wstring message;
+    std::wstring btn[3];                 // visual order, left to right
+    int bw[3] = {};                      // button widths: the label's own + 24, >=80
+    int def = 2;                         // Enter's target = the accent, rightmost
+    int result = -1;                     // -1 = dismissed (Esc / X / click-away)
+    int hot = -1;                        // hovered: 0-2 buttons, 3 the caption close
+    int msgH = 0;                        // the wrapped message's height, DIP pixels
+};
+static AskDlg g_ask;
+static HWND g_askDlg = nullptr;
+static bool g_askShots = false;          // the CI shot composites the same paint
+
+static HFONT g_askCap = nullptr, g_askMsg = nullptr, g_askBtn = nullptr, g_askBang = nullptr;
+static HFONT AskCapFont()  { return CaptionFont(g_askCap, 14, false, L"Killer Sans"); }
+static HFONT AskMsgFont()  { return CaptionFont(g_askMsg, 13, false, L"Killer Sans UI"); }
+static HFONT AskBtnFont()  { return CaptionFont(g_askBtn, 12, false, L"Killer Sans UI"); }
+static HFONT AskBangFont() { return CaptionFont(g_askBang, 16, true, L"Killer Sans"); }
+
+static int AskW() { return (int)(390 * g.dpi); }      // KillerDialog's Width=390
+static int AskCapH() { return (int)(32 * g.dpi); }    // the family caption bar
+// NoticeBody's grid: Margin 24,18,24,18, a 38px icon column, the 28px ring.
+// The button row: Padding 16,0,24,20, buttons 28 tall with 8px gaps.
+static int AskMsgTop() { return AskCapH() + (int)(18 * g.dpi); }
+static int AskMsgW(int w) { return w - (int)(86 * g.dpi); }   // 24 margin + 38 column + 24
+static int AskContentH() { return max((int)(28 * g.dpi), g_ask.msgH + (int)(5 * g.dpi)); }
+static int AskH() {
+    return AskCapH() + (int)(18 * g.dpi) + AskContentH() + (int)(18 * g.dpi)
+         + (int)(28 * g.dpi) + (int)(20 * g.dpi);
+}
+
+// Button i's rect: the row walks in from the right edge, 8px between buttons.
+static RECT AskBtnRect(int i, int w, int h) {
+    int bh = (int)(28 * g.dpi), gap = (int)(8 * g.dpi);
+    int x = w - (int)(24 * g.dpi), bottom = h - (int)(20 * g.dpi);
+    for (int k = 2; k >= 0; k--) {
+        if (k == i) return { x - g_ask.bw[k], bottom - bh, x, bottom };
+        x -= g_ask.bw[k] + gap;
+    }
+    return { 0, 0, 0, 0 };
+}
+
+// the wrapped message's height and the three widths, measured once per ask
+static void AskMeasure() {
+    if (!g.main) return;
+    HDC dc = GetDC(g.main);
+    HFONT of = (HFONT)SelectObject(dc, AskMsgFont());
+    RECT mr{ 0, 0, AskMsgW(AskW()), 1 << 15 };
+    DrawTextW(dc, g_ask.message.c_str(), -1, &mr, DT_LEFT | DT_WORDBREAK | DT_CALCRECT | DT_NOPREFIX);
+    g_ask.msgH = mr.bottom - mr.top;
+    SelectObject(dc, AskBtnFont());
+    for (int k = 0; k < 3; k++) {
+        SIZE ts{};
+        GetTextExtentPoint32W(dc, g_ask.btn[k].c_str(), (int)g_ask.btn[k].size(), &ts);
+        g_ask.bw[k] = max((int)(80 * g.dpi), ts.cx + (int)(24 * g.dpi));
+    }
+    SelectObject(dc, of);
+    ReleaseDC(g.main, dc);
+}
+
+static HDC g_akdc = nullptr; static HBITMAP g_akbm = nullptr, g_akold = nullptr;
+static int g_akw = 0, g_akh = 0;
+static void EnsureAskBack(HDC ref, int w, int h) {   // the Info dialog's buffered present:
+    if (g_akbm && g_akw == w && g_akh == h) return;  // a hover flip reblits an identical
+    if (g_akbm) { SelectObject(g_akdc, g_akold); DeleteObject(g_akbm); }
+    else g_akdc = CreateCompatibleDC(ref);
+    g_akbm = CreateCompatibleBitmap(ref, w, h);
+    g_akold = (HBITMAP)SelectObject(g_akdc, g_akbm);
+    g_akw = w; g_akh = h;
+}
+
+// One paint, two hosts: the live dialog's WM_PAINT and the CI shot composite.
+static void AskDialogDraw(HDC dc, int w, int h) {
+    int capH = AskCapH();
+    // the caption row: the family bar - the wordmark, the qualifier, the
+    // red-hovered close; the whole bar drags the window (WM_NCHITTEST below)
+    RECT cr{ 0, 0, w, capH };
+    FillRect(dc, &cr, GrainBrush(2));
+    SetBkMode(dc, TRANSPARENT);
+    SelectObject(dc, AskCapFont());
+    RECT tr{ (int)(12 * g.dpi), 0, w - (int)(44 * g.dpi), capH };
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, L"Docsy", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SIZE ts{};
+    GetTextExtentPoint32W(dc, L"Docsy", 5, &ts);
+    RECT qr{ tr.left + ts.cx + (int)(4 * g.dpi), tr.top, tr.right, tr.bottom };
+    SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+    DrawTextW(dc, g_ask.qualifier.c_str(), -1, &qr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    int bs = (int)(44 * g.dpi);
+    RECT xr{ w - bs, 0, w, capH };
+    if (g_ask.hot == 3) { RECT hr{ xr.left, 0, xr.right, capH }; FillRect(dc, &hr, RowHoverBrush()); }
+    SelectObject(dc, StGlyph());
+    SetTextColor(dc, g_ask.hot == 3 ? RGB(0xff, 0x67, 0x67) : RGB(0xa3, 0xa3, 0xa3));
+    DrawTextW(dc, L"\xE8BB", -1, &xr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // the body: the shared grain, the amber ring, the message beside it
+    RECT body{ 0, capH, w, h };
+    FillRect(dc, &body, GrainBrush(1));
+    SetBkMode(dc, TRANSPARENT);
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    int top = AskMsgTop();
+    // the 28px ring, top-aligned in the 38px column - KillerDialog's Notice
+    // Border, its amber darkening for the light theme never leaving dark here
+    float inset = max(1.0f, (float)g.dpi);           // the 2px pen eats inward, keep the box
+    Gdiplus::Pen ring(Gdiplus::Color(255, 0xff, 0xbe, 0x50), 2.0f * (float)g.dpi);
+    gs.DrawEllipse(&ring, (float)(24 * g.dpi) + inset, (float)top + inset,
+                   (float)(28 * g.dpi) - 2 * inset, (float)(28 * g.dpi) - 2 * inset);
+    RECT bang{ (int)(24 * g.dpi), top, (int)(24 * g.dpi) + (int)(28 * g.dpi), top + (int)(28 * g.dpi) };
+    SelectObject(dc, AskBangFont());
+    SetTextColor(dc, RGB(0xff, 0xbe, 0x50));
+    DrawTextW(dc, L"!", -1, &bang, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // the message: column 1, its own 5px top margin, wrapping in 304 DIP
+    RECT mr{ (int)(62 * g.dpi), top + (int)(5 * g.dpi), w - (int)(24 * g.dpi),
+             top + (int)(5 * g.dpi) + max(g_ask.msgH, 1) };
+    SelectObject(dc, AskMsgFont());
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, g_ask.message.c_str(), -1, &mr, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+    // the three buttons: the way out first, the accent last, at the right edge
+    auto boxPath = [&](const RECT& rc) {
+        float r2 = (float)(4 * g.dpi);
+        float x1 = (float)rc.left, y1 = (float)rc.top;
+        float fw = (float)(rc.right - rc.left), fh = (float)(rc.bottom - rc.top);
+        Gdiplus::GraphicsPath* pth = new Gdiplus::GraphicsPath();
+        pth->AddArc(x1, y1, 2 * r2, 2 * r2, 180, 90);
+        pth->AddArc(x1 + fw - 2 * r2, y1, 2 * r2, 2 * r2, 270, 90);
+        pth->AddArc(x1 + fw - 2 * r2, y1 + fh - 2 * r2, 2 * r2, 2 * r2, 0, 90);
+        pth->AddArc(x1, y1 + fh - 2 * r2, 2 * r2, 2 * r2, 90, 90);
+        pth->CloseFigure();
+        return pth;
+    };
+    for (int k = 0; k < 3; k++) {
+        RECT br = AskBtnRect(k, w, h);
+        bool accent = k == g_ask.def, hot = g_ask.hot == k;
+        Gdiplus::GraphicsPath* pth = boxPath(br);
+        if (accent && hot) {
+            Gdiplus::SolidBrush gb(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+            gs.FillPath(&gb, pth);
+        } else if (accent) {
+            Gdiplus::Pen pb(Gdiplus::Color(255, 0x22, 0xbb, 0x56), (float)max(1.0, g.dpi));
+            gs.DrawPath(&pb, pth);
+        } else if (hot) {
+            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            gs.FillPath(&hb, pth);
+            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            gs.DrawPath(&pb, pth);
+        } else {
+            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            gs.DrawPath(&pb, pth);
+        }
+        delete pth;
+        SetTextColor(dc, accent ? (hot ? RGB(0x05, 0x24, 0x0f) : RGB(0x22, 0xbb, 0x56))
+                                : RGB(0xe0, 0xe0, 0xe0));
+        SelectObject(dc, AskBtnFont());
+        DrawTextW(dc, g_ask.btn[k].c_str(), -1, &br, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+}
+
+static void AskClose(int r) {
+    if (!g_askDlg) return;
+    g_ask.result = r;
+    HWND d = g_askDlg;
+    g_askDlg = nullptr;
+    DestroyWindow(d);
+    RailRepaint();
+    if (g.main) SetFocus(g.main);            // the keys go home with the dialog gone
+}
+
+static LRESULT CALLBACK AskDlgProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureAskBack(dc, r.right, r.bottom);
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+            SetBrushOrgEx(g_akdc, -po.x, -po.y, nullptr);   // the grain phases to the window,
+            AskDialogDraw(g_akdc, r.right, r.bottom);       // one blit per hover flip
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_akdc, 0, 0, SRCCOPY);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ACTIVATE:
+        // the popup contract (the Info dialog's): a click anywhere outside -
+        // the main window, another app, the taskbar - answers Cancel
+        if (LOWORD(wp) == WA_INACTIVE && g_askDlg == h) AskClose(-1);
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { AskClose(-1); return 0; }          // IsCancel
+        if (wp == VK_RETURN) { AskClose(g_ask.def); return 0; }   // IsDefault = the accent
+        return 0;
+    case WM_NCHITTEST: {
+        // the caption DRAGS the window (DialogFrame's DragMove); the close
+        // zone stays client so its click is ours
+        POINT s{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        POINT c = s; ScreenToClient(h, &c);
+        RECT r; GetClientRect(h, &r);
+        if (c.y >= 0 && c.y < AskCapH() && c.x < r.right - (int)(44 * g.dpi)) return HTCAPTION;
+        break;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT r; GetClientRect(h, &r);
+        int hot = -1;
+        for (int k = 0; k < 3; k++) {
+            RECT br = AskBtnRect(k, r.right, r.bottom);
+            if (PtInRect(&br, p)) { hot = k; break; }
+        }
+        if (hot < 0 && p.y < AskCapH() && p.x >= r.right - (int)(44 * g.dpi)) hot = 3;
+        if (hot != g_ask.hot) {
+            g_ask.hot = hot;
+            if (hot >= 0) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g_ask.hot >= 0) { g_ask.hot = -1; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONUP: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT r; GetClientRect(h, &r);
+        for (int k = 0; k < 3; k++) {
+            RECT br = AskBtnRect(k, r.right, r.bottom);
+            if (PtInRect(&br, p) && g_ask.hot == k) { AskClose(k); return 0; }
+        }
+        if (p.y < AskCapH() && p.x >= r.right - (int)(44 * g.dpi) && g_ask.hot == 3) AskClose(-1);
+        return 0;
+    }
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            RECT r; GetClientRect(h, &r);
+            bool over = false;
+            for (int k = 0; k < 3 && !over; k++) {
+                RECT br = AskBtnRect(k, r.right, r.bottom);
+                over = PtInRect(&br, p) != FALSE;
+            }
+            if (over || (p.y < AskCapH() && p.x >= r.right - (int)(44 * g.dpi))) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE;
+            }
+            if (p.y < AskCapH()) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+        }
+        break;
+    case WM_CLOSE:
+        AskClose(-1);
+        return 0;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+
+// The ask itself: seed the state, open the owned popup centered on the main
+// window and pump until it answers - the caller's flow stays linear, exactly
+// like KillerDialog's ShowDialog. Returns the button's index (0 leftmost, 2
+// the accent) or -1 for a dismissal, which every caller reads as Cancel.
+static int AskPrompt3(const wchar_t* qualifier, const wchar_t* msg,
+                      const wchar_t* b0, const wchar_t* b1, const wchar_t* b2) {
+    static bool inFlight = false;            // a close click landing mid-ask reads Cancel
+    if (!g.main || inFlight) return -1;
+    inFlight = true;
+    g_ask = AskDlg{};
+    g_ask.qualifier = qualifier;
+    g_ask.message = msg;
+    g_ask.btn[0] = b0; g_ask.btn[1] = b1; g_ask.btn[2] = b2;
+    g_ask.def = 2;
+    AskMeasure();
+    int w = AskW(), h = AskH();
+    RECT mr{}; GetWindowRect(g.main, &mr);
+    int x = mr.left + max(0, (int)((mr.right - mr.left) - w) / 2);
+    int y = mr.top + max(0, (int)((mr.bottom - mr.top) - h) / 2);
+    g_askDlg = CreateWindowExW(0, L"DocsyAskDlg", nullptr, WS_POPUP, x, y, w, h,
+                               g.main, nullptr, g.hinst, nullptr);
+    if (!g_askDlg) { inFlight = false; return -1; }
+    DwmApply(g_askDlg);
+    ShowWindow(g_askDlg, SW_SHOWNORMAL);
+    SetFocus(g_askDlg);
+    RailRepaint();
+    MSG m2;
+    while (g_askDlg && GetMessageW(&m2, nullptr, 0, 0) > 0) {   // the modal pump: eat
+        TranslateMessage(&m2);                                 // messages until the
+        DispatchMessageW(&m2);                                 // dialog answers itself
+    }
+    inFlight = false;
+    return g_ask.result;
+}
+
 // ---------------- main window ----------------
 
 static void LayoutMain() {
@@ -9234,6 +9600,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_fntAb) { DeleteObject(g_fntAb); g_fntAb = nullptr; }
         if (g_fntStat) { DeleteObject(g_fntStat); g_fntStat = nullptr; }
         if (g_fntGlyph) { DeleteObject(g_fntGlyph); g_fntGlyph = nullptr; }
+        if (g_askCap) { DeleteObject(g_askCap); g_askCap = nullptr; }   // the ask dialog's four
+        if (g_askMsg) { DeleteObject(g_askMsg); g_askMsg = nullptr; }   // faces re-land at the
+        if (g_askBtn) { DeleteObject(g_askBtn); g_askBtn = nullptr; }   // new scale on next use
+        if (g_askBang) { DeleteObject(g_askBang); g_askBang = nullptr; }
         if (g_fedit) SendMessageW(g_fedit, WM_SETFONT, (WPARAM)FdFontEdit(), TRUE);
         for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
         sd.th.clear(); sd.tw = 0;
@@ -9409,6 +9779,31 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;                                 // (buffered, so an unchanged band reblits
                                                // identically and cannot strobe)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
+    case WM_CLOSE: {
+        // KillerPDF's quit prompt (Str_Dlg_UnsavedExit through KillerDialog.
+        // AskToSave): unsaved work asks before the window dies. Save writes
+        // every dirty pane in place - a failed write keeps the window up.
+        if (g.tedit) CommitTextEdit();
+        bool aDirty = DocDirty(g.d), bDirty = DocDirty(g.dB);
+        if (!aDirty && !bDirty) { DestroyWindow(h); return 0; }
+        int r = AskPrompt3(L"", L"You have unsaved changes. Save them before closing Docsy?",
+                           L"Cancel", L"Don't Save", L"Save");
+        if (r == 2) {
+            std::wstring err;
+            if (aDirty && !WriteAnnotatedPdf(g.d, g.d.path, err)) {
+                SetStatusHold(std::wstring(L"Save failed: ") + err);
+                return 0;                      // a failed save is not a closed window
+            }
+            SnapClean(g.d);
+            if (bDirty && !WriteAnnotatedPdf(g.dB, g.dB.path, err)) {
+                SetStatusHold(std::wstring(L"Save failed: ") + err);
+                return 0;
+            }
+            SnapClean(g.dB);
+        }
+        if (r == 2 || r == 1) DestroyWindow(h);   // Save / Don't Save close; Cancel stays
+        return 0;
+    }
     case WM_DESTROY: PostQuitMessage(0); return 0;
     }
     return DefWindowProcW(h, m, wp, lp);
@@ -9570,6 +9965,16 @@ static int Shot(const wchar_t* out, int w, int h) {
         BitBlt(dc, max(0, (w - IdW()) / 2), max(cap, (h - IdH()) / 2), IdW(), IdH(), m6, 0, 0, SRCCOPY);
         SelectObject(m6, o6); DeleteObject(b6); DeleteDC(m6);
     }
+    if (g_askShots) {                                   // the save prompt composites the
+        HDC m7 = CreateCompatibleDC(dc);                // same paint the live window runs
+        HBITMAP b7 = CreateCompatibleBitmap(dc, AskW(), AskH());
+        HGDIOBJ o7 = SelectObject(m7, b7);
+        SetBrushOrgEx(m7, 0, 0, nullptr);
+        g_grainPX = 0; g_grainPY = 0;
+        AskDialogDraw(m7, AskW(), AskH());
+        BitBlt(dc, max(0, (w - AskW()) / 2), max(cap, (h - AskH()) / 2), AskW(), AskH(), m7, 0, 0, SRCCOPY);
+        SelectObject(m7, o7); DeleteObject(b7); DeleteDC(m7);
+    }
     if (!g.full && sh > 0) {                   // the footer strip
         HDC m3 = CreateCompatibleDC(dc);
         HBITMAP b3 = CreateCompatibleBitmap(dc, w, sh);
@@ -9671,6 +10076,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     ic.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     ic.lpszClassName = L"DocsyInfoDlg";
     RegisterClassExW(&ic);
+
+    WNDCLASSEXW qc{ sizeof qc };                    // the save/quit prompt (KillerDialog)
+    qc.lpfnWndProc = AskDlgProc; qc.hInstance = hi;
+    qc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    qc.lpszClassName = L"DocsyAskDlg";
+    RegisterClassExW(&qc);
 
     WNDCLASSEXW zc{ sizeof zc };                    // the zoom dropdown popup
     zc.style = CS_SAVEBITS | CS_DROPSHADOW;         // menu-like: saved bits + a soft shadow
@@ -9854,6 +10265,23 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 DocState& D = DVF();
                 if (D.n && !WriteAnnotatedPdf(D, argv[a] + 5, saveErr))
                     OutputDebugStringW((L"save seed: " + saveErr + L"\n").c_str());
+            }
+        // CI preview seed 10: ask=save composites the save prompt's paint -
+        // KillerDialog's chrome with the amber "!" ring, the Replace message
+        // and the three-button row - over the view, the same AskDialogDraw the
+        // live window runs. annot=demo before it gives the shot a dirty
+        // document, the only state the prompt exists in.
+        for (int a = 3; a < argc; a++)
+            if (!wcscmp(argv[a], L"ask=save")) {
+                DocState& D = DVF();
+                g_ask = AskDlg{};
+                g_ask.qualifier = L" - Save";
+                g_ask.message = std::wstring(L"Replace ")
+                              + (D.n ? D.name : std::wstring(L"sample.pdf")) + L"?";
+                g_ask.btn[0] = L"Cancel"; g_ask.btn[1] = L"Save As"; g_ask.btn[2] = L"Overwrite";
+                g_ask.def = 2;
+                AskMeasure();
+                g_askShots = true;
             }
         GetClientRect(g.main, &c);             // the seeds may have resized (split=on grows
         for (int k = 0; k <= DVF().n; k++) if (!SidePump()) break;   // the window like the real
