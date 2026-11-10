@@ -2750,7 +2750,9 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // The text box commits on focus loss, on any view motion, or on Escape -
 // Escape discards, everything else lands as an AT_TEXT annotation carrying
 // the bar's full style (KillerPDF's BuildCommittedTextAnnotation). Empty
-// content discards, exactly like KillerPDF.
+// content discards, exactly like KillerPDF. Del inside the box rides the
+// same discard when it empties the box: the whole annotation goes with the
+// input, nothing left.
 static void CommitTextEdit(bool commit) {
     if (!g.tedit) return;                       // the default argument rides the forward
     HWND e = g.tedit;
@@ -2874,6 +2876,16 @@ static LRESULT CALLBACK TextEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     if (m == WM_KEYDOWN) {
         if (wp == VK_ESCAPE) { CommitTextEdit(false); return 0; }
+        if (wp == VK_DELETE) {      // Del that empties the box takes the whole box with
+            DWORD s0 = 0, s1 = 0;   // it - the input and the frame land nowhere, nothing
+            SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&s1);   // is left on the page
+            LRESULT last = SendMessageW(h, EM_LINEINDEX,      // the end of the text in the
+                             SendMessageW(h, EM_GETLINECOUNT, 0, 0) - 1, 0);  // same index
+            LRESULT total = last + SendMessageW(h, EM_LINELENGTH, last, 0);  // space the
+            if (total == 0 || (s0 == 0 && s1 == (DWORD)total)) {     // selection reports
+                CommitTextEdit(false); return 0;
+            }
+        }                           // a caret Del mid-text stays ordinary editing
         if (wp == VK_RETURN && (GetKeyState(VK_CONTROL) < 0)) { CommitTextEdit(); return 0; }
         if (wp == 'A' && GetKeyState(VK_CONTROL) < 0) {
             SendMessageW(h, EM_SETSEL, 0, -1); return 0;   // WPF TextBox's Ctrl+A SelectAll - a
