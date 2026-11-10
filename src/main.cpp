@@ -1113,6 +1113,9 @@ static struct {
     std::vector<int> top;                  // separate from the nav row's hover above
 } ws;
 
+static int g_wtCur = -1;                 // the focused web tab; the tab row's proc reads it
+                                         // for the press-to-switch rule, so it lives up here
+
 // (the 20px frame + four vector arrows), DrawToolbarGlyph's TransformBoxMove.
 enum { TB_CLOSE, TB_OPEN, TB_SAVE, TB_WEB,   // the file cluster; TB_WEB opens the browser
        TB_SELECT, TB_TEXT, TB_HIGHLIGHT, TB_LINE, TB_SHAPE, TB_DRAW,
@@ -9062,7 +9065,6 @@ struct WebTab {
     HBITMAP thumb = nullptr; int thumbW = 0, thumbH = 0; double ar = 0.0;
 };
 static std::vector<WebTab> g_wt;
-static int g_wtCur = -1;
 static unsigned long long g_wtIds = 1;
 static wrl::ComPtr<ICoreWebView2Environment> g_wvEnv;
 static bool g_webChecked = false, g_webAvail = false;
@@ -9184,8 +9186,11 @@ static void WebAccentPill(HDC dc, int x, int y, int w) {
     Gdiplus::Color sts[] = { Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)),
                              Gdiplus::Color(255, GetRValue(s), GetGValue(s), GetBValue(s)),
                              Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)) };
-    Gdiplus::LinearGradientBrush br(rc, sts, 3, Gdiplus::WrapModeTile,
-        Gdiplus::PointF(rc.X, rc.Y), Gdiplus::PointF(rc.X + rc.Width, rc.Y));
+    Gdiplus::LinearGradientBrush br(rc,
+        Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)),
+        Gdiplus::Color(255, GetRValue(s), GetGValue(s), GetBValue(s)),
+        Gdiplus::LinearGradientModeHorizontal);   // the wrapper has no colors-array ctor:
+    br.SetInterpolationColors(sts, 3);            // build the two-color brush, then the 3 stops
     gs.FillPath(&br, &p);
 }
 
