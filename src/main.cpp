@@ -1004,18 +1004,20 @@ static void EnsureInfoBack(HDC ref, int w, int h) {
 // own MDL2 codepoints at the runtime restyle's size (ToolbarStyle's
 // BuildToolbarContent, GlyphLarge 20) - Transform draws its composed icon
 // ============================================================
-//  The browser (build-109): a full web mode beside the PDF reader, one
-//  toolbar button toggling between the two. The engine is Windows' own
-//  WebView2 - Evergreen Chromium, preinstalled with the OS and shared with
-//  Edge, so the exe carries zero bytes of browser and only the loader glue.
-//  The module itself lives after the status bar; the toolbar row, the
-//  sidebar, the footer, the layout and the main keys all branch on the
-//  mode, so their entry points are declared here.
+//  The browser (build-110), skinned after radon-browser: a full web mode
+//  beside the PDF reader, one toolbar button toggling between the two. The
+//  engine is Windows' own WebView2 - Evergreen Chromium, preinstalled with
+//  the OS and shared with Edge, so the exe carries zero bytes of browser and
+//  only the loader glue. Radon's order holds: the nav row (back/forward, the
+//  search pill, the menu) rides the strip window on top, the Fluent tab row
+//  rides the toolbar window under it. The module itself lives after the
+//  status bar; the toolbar row, the sidebar, the footer, the layout and the
+//  main keys all branch on the mode, so their entry points are declared here.
 // ============================================================
 static bool g_webOn = false;             // the browser owns the window chrome
 static bool g_webFail = false;           // the WebView2 runtime is missing (rare)
-static HWND g_wstrip = nullptr;          // the browser's Chrome-style tab strip
-static int WEBSTRIPH() { return g_webOn ? (int)(40 * g.dpi) : 0; }   // the strip band
+static HWND g_wstrip = nullptr;          // the browser's Radon nav row (on top)
+static int WEBSTRIPH() { return g_webOn ? (int)(40 * g.dpi) : 0; }   // the nav band
 static void WebToggle(bool on);           // the Web / Reader buttons
 static bool WebBtnEnabled(int id);        // the web row's buttons arm without a document
 static void WebNewTab(std::wstring url, bool makeCurrent);
@@ -1023,15 +1025,11 @@ static void WebCloseTabAt(int i);
 static void WebSwitchTo(int i);
 static void WebGo(const std::wstring& what);
 static void WebBarLayout();               // park the omnibox edit inside its pill
-static void WebBarDraw(HDC dc, int w, int h);
-static int  WebBarHit(POINT p, int w);
+static void WebBarDraw(HDC dc, int w, int h);   // the tab row, under the nav
+static int  WebTabRowHit(POINT p, int w, int h, bool& close);   // tab, or 1000+n: the +
 static void WebBarClick(int id);
-static void WebStripPaint(HDC dc, int w, int h);
-static bool WebStripDown(HWND h, POINT p);
-static bool WebStripUp(HWND h, POINT p);
-static void WebStripHover(HWND h, POINT p);
-static void WebStripLeave(HWND h);
-static bool WebStripMid(POINT p);
+static void WebStripPaint(HDC dc, int w, int h);   // the nav row, on top
+static int  WebNavHit(POINT p);           // the nav row's buttons, strip coords
 static void WebSideLayout();              // the sidebar's web-tab thumbs
 static void WebSideSync();
 static void WebSideDraw(HDC dc, int w, int h);
@@ -1055,7 +1053,65 @@ static void WebZoomApplyItem(int i);      // popup item 0..5 -> 50%..200%
 static HBRUSH WebEditColors(HDC dc, HWND ctl);   // WM_CTLCOLOREDIT
 static void WebFailCard(HDC dc, int w, int h);   // the no-engine card in the view
 static void WebViewClick(POINT p);        // the fail card's download button
-static void WebRepaintChrome();           // strip + bar + footer + rail in one call
+static void WebRepaintChrome();           // nav + tabs + footer + rail in one call
+static void WebCardRect(RECT& c);         // the rounded card the webview rides in
+
+// Radon's own palette (radon-browser's Cube.UI dark theme): one Mica sheet
+// under the nav row and the tab row, the #282828 search pill, the #1c1c1c
+// content card, and Fluent's hover/pressed layers on top of the sheet. It
+// lives here, before the reader's own windows, because the view's paint now
+// draws the content card's face and ring in these colors too.
+namespace wvb {
+constexpr COLORREF StripBg  = RGB(0x20, 0x20, 0x20);   // MicaBrush: the whole top sheet
+constexpr COLORREF Toolbar  = RGB(0x20, 0x20, 0x20);   // the tab row: the same sheet
+constexpr COLORREF Card     = RGB(0x1c, 0x1c, 0x1c);   // FABrush: the content card face
+constexpr COLORREF Omnibox  = RGB(0x28, 0x28, 0x28);   // SearchBrush: the pill
+constexpr COLORREF Hover    = RGB(0x33, 0x33, 0x33);   // Fluent's hover layer on the sheet
+constexpr COLORREF Pressed  = RGB(0x3d, 0x3d, 0x3d);
+constexpr COLORREF TabHover = RGB(0x33, 0x33, 0x33);   // an inactive tab's hover tile
+constexpr COLORREF Ink      = RGB(0xff, 0xff, 0xff);   // icons + active title
+constexpr COLORREF InkDim   = RGB(0x9a, 0x9a, 0x9a);   // padlock, globe, placeholder
+constexpr COLORREF InkOff   = RGB(0x61, 0x61, 0x61);   // disabled arrows
+constexpr COLORREF Inactive = RGB(0xc8, 0xc8, 0xc8);   // inactive tab titles
+constexpr COLORREF Sep      = RGB(0x34, 0x34, 0x34);   // the tabs' 1px separators
+constexpr COLORREF Border   = RGB(0x4a, 0x4a, 0x4a);   // MicaBorderBrush: the card's ring
+}
+
+// Radon paints its tab pill and focus underline with the user's own accent
+// (SystemAccentColorLight*), so docsy reads the DWM colorization - the same
+// accent the Settings app shows - once, and leans on it. advapi32 is already
+// linked; no new dependency, and the default is Radon's blue on any machine
+// where the value is absent.
+static COLORREF WvAccent() {
+    static COLORREF a = []() -> COLORREF {
+        DWORD v = 0, sz = sizeof v;
+        if (SUCCEEDED(RegGetValueW(HKEY_CURRENT_USER,
+                                   L"Software\\Microsoft\\Windows\\DWM",
+                                   L"ColorizationColor", RRF_RT_REG_DWORD,
+                                   nullptr, &v, &sz)) && sz == sizeof v) {
+            int r = (int)(v & 0xff), g = (int)((v >> 8) & 0xff), b = (int)((v >> 16) & 0xff);
+            return RGB(r, g, b);                       // the value is ABGR
+        }
+        return RGB(0x4c, 0xc2, 0xff);                  // Radon's blue when all else fails
+    }();
+    return a;
+}
+static COLORREF WvAccentSoft() {                       // the gradient's middle stop: the
+    COLORREF c = WvAccent();                           // accent leaned a fifth toward white
+    auto L = [](int x) { return x + (255 - x) / 5; };
+    return RGB(L(GetRValue(c)), L(GetGValue(c)), L(GetBValue(c)));
+}
+
+// the sidebar's web state - the same fields sd carries, pointed at the tabs.
+// It lives here, before the toolbar's proc, because the tab row (which the
+// toolbar window becomes in browser mode) keeps its hover in ws.sHot - the
+// nav row above owns g.tbTabHot, so the two rows never collide.
+static struct {
+    int cw = 0, ch = 0, tw = 0, docH = 0, scroll = 0, cur = -1, hover = -1;
+    int hit = -1, moved = 0; POINT dp{}; bool barDrag = false, barHot = false, barGrab = 0;
+    int sHot = -1;                         // the TAB ROW's hover (tab index or 1000+n for +)
+    std::vector<int> top;                  // separate from the nav row's hover above
+} ws;
 
 // (the 20px frame + four vector arrows), DrawToolbarGlyph's TransformBoxMove.
 enum { TB_CLOSE, TB_OPEN, TB_SAVE, TB_WEB,   // the file cluster; TB_WEB opens the browser
@@ -1146,7 +1202,11 @@ static void TbRects(int w, RECT out[TB_COUNT]) {
 }
 
 static int BarHit(POINT p, int w) {
-    if (g_webOn) return WebBarHit(p, w);   // the browser row has its own buttons
+    if (g_webOn) {                         // browser mode: the row IS the tab row - a
+        bool cl = false;                   // tab index, 1000+n for the +, -1 bare sheet
+        RECT r; GetClientRect(g.bar, &r);
+        return WebTabRowHit(p, w, r.bottom, cl);
+    }
     RECT bs[TB_COUNT]; TbRects(w, bs);
     for (int i = 0; i < TB_COUNT; i++)
         if (!TbShed[i] && p.x >= bs[i].left && p.x < bs[i].right && p.y >= bs[i].top && p.y < bs[i].bottom) return i;
@@ -1355,6 +1415,16 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
+        if (g_webOn) {                     // the tab row's hover lives in ws.sHot, never
+            bool cl = false;               // in g.tbTabHot - the nav row above owns that
+            int hot = WebTabRowHit(p, r.right, r.bottom, cl);
+            if (hot != ws.sHot) {
+                ws.sHot = hot;
+                if (hot >= 0) TrackLeave(h);
+                InvalidateRect(h, nullptr, FALSE);
+            }
+            return 0;
+        }
         int hot = BarHit(p, r.right);
         if (hot != g.tbTabHot) {            // repaints only on a hover flip
             g.tbTabHot = hot;
@@ -1364,11 +1434,22 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE:
+        if (g_webOn) {
+            if (ws.sHot != -1) { ws.sHot = -1; InvalidateRect(h, nullptr, FALSE); }
+            return 0;
+        }
         if (g.tbTabHot != -1) { g.tbTabHot = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT r; GetClientRect(h, &r);
+        if (g_webOn) {
+            bool cl = false;
+            int hit = WebTabRowHit(p, r.right, r.bottom, cl);
+            if (hit >= 0 && hit < 1000 && hit != g_wtCur && !cl)
+                WebSwitchTo(hit);          // Chrome switches on press
+            return 0;
+        }
         int hit = BarHit(p, r.right);
         if (hit >= 0 && TbEnabled(hit)) {  // capture held: WPF's IsPressed story
             SetCapture(h);                 // (ToolbarAvailability's per-button rules)
@@ -1378,6 +1459,15 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONUP: {
+        if (g_webOn) {
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT r; GetClientRect(h, &r);
+            bool cl = false;
+            int hit = WebTabRowHit(p, r.right, r.bottom, cl);
+            if (hit >= 0 && hit < 1000 && cl) WebCloseTabAt(hit);
+            else if (hit >= 1000) WebNewTab(L"https://duckduckgo.com/", true);
+            return 0;
+        }
         int was = g.tbPressed;
         if (was >= 0) {
             g.tbPressed = -1;
@@ -1386,7 +1476,6 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             RECT r; GetClientRect(h, &r);
             int hit = BarHit(p, r.right);
             if (hit >= 0 && hit == was && TbEnabled(hit)) {    // click on release inside one
-                if (g_webOn) { WebBarClick(hit); InvalidateRect(h, nullptr, FALSE); return 0; }
                 switch (hit) {                                 // button, KillerPDF's handlers
                 case TB_CLOSE: CloseDoc(); break;
                 case TB_OPEN: OpenDlg(); break;
@@ -1405,6 +1494,28 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
+    }
+    case WM_LBUTTONDBLCLK: {           // a double-click on bare tab row: a new tab
+        if (g_webOn) {
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT r; GetClientRect(h, &r);
+            bool cl = false;
+            int hit = WebTabRowHit(p, r.right, r.bottom, cl);
+            if (hit < 0) WebNewTab(L"https://duckduckgo.com/", true);
+            return 0;
+        }
+        break;
+    }
+    case WM_MBUTTONUP: {               // middle-click closes, like Chrome and Radon
+        if (g_webOn) {
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT r; GetClientRect(h, &r);
+            bool cl = false;
+            int hit = WebTabRowHit(p, r.right, r.bottom, cl);
+            if (hit >= 0 && hit < 1000) WebCloseTabAt(hit);
+            return 0;
+        }
+        break;
     }
     case WM_CAPTURECHANGED:              // the press lost the mouse some other way
         if (g.tbPressed >= 0) { g.tbPressed = -1; InvalidateRect(h, nullptr, FALSE); }
@@ -7636,8 +7747,25 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         if (g_webOn) {                       // the browser owns the card: the view paints the
-            RECT vr{ 0, 0, g.cw, g.ch };     // shared field; the controller HWND renders the page,
-            FillRect(dc, &vr, GrainBrush(1));   // or the no-engine card when the runtime is missing
+            RECT vr{ 0, 0, g.cw, g.ch };     // shared field, the rounded card's face and
+            FillRect(dc, &vr, GrainBrush(1));   // ring; the controller HWND renders the page,
+            RECT c; WebCardRect(c);          // or the no-engine card when the runtime is missing
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            float rr = 8.0f * (float)g.dpi;
+            Gdiplus::GraphicsPath cp;
+            cp.AddArc((Gdiplus::REAL)c.left, (Gdiplus::REAL)c.top, 2 * rr, 2 * rr, 180, 90);
+            cp.AddArc((Gdiplus::REAL)(c.right - 2 * rr), (Gdiplus::REAL)c.top, 2 * rr, 2 * rr, 270, 90);
+            cp.AddArc((Gdiplus::REAL)(c.right - 2 * rr), (Gdiplus::REAL)(c.bottom - 2 * rr), 2 * rr, 2 * rr, 0, 90);
+            cp.AddArc((Gdiplus::REAL)c.left, (Gdiplus::REAL)(c.bottom - 2 * rr), 2 * rr, 2 * rr, 90, 90);
+            cp.CloseFigure();
+            Gdiplus::SolidBrush face(Gdiplus::Color(255, GetRValue(wvb::Card),
+                                                    GetGValue(wvb::Card), GetBValue(wvb::Card)));
+            gs.FillPath(&face, &cp);         // the face shows through the corner notches
+            Gdiplus::Pen ring(Gdiplus::Color(255, GetRValue(wvb::Border),
+                                             GetGValue(wvb::Border), GetBValue(wvb::Border)),
+                              1.0f);
+            gs.DrawPath(&ring, &cp);         // Radon's MicaBorder ring
             if (g_webFail) WebFailCard(dc, g.cw, g.ch);
             EndPaint(h, &ps);
             return 0;
@@ -8901,33 +9029,23 @@ static void DrawPaneShadow(HDC dc, int w, int h) {
 }
 
 // ============================================================
-//  The browser (build-109). One toolbar button toggles between the PDF
-//  reader and a Chrome-mode browser; the reader's whole world (tabs,
-//  pages, annotations, caches) sits untouched behind the toggle. The
-//  engine is Windows' own WebView2 - the Evergreen Chromium that ships
-//  with the OS and is shared with Edge - so the exe carries no browser
-//  bytes at all, only this glue. The chrome is Chrome's own dark theme:
-//  the flared tab strip up top, the circle-icon toolbar with a pill
-//  omnibox under it, and docsy's page-thumbnail rail on the left showing
-//  the OPEN WEB TABS, captured live with CapturePreview the same way the
-//  reader's rail shows its pages. No runtime (rare): the mode still
-//  toggles and explains itself, nothing else changes.
+//  The browser (build-110). One toolbar button toggles between the PDF
+//  reader and a web mode skinned after radon-browser (imscythra's Radon):
+//  its design layer ported point for point - Cube.UI's Mica dark sheet
+//  (#202020), the Safari-style nav row ABOVE the tabs (back/forward, the
+//  #282828 search pill with the padlock left and refresh right inside,
+//  centered URL text that left-aligns and selects all on focus), Fluent
+//  tabs (radius-4 hover tiles, a transparent selected tab wearing the
+//  system-accent pill at its foot), and the WebView in a rounded #1c1c1c
+//  card with Radon's MicaBorder ring. Radon itself is C#/UWP XAML, so its
+//  components cannot link into this exe - what is reused is its look, its
+//  geometry and its engine: the engine is the same WebView2 Evergreen
+//  Chromium the OS ships and shares with Edge, so the exe carries no
+//  browser bytes at all, only this glue. docsy's page-thumbnail rail keeps
+//  showing the OPEN WEB TABS, captured live with CapturePreview. No
+//  runtime (rare): the mode still toggles and explains itself, nothing
+//  else changes.
 // ============================================================
-
-namespace wvb {
-constexpr COLORREF StripBg  = RGB(0x20, 0x21, 0x24);   // Chrome dark: tab strip field
-constexpr COLORREF Toolbar  = RGB(0x35, 0x36, 0x3a);   // toolbar + active tab face
-constexpr COLORREF Omnibox  = RGB(0x29, 0x2a, 0x2b);   // the pill
-constexpr COLORREF Hover    = RGB(0x45, 0x48, 0x4c);   // circular button hover
-constexpr COLORREF Pressed  = RGB(0x50, 0x54, 0x58);
-constexpr COLORREF TabHover = RGB(0x29, 0x2a, 0x2d);   // inactive tab's hover tile
-constexpr COLORREF Ink      = RGB(0xe8, 0xea, 0xed);   // icons + active title
-constexpr COLORREF InkDim   = RGB(0x9a, 0xa0, 0xa6);   // favicons, padlock, placeholder
-constexpr COLORREF InkOff   = RGB(0x5e, 0x61, 0x65);   // disabled arrows
-constexpr COLORREF Inactive = RGB(0xb6, 0xba, 0xbf);   // inactive tab titles
-constexpr COLORREF Sep      = RGB(0x4e, 0x52, 0x55);   // the tabs' 1px separators
-constexpr COLORREF Focus1   = RGB(0x8a, 0xb4, 0xf8);   // Chrome's focus blue
-}
 
 struct WebTab {
     unsigned long long id = 0;
@@ -8949,13 +9067,8 @@ static unsigned long long g_wtIds = 1;
 static wrl::ComPtr<ICoreWebView2Environment> g_wvEnv;
 static bool g_webChecked = false, g_webAvail = false;
 
-// the sidebar's web state - the same fields sd carries, pointed at the tabs
-static struct {
-    int cw = 0, ch = 0, tw = 0, docH = 0, scroll = 0, cur = -1, hover = -1;
-    int hit = -1, moved = 0; POINT dp{}; bool barDrag = false, barHot = false, barGrab = 0;
-    int sHot = -1;                         // the STRIP's hover (tab index or 1000+n for +),
-    std::vector<int> top;                  // separate from the rail's own hover above
-} ws;
+// the sidebar's web state: the one definition lives up by the palette, where
+// the toolbar's proc can see ws.sHot; the comment there tells why.
 
 static HWND g_wedit = nullptr;             // the omnibox edit
 static WNDPROC g_weditPrev = nullptr;
@@ -8986,11 +9099,6 @@ static void WebSyncOmnibox();              // module order: the omnibox helpers 
 static void WebSyncOmniboxForce();         // below their first callers
 static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 
-static int WebBarHit(POINT p, int w) {
-    for (int i = 0; i < WB_COUNT; i++)
-        if (p.x >= g_wbR[i].left && p.x < g_wbR[i].right && p.y >= g_wbR[i].top && p.y < g_wbR[i].bottom) return i;
-    return -1;
-}
 static bool WebBtnEnabled(int id) {
     WebTab* t = WebCur();
     switch (id) {
@@ -9001,115 +9109,166 @@ static bool WebBtnEnabled(int id) {
     return false;
 }
 
-// ---- the chrome tab strip ----
+// ---- the tab row (under the nav), Fluent style ----
 
-static int WebStripTabAt(POINT p, int n, int tw, bool& close) {   // -1 none; close: the x zone
+static int WebTabTH() { return (int)(32 * g.dpi); }      // Radon's TabViewItem height
+
+static int WebStripTabAt(POINT p, int n, int tw, int y0, bool& close) {   // -1 none; close: x zone
     close = false;
-    if (p.y < 0) return -1;
-    int x = (int)(8 * g.dpi), th = (int)(34 * g.dpi), y0 = WEBSTRIPH() - th;
+    if (p.y < y0 - (int)(4 * g.dpi) || p.y >= y0 + WebTabTH() + (int)(4 * g.dpi)) return -1;
+    int x = (int)(8 * g.dpi);
     for (int i = 0; i < n; i++, x += tw) {
-        if (p.x >= x - (int)(4 * g.dpi) && p.x < x + tw + (int)(4 * g.dpi) && p.y >= y0 - (int)(6 * g.dpi)) {
+        if (p.x >= x - (int)(4 * g.dpi) && p.x < x + tw + (int)(4 * g.dpi)) {
             close = p.x >= x + tw - (int)(22 * g.dpi) && p.x < x + tw - (int)(6 * g.dpi);
             return i;
         }
     }
     return -1;
 }
-static bool WebStripPlusAt(POINT p, int n, int tw) {
+static bool WebStripPlusAt(POINT p, int n, int tw, int y0) {
+    if (p.y < y0 - (int)(4 * g.dpi) || p.y >= y0 + WebTabTH() + (int)(4 * g.dpi)) return false;
     int x = (int)(8 * g.dpi) + n * tw;
     return p.x >= x && p.x < x + (int)(30 * g.dpi);
 }
 
-static void WebChromeTabPath(Gdiplus::GraphicsPath& p, float x, float y, float w, float h) {
-    // Chrome's own silhouette: a rounded-top rectangle whose feet flare
-    // outward into the toolbar - two quarter-circle feet of radius f.
-    float r = min((float)(8 * g.dpi), w / 2), f = min((float)(6 * g.dpi), h / 2);
-    p.StartFigure();
-    p.AddArc(x - 2 * f, y + h - 2 * f, 2 * f, 2 * f, 90, -90);     // left foot: (x-f,y+h)->(x,y+h-f)
-    p.AddLine(x, y + h - f, x, y + r);                             // up the left side
-    p.AddArc(x, y, 2 * r, 2 * r, 180, 90);                         // top-left corner
-    p.AddLine(x + r, y, x + w - r, y);                             // the crown
-    p.AddArc(x + w - 2 * r, y, 2 * r, 2 * r, 270, 90);             // top-right corner
-    p.AddLine(x + w, y + r, x + w, y + h - f);                     // down the right side
-    p.AddArc(x + w, y + h - 2 * f, 2 * f, 2 * f, 180, -90);        // right foot: ->(x+w+f,y+h)
-    p.CloseFigure();                                               // the bottom edge closes
+// the tab row's whole hit test: a tab index, 1000+n for the +, -1 for bare
+// sheet - the toolbar window's mouse handlers speak this one language
+static int WebTabRowHit(POINT p, int w, int h, bool& close) {
+    int n = (int)g_wt.size();
+    int th = WebTabTH(), y0 = (h - th) / 2;
+    int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (w - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
+    int hit = WebStripTabAt(p, n, tw, y0, close);
+    if (hit < 0 && WebStripPlusAt(p, n, tw, y0)) return 1000 + n;
+    return hit;
 }
+
+// the nav row's buttons, in strip coords; empty rects (the + no longer rides
+// this row) never match
+static int WebNavHit(POINT p) {
+    for (int i = 0; i < WB_COUNT; i++) {
+        if (g_wbR[i].right <= g_wbR[i].left) continue;
+        if (p.x >= g_wbR[i].left && p.x < g_wbR[i].right && p.y >= g_wbR[i].top && p.y < g_wbR[i].bottom) return i;
+    }
+    return -1;
+}
+
+// Fluent's hover layer: a radius-4 rounded tile, the shape Cube.UI's
+// ToolbarButton wears (CornerRadius 4), not Chrome's circle
+static void WebTile(HDC dc, const RECT& r, COLORREF c) {
+    if (r.right <= r.left || r.bottom <= r.top) return;
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush b(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
+    Gdiplus::GraphicsPath p;
+    float rr = 4.0f * (float)g.dpi;
+    p.AddArc((Gdiplus::REAL)r.left, (Gdiplus::REAL)r.top, 2 * rr, 2 * rr, 180, 90);
+    p.AddArc((Gdiplus::REAL)(r.right - 2 * rr), (Gdiplus::REAL)r.top, 2 * rr, 2 * rr, 270, 90);
+    p.AddArc((Gdiplus::REAL)(r.right - 2 * rr), (Gdiplus::REAL)(r.bottom - 2 * rr), 2 * rr, 2 * rr, 0, 90);
+    p.AddArc((Gdiplus::REAL)r.left, (Gdiplus::REAL)(r.bottom - 2 * rr), 2 * rr, 2 * rr, 90, 90);
+    p.CloseFigure();
+    gs.FillPath(&b, &p);
+}
+
+// Radon's selected-tab signature: a 2px system-accent pill across the tab's
+// foot, the gradient SystemAccentLight3 -> Light2 -> Light3 (TabView.xaml's
+// Pill), drawn antialiased with Gdiplus like every other fill here
+static void WebAccentPill(HDC dc, int x, int y, int w) {
+    if (w <= 0) return;
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::GraphicsPath p;
+    float h = 2.0f * (float)g.dpi;
+    Gdiplus::RectF rc((Gdiplus::REAL)x, (Gdiplus::REAL)y, (Gdiplus::REAL)w, h);
+    p.AddRectangle(rc);
+    COLORREF a = WvAccent(), s = WvAccentSoft();
+    Gdiplus::Color sts[] = { Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)),
+                             Gdiplus::Color(255, GetRValue(s), GetGValue(s), GetBValue(s)),
+                             Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)) };
+    Gdiplus::LinearGradientBrush br(rc, sts, 3, Gdiplus::WrapModeTile,
+        Gdiplus::PointF(rc.X, rc.Y), Gdiplus::PointF(rc.X + rc.Width, rc.Y));
+    gs.FillPath(&br, &p);
+}
+
+// ---- the nav row (Radon's MainPage titlebar): logo, back/forward, the
+// search pill with padlock and refresh inside, the menu at the right ----
 
 static void WebStripPaint(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     HBRUSH bg = CreateSolidBrush(wvb::StripBg);
-    FillRect(dc, &bar, bg); DeleteObject(bg);          // Chrome: solid, no grain
+    FillRect(dc, &bar, bg); DeleteObject(bg);          // one Mica sheet, no grain
     SetBkMode(dc, TRANSPARENT);
-    int n = (int)g_wt.size();
-    int th = (int)(34 * g.dpi), y0 = h - th;
-    int plusW = (int)(30 * g.dpi);
-    int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (w - plusW - (int)(12 * g.dpi)) / n)) : 0;
-    Gdiplus::Graphics gs(dc);
-    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    HFONT tf = CaptionFont(g_tbcap, 12, false, L"Killer Sans");
-    HFONT gf = CaptionFont(g_tbglyph, 12, false, L"Segoe MDL2 Assets");
-    int x = (int)(8 * g.dpi);
-    for (int i = 0; i < n; i++, x += tw) {
-        WebTab& t = g_wt[i];
-        bool act = i == g_wtCur;
-        // the tabs' separators: 1px, only between awake inactive neighbors
-        if (!act && i + 1 < n && i + 1 != g_wtCur && i != g_wtCur - 1) {
-            RECT s{ x - 1, y0 + (th - (int)(16 * g.dpi)) / 2, x, y0 + (th + (int)(16 * g.dpi)) / 2 };
-            HBRUSH sb = CreateSolidBrush(wvb::Sep);
-            FillRect(dc, &s, sb); DeleteObject(sb);
-        }
-        if (!act && i == ws.sHot && !g_webFail) {
-            Gdiplus::GraphicsPath hp;                  // an inactive tab hovers as a round tile
-            hp.AddArc((Gdiplus::REAL)x, (Gdiplus::REAL)y0, 2 * 8.0f * g.dpi, 2 * 8.0f * g.dpi, 180, 90);
-            hp.AddArc((Gdiplus::REAL)(x + tw - 16 * g.dpi), (Gdiplus::REAL)y0, 16.0f * g.dpi, 16.0f * g.dpi, 270, 90);
-            hp.AddArc((Gdiplus::REAL)(x + tw - 16 * g.dpi), (Gdiplus::REAL)(y0 + th - 16 * g.dpi), 16.0f * g.dpi, 16.0f * g.dpi, 0, 90);
-            hp.AddArc((Gdiplus::REAL)x, (Gdiplus::REAL)(y0 + th - 16 * g.dpi), 16.0f * g.dpi, 16.0f * g.dpi, 90, 90);
-            hp.CloseFigure();
-            Gdiplus::SolidBrush hb(Gdiplus::Color(255, GetRValue(wvb::TabHover), GetGValue(wvb::TabHover), GetBValue(wvb::TabHover)));
-            gs.FillPath(&hb, &hp);
-        }
-        if (act) {                                     // the active tab grows its feet and
-            Gdiplus::GraphicsPath tp;                  // merges into the toolbar below
-            WebChromeTabPath(tp, (float)x, (float)y0, (float)tw, (float)th);
-            Gdiplus::SolidBrush tb(Gdiplus::Color(255, GetRValue(wvb::Toolbar), GetGValue(wvb::Toolbar), GetBValue(wvb::Toolbar)));
-            gs.FillPath(&tb, &tp);
-        }
-        // the favicon slot: a live spinner while loading, a globe at rest
-        int fx = x + (int)(10 * g.dpi), fy = y0 + th / 2;
-        if (t.loading) {
-            float r = 5.0f * g.dpi;
-            int a0 = (int)((GetTickCount64() / 6) % 360);
-            Gdiplus::Pen pen(Gdiplus::Color(255, 0x8a, 0xb4, 0xf8), 2.0f * g.dpi);
-            gs.DrawArc(&pen, fx - r, fy - r, 2 * r, 2 * r, (Gdiplus::REAL)a0, 270);
-        } else {
-            SelectObject(dc, gf); SetTextColor(dc, wvb::InkDim);
-            RECT gr{ fx - (int)(7 * g.dpi), fy - (int)(7 * g.dpi), fx + (int)(7 * g.dpi), fy + (int)(7 * g.dpi) };
-            DrawTextW(dc, L"\uE774", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-        // the title, then the close x (which lights on the tab's hover)
-        RECT tr{ fx + (int)(12 * g.dpi), y0, x + tw - (int)(24 * g.dpi), y0 + th };
-        SelectObject(dc, tf);
-        SetTextColor(dc, act ? wvb::Ink : wvb::Inactive);
-        DrawTextW(dc, t.title.c_str(), -1, &tr,
-                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        bool hotClose = i == ws.sHot;
+    HFONT gf = CaptionFont(g_tbglyph, 16, false, L"Segoe MDL2 Assets");
+    static const wchar_t* const gl[WB_COUNT] = {
+        L"\uE8A5", L"\uE72B", L"\uE72A", nullptr, L"\uE710", L"\uE712"
+    };                                                 // the reload glyph rides the pill
+    // the nav buttons: radius-4 Fluent tiles that light on hover and press
+    for (int i = 0; i < WB_COUNT; i++) {
+        if (g_wbR[i].right <= g_wbR[i].left) continue;
+        if (i == WB_RELOAD) continue;                  // its tile draws after the pill fill
+        bool en = WebBtnEnabled(i);
+        bool hot = en && g.tbTabHot == i, pr = en && g.tbPressed == i;
+        if (hot || pr) WebTile(dc, g_wbR[i], pr ? wvb::Pressed : wvb::Hover);
+        COLORREF c = !en ? wvb::InkOff : wvb::Ink;
         SelectObject(dc, gf);
-        SetTextColor(dc, hotClose ? wvb::Ink : wvb::InkDim);
-        RECT cr{ x + tw - (int)(22 * g.dpi), y0, x + tw - (int)(6 * g.dpi), y0 + th };
-        DrawTextW(dc, L"\uE8BB", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(dc, c);
+        RECT rc = g_wbR[i];
+        DrawTextW(dc, gl[i], -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    // the + button after the last tab
-    int px = (int)(8 * g.dpi) + n * tw + (int)(2 * g.dpi), py = h / 2;
-    if (n >= 0 && px + plusW < w) {
-        if (ws.sHot == 1000 + n) {
+    // the search pill: SearchBrush fill, radius 8, padlock left, refresh right
+    HBRUSH ob = CreateSolidBrush(wvb::Omnibox);
+    HGDIOBJ op = SelectObject(dc, ob), open2 = SelectObject(dc, GetStockObject(NULL_PEN));
+    RoundRect(dc, g_webOmni.left, g_webOmni.top, g_webOmni.right, g_webOmni.bottom,
+              (int)(8 * g.dpi), (int)(8 * g.dpi));
+    SelectObject(dc, open2); SelectObject(dc, op); DeleteObject(ob);
+    bool editFocus = g_wedit && GetFocus() == g_wedit;
+    if (editFocus) {                                   // Radon's focus story: a 2px accent
+        WebAccentPill(dc, g_webOmni.left + (int)(8 * g.dpi),   // underline under the URL
+                      g_webOmni.bottom - (int)(2 * g.dpi),
+                      g_webOmni.right - g_webOmni.left - (int)(16 * g.dpi));
+    }
+    if (g_webFail) {                                   // no engine: the pill explains itself
+        SelectObject(dc, CaptionFont(g_tbcap, 12, false, L"Killer Sans"));
+        SetTextColor(dc, wvb::InkDim);
+        RECT tr = g_webOmni; tr.left += (int)(14 * g.dpi);
+        DrawTextW(dc, L"web engine missing", -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
+    SelectObject(dc, gf);
+    SetTextColor(dc, wvb::InkDim);
+    RECT lk{ g_webOmni.left + (int)(4 * g.dpi), g_webOmni.top,
+             g_webOmni.left + (int)(26 * g.dpi), g_webOmni.bottom };
+    DrawTextW(dc, L"\uE72E", -1, &lk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);   // the padlock
+    WebTab* t = WebCur();
+    RECT rf{ g_webOmni.right - (int)(26 * g.dpi), g_webOmni.top,
+             g_webOmni.right - (int)(4 * g.dpi), g_webOmni.bottom };
+    if (t && t->loading) {                             // the stop X while a page loads
+        if (g.tbTabHot == WB_RELOAD) {
             HBRUSH hb = CreateSolidBrush(wvb::Hover);
-            HGDIOBJ o = SelectObject(dc, hb);
-            Ellipse(dc, px, py - (int)(13 * g.dpi), px + (int)(26 * g.dpi), py + (int)(13 * g.dpi));
-            SelectObject(dc, o); DeleteObject(hb);
+            HGDIOBJ o = SelectObject(dc, hb), on = SelectObject(dc, GetStockObject(NULL_PEN));
+            Ellipse(dc, rf.left + 2, rf.top + 2, rf.right - 2, rf.bottom - 2);
+            SelectObject(dc, on); SelectObject(dc, o); DeleteObject(hb);
         }
-        SelectObject(dc, gf); SetTextColor(dc, wvb::Ink);
-        RECT pr{ px, py - (int)(12 * g.dpi), px + (int)(26 * g.dpi), py + (int)(12 * g.dpi) };
-        DrawTextW(dc, L"\uE710", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(dc, wvb::Ink);
+        DrawTextW(dc, L"\uE711", -1, &rf, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else {                                           // the refresh arrow at rest
+        if (g.tbTabHot == WB_RELOAD) {
+            HBRUSH hb = CreateSolidBrush(wvb::Hover);
+            HGDIOBJ o = SelectObject(dc, hb), on = SelectObject(dc, GetStockObject(NULL_PEN));
+            Ellipse(dc, rf.left + 2, rf.top + 2, rf.right - 2, rf.bottom - 2);
+            SelectObject(dc, on); SelectObject(dc, o); DeleteObject(hb);
+        }
+        SetTextColor(dc, wvb::Ink);
+        DrawTextW(dc, L"\uE72C", -1, &rf, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    // the placeholder: Radon's own string, centered like the idle URL text
+    wchar_t has[8] = L"";
+    if (g_wedit && GetFocus() != g_wedit && GetWindowTextW(g_wedit, has, 2) == 0) {
+        SelectObject(dc, g_webEditFont);
+        SetTextColor(dc, wvb::InkDim);
+        RECT pr{ g_webOmni.left + (int)(30 * g.dpi), g_webOmni.top,
+                 g_webOmni.right - (int)(30 * g.dpi), g_webOmni.bottom };
+        DrawTextW(dc, L"Search the web or enter a URL", -1, &pr,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
 }
 
@@ -9121,6 +9280,11 @@ static void WebStripSpin() {
     else KillTimer(g_wstrip, 3);
 }
 
+// the nav row's window: Radon's titlebar strip. The buttons press with the
+// toolbar's own capture-held story (g.tbTabHot / g.tbPressed - the tab row
+// under this window keeps its hover in ws.sHot instead, so the two never
+// collide), the pill answers a click by focusing the omnibox edit, and the
+// edit's WM_CTLCOLOREDIT lands here now that the edit is this window's child.
 static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
@@ -9137,108 +9301,109 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
-        if (wp == 3) { InvalidateRect(h, nullptr, FALSE); return 0; }   // the spinner animates
+        if (wp == 3) {                             // the spinner animates in the tab row's
+            InvalidateRect(h, nullptr, FALSE);     // favicon slot, so both rows repaint
+            if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);
+            return 0;
+        }
         break;
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT r; GetClientRect(h, &r);
-        int n = (int)g_wt.size();
-        int th = (int)(34 * g.dpi);
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
-        bool close = false;
-        int hot = WebStripTabAt(p, n, tw, close);
-        if (hot < 0 && WebStripPlusAt(p, n, tw)) hot = 1000 + n;
-        if (hot != ws.sHot) {
-            ws.sHot = hot;
+        int hot = WebNavHit(p);
+        if (hot != g.tbTabHot) {
+            g.tbTabHot = hot;
             if (hot >= 0) TrackLeave(h);
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (ws.sHot != -1) { ws.sHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (g.tbTabHot != -1) { g.tbTabHot = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT r; GetClientRect(h, &r);
-        int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
-        bool close = false;
-        int hit = WebStripTabAt(p, n, tw, close);
-        if (hit >= 0 && hit != g_wtCur && !close) WebSwitchTo(hit);   // Chrome switches on press
+        int hit = WebNavHit(p);
+        if (hit >= 0) {                            // capture held: the toolbar's press story
+            SetCapture(h);
+            g.tbPressed = hit;
+            InvalidateRect(h, nullptr, FALSE);
+        } else if (PtInRect(&g_webOmni, p) && g_wedit && !g_webFail) {
+            SetFocus(g_wedit);                     // a click on the pill focuses the URL
+            InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
     }
     case WM_LBUTTONUP: {
-        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT r; GetClientRect(h, &r);
-        int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
-        bool close = false;
-        int hit = WebStripTabAt(p, n, tw, close);
-        if (hit >= 0 && close) WebCloseTabAt(hit);
-        else if (WebStripPlusAt(p, n, tw)) WebNewTab(L"https://duckduckgo.com/", true);
+        int was = g.tbPressed;
+        if (was >= 0) {
+            g.tbPressed = -1;
+            if (GetCapture() == h) ReleaseCapture();
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            int hit = WebNavHit(p);
+            if (hit >= 0 && hit == was && WebBtnEnabled(hit)) {
+                if (hit == WB_RELOAD) {            // the pill's refresh doubles as stop
+                    WebTab* t = WebCur();
+                    if (t && t->web) { if (t->loading) t->web->Stop(); else t->web->Reload(); }
+                } else WebBarClick(hit);
+                InvalidateRect(h, nullptr, FALSE);
+            }
+        }
         return 0;
     }
-    case WM_LBUTTONDBLCLK: {                     // a double-click on bare strip: new tab
-        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT r; GetClientRect(h, &r);
-        int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
-        bool close = false;
-        if (WebStripTabAt(p, n, tw, close) < 0 && !WebStripPlusAt(p, n, tw))
-            WebNewTab(L"https://duckduckgo.com/", true);
+    case WM_CAPTURECHANGED:
+        if (g.tbPressed >= 0) { g.tbPressed = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
-    }
-    case WM_MBUTTONUP: {                         // middle-click closes, like Chrome
-        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT r; GetClientRect(h, &r);
-        int n = (int)g_wt.size();
-        int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), ((int)r.right - (int)(30 * g.dpi) - (int)(12 * g.dpi)) / n)) : 0;
-        bool close = false;
-        int hit = WebStripTabAt(p, n, tw, close);
-        if (hit >= 0) WebCloseTabAt(hit);
-        return 0;
-    }
+    case WM_CTLCOLOREDIT:                          // the omnibox edit is this window's child
+        return (LRESULT)WebEditColors((HDC)wp, (HWND)lp);
     case WM_SETCURSOR:
-        if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            int hit = WebNavHit(p);
+            bool pill = PtInRect(&g_webOmni, p);
+            SetCursor(LoadCursorW(nullptr, (hit >= 0 && hit != WB_RELOAD) || pill ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
         break;
     }
     return DefWindowProcW(h, m, wp, lp);
 }
 
-// ---- the toolbar row: Chrome's circles + the omnibox ----
-
+// the nav row's geometry: the buttons and the pill live in the strip window's
+// coords now (Radon's order - nav on top, tabs under). The reload button IS
+// the pill's right zone, so its hit rect lands inside the pill; the + rides
+// the tab row below and its nav rect stays empty.
 static void WebBarLayout() {
-    if (!g.bar || !g_webOn) return;
-    RECT r; GetClientRect(g.bar, &r);
-    int d = (int)(28 * g.dpi), cy = (r.bottom - d) / 2, pitch = (int)(34 * g.dpi);
+    if (!g_wstrip || !g_webOn) return;
+    RECT r; GetClientRect(g_wstrip, &r);
+    int d = (int)(32 * g.dpi), cy = (r.bottom - d) / 2, pitch = (int)(36 * g.dpi);
+    int ph = (int)(28 * g.dpi), py = (r.bottom - ph) / 2;
     int x = (int)(8 * g.dpi);
     g_wbR[WB_READER] = { x, cy, x + d, cy + d };
     x += pitch; g_wbR[WB_BACK] = { x, cy, x + d, cy + d };
     x += pitch; g_wbR[WB_FWD] = { x, cy, x + d, cy + d };
-    x += pitch; g_wbR[WB_RELOAD] = { x, cy, x + d, cy + d };
     int mx = r.right - (int)(8 * g.dpi);
     g_wbR[WB_MENU] = { mx - d, cy, mx, cy + d };
-    mx -= d + (int)(6 * g.dpi);
-    g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d };
-    g_webOmni = { g_wbR[WB_RELOAD].right + (int)(8 * g.dpi), (r.bottom - (int)(28 * g.dpi)) / 2,
-                  g_wbR[WB_NEWTAB].left - (int)(8 * g.dpi), (r.bottom + (int)(28 * g.dpi)) / 2 };
+    g_wbR[WB_NEWTAB] = { 0, 0, 0, 0 };             // the + lives in the tab row
+    g_webOmni = { g_wbR[WB_FWD].right + (int)(10 * g.dpi), py,
+                  g_wbR[WB_MENU].left - (int)(10 * g.dpi), py + ph };
+    g_wbR[WB_RELOAD] = { g_webOmni.right - (int)(26 * g.dpi), g_webOmni.top + (int)(2 * g.dpi),
+                         g_webOmni.right - (int)(2 * g.dpi), g_webOmni.bottom - (int)(2 * g.dpi) };
     if (!g_webEditFont) g_webEditFont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans");
     if (!g_wedit) {
         g_wedit = CreateWindowExW(0, L"EDIT", L"",
-                                  WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL,
-                                  0, 0, 0, 0, g.bar, (HMENU)(INT_PTR)1001, g.hinst, nullptr);
+                                  WS_CHILD | WS_CLIPSIBLINGS | ES_AUTOHSCROLL | ES_CENTER,
+                                  0, 0, 0, 0, g_wstrip, (HMENU)(INT_PTR)1001, g.hinst, nullptr);
         if (g_wedit) {
             SendMessageW(g_wedit, WM_SETFONT, (WPARAM)g_webEditFont, TRUE);
             g_weditPrev = (WNDPROC)SetWindowLongPtrW(g_wedit, GWLP_WNDPROC, (LONG_PTR)WebEditProc);
         }
     }
     if (g_wedit) {
-        MoveWindow(g_wedit, g_webOmni.left + (int)(26 * g.dpi), g_webOmni.top,
-                   max(10, (int)g_webOmni.right - (int)g_webOmni.left - (int)(32 * g.dpi)),
-                   g_webOmni.bottom - g_webOmni.top, TRUE);
+        MoveWindow(g_wedit, g_webOmni.left + (int)(28 * g.dpi), g_webOmni.top + (int)(2 * g.dpi),
+                   max(10, (int)g_webOmni.right - (int)g_webOmni.left - (int)(56 * g.dpi)),
+                   max(4, ph - (int)(4 * g.dpi)), TRUE);   // the foot's 2px strip: the focus underline
         ShowWindow(g_wedit, g_webFail ? SW_HIDE : SW_SHOW);
     }
     WebSyncOmnibox();
@@ -9263,6 +9428,22 @@ static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SetFocus(g.main);
             return 0;
         }
+    }
+    if (m == WM_SETFOCUS) {                        // Radon's SearchBar: focus selects all
+        LRESULT r = CallWindowProcW(g_weditPrev, h, m, wp, lp);   // and the URL left-aligns
+        LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
+        if (s & ES_CENTER) SetWindowLongPtrW(h, GWL_STYLE, s & ~ES_CENTER);
+        PostMessageW(h, EM_SETSEL, 0, -1);
+        InvalidateRect(h, nullptr, TRUE);
+        return r;
+    }
+    if (m == WM_KILLFOCUS) {                       // the blur puts the pill back the way
+        LRESULT r = CallWindowProcW(g_weditPrev, h, m, wp, lp);   // the page left it
+        LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
+        if (!(s & ES_CENTER)) SetWindowLongPtrW(h, GWL_STYLE, s | ES_CENTER);
+        WebSyncOmniboxForce();
+        InvalidateRect(h, nullptr, TRUE);
+        return r;
     }
     return CallWindowProcW(g_weditPrev, h, m, wp, lp);
 }
@@ -9289,56 +9470,79 @@ static void WebCircle(HDC dc, const RECT& r, bool hot, bool pr, bool en) {
     SelectObject(dc, ob); SelectObject(dc, o); DeleteObject(b);
 }
 
-static void WebGlyph(HDC dc, const RECT& r, const wchar_t* g, COLORREF c) {
-    SelectObject(dc, CaptionFont(g_tbglyph, 16, false, L"Segoe MDL2 Assets"));
-    SetTextColor(dc, c);
-    RECT rc = r;                                   // DrawTextW wants a mutable rect
-    DrawTextW(dc, g, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-}
-
+// ---- the tab row: Radon's TabView. Equal-width Fluent tabs on the Mica
+// sheet - a radius-4 hover tile, an active tab that wears NO fill, only the
+// 2px system-accent pill at its foot, the favicon spinner in the accent, a
+// close x that lights (with its little circle) under the cursor's tab, and
+// the + after the last one. The old flared Chrome silhouette is gone.
 static void WebBarDraw(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
-    HBRUSH bg = CreateSolidBrush(wvb::Toolbar);        // Chrome: solid #35363a, no grain
+    HBRUSH bg = CreateSolidBrush(wvb::Toolbar);        // the same Mica sheet as the nav
     FillRect(dc, &bar, bg); DeleteObject(bg);
     SetBkMode(dc, TRANSPARENT);
-    static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE72B", L"\uE72A", nullptr, L"\uE710", L"\uE712"
-    };                                                 // reload draws its own pair
-    for (int i = 0; i < WB_COUNT; i++) {
-        bool en = WebBtnEnabled(i);
-        bool hot = g.tbTabHot == i, pr = g.tbPressed == i;
-        WebCircle(dc, g_wbR[i], hot, pr, en);
-        COLORREF c = !en ? wvb::InkOff : wvb::Ink;
-        if (i == WB_RELOAD) {
-            WebTab* t = WebCur();
-            WebGlyph(dc, g_wbR[i], t && t->loading ? L"\uE8BB" : L"\uE72C", c);
-        } else WebGlyph(dc, g_wbR[i], gl[i], c);
-    }
-    // the omnibox pill
-    HBRUSH ob = CreateSolidBrush(wvb::Omnibox);
-    HGDIOBJ op = SelectObject(dc, ob), open2 = SelectObject(dc, GetStockObject(NULL_PEN));
-    RoundRect(dc, g_webOmni.left, g_webOmni.top, g_webOmni.right, g_webOmni.bottom,
-              (int)(14 * g.dpi), (int)(14 * g.dpi));
-    SelectObject(dc, open2); SelectObject(dc, op); DeleteObject(ob);
-    if (g_webFail) {                                   // no engine: the pill explains itself
-        SelectObject(dc, CaptionFont(g_tbcap, 12, false, L"Killer Sans"));
-        SetTextColor(dc, wvb::InkDim);
-        RECT tr = g_webOmni; tr.left += (int)(14 * g.dpi);
-        DrawTextW(dc, L"web engine missing", -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        return;
-    }
-    // the padlock, then the edit rides the pill's inside
-    SelectObject(dc, CaptionFont(g_tbglyph, 11, false, L"Segoe MDL2 Assets"));
-    SetTextColor(dc, wvb::InkDim);
-    RECT lk{ g_webOmni.left + (int)(6 * g.dpi), g_webOmni.top, g_webOmni.left + (int)(24 * g.dpi), g_webOmni.bottom };
-    DrawTextW(dc, L"\uE72E", -1, &lk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    // an empty, unfocused omnibox shows Chrome's placeholder
-    wchar_t has[8] = L"";
-    if (g_wedit && GetFocus() != g_wedit && GetWindowTextW(g_wedit, has, 2) == 0) {
-        SelectObject(dc, g_webEditFont);
-        RECT pr{ g_webOmni.left + (int)(26 * g.dpi), g_webOmni.top, g_webOmni.right, g_webOmni.bottom };
-        DrawTextW(dc, L"Search DuckDuckGo or enter address", -1, &pr,
+    int n = (int)g_wt.size();
+    int th = WebTabTH(), y0 = (h - th) / 2;
+    int plusW = (int)(30 * g.dpi);
+    int tw = n > 0 ? min((int)(240 * g.dpi), max((int)(80 * g.dpi), (w - plusW - (int)(12 * g.dpi)) / n)) : 0;
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    HFONT tf = CaptionFont(g_tbcap, 12, false, L"Killer Sans");
+    HFONT gf = CaptionFont(g_tbglyph, 12, false, L"Segoe MDL2 Assets");
+    int x = (int)(8 * g.dpi);
+    for (int i = 0; i < n; i++, x += tw) {
+        WebTab& t = g_wt[i];
+        bool act = i == g_wtCur;
+        // the tabs' separators: 1px, only between awake inactive neighbors
+        if (!act && i + 1 < n && i + 1 != g_wtCur && i != g_wtCur - 1) {
+            RECT s{ x - 1, y0 + (th - (int)(16 * g.dpi)) / 2, x, y0 + (th + (int)(16 * g.dpi)) / 2 };
+            HBRUSH sb = CreateSolidBrush(wvb::Sep);
+            FillRect(dc, &s, sb); DeleteObject(sb);
+        }
+        if (!act && i == ws.sHot && !g_webFail)        // the inactive tab's radius-4 tile
+            WebTile(dc, RECT{ x, y0, x + tw, y0 + th }, wvb::TabHover);
+        // the favicon slot: a live accent spinner while loading, a globe at rest
+        int fx = x + (int)(10 * g.dpi), fy = y0 + th / 2;
+        if (t.loading) {
+            float r = 5.0f * g.dpi;
+            int a0 = (int)((GetTickCount64() / 6) % 360);
+            COLORREF ac = WvAccent();
+            Gdiplus::Pen pen(Gdiplus::Color(255, GetRValue(ac), GetGValue(ac), GetBValue(ac)), 2.0f * g.dpi);
+            gs.DrawArc(&pen, fx - r, fy - r, 2 * r, 2 * r, (Gdiplus::REAL)a0, 270);
+        } else {
+            SelectObject(dc, gf); SetTextColor(dc, wvb::InkDim);
+            RECT gr{ fx - (int)(7 * g.dpi), fy - (int)(7 * g.dpi), fx + (int)(7 * g.dpi), fy + (int)(7 * g.dpi) };
+            DrawTextW(dc, L"\uE774", -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        // the title, then the close x, which lights - circle and all - under the
+        // cursor's tab, the way Radon's close button appears on the tab's hover
+        RECT tr{ fx + (int)(12 * g.dpi), y0, x + tw - (int)(24 * g.dpi), y0 + th };
+        SelectObject(dc, tf);
+        SetTextColor(dc, act ? wvb::Ink : wvb::Inactive);
+        DrawTextW(dc, t.title.c_str(), -1, &tr,
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        bool hotClose = i == ws.sHot;
+        if (hotClose)
+            WebCircle(dc, RECT{ x + tw - (int)(24 * g.dpi), y0 + th / 2 - (int)(9 * g.dpi),
+                                x + tw - (int)(4 * g.dpi), y0 + th / 2 + (int)(9 * g.dpi) },
+                      true, false, true);
+        SelectObject(dc, gf);
+        SetTextColor(dc, hotClose ? wvb::Ink : wvb::InkDim);
+        RECT cr{ x + tw - (int)(22 * g.dpi), y0, x + tw - (int)(6 * g.dpi), y0 + th };
+        DrawTextW(dc, L"\uE8BB", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        if (act) WebAccentPill(dc, x, y0 + th - (int)(2 * g.dpi), tw);   // the foot's accent
+    }
+    // the + button after the last tab
+    int px = (int)(8 * g.dpi) + n * tw + (int)(2 * g.dpi), py = y0 + th / 2;
+    if (n >= 0 && px + plusW < w) {
+        if (ws.sHot == 1000 + n) {
+            HBRUSH hb = CreateSolidBrush(wvb::Hover);
+            HGDIOBJ o = SelectObject(dc, hb);
+            Ellipse(dc, px, py - (int)(13 * g.dpi), px + (int)(26 * g.dpi), py + (int)(13 * g.dpi));
+            SelectObject(dc, o); DeleteObject(hb);
+        }
+        SelectObject(dc, gf); SetTextColor(dc, wvb::Ink);
+        RECT pr{ px, py - (int)(12 * g.dpi), px + (int)(26 * g.dpi), py + (int)(12 * g.dpi) };
+        DrawTextW(dc, L"\uE710", -1, &pr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
@@ -9353,9 +9557,9 @@ static void WebBarClick(int id) {
         return;
     case WB_NEWTAB: WebNewTab(L"https://duckduckgo.com/", true); return;
     case WB_MENU: {
-        if (!g.bar) return;
+        if (!g_wstrip) return;
         POINT pt{ g_wbR[WB_MENU].left, g_wbR[WB_MENU].bottom };
-        ClientToScreen(g.bar, &pt);
+        ClientToScreen(g_wstrip, &pt);
         HMENU m = CreatePopupMenu();
         if (!m) return;
         AppendMenuW(m, MF_STRING, 1, L"New tab\tCtrl+T");
@@ -9488,7 +9692,7 @@ static void WebThumbDecode(int id, IStream* st) {
     int bw = (int)bm->GetWidth(), bh = (int)bm->GetHeight();
     if (!bw || !bh) { delete bm; return; }
     HBITMAP full = nullptr;
-    bm->GetHBITMAP(Gdiplus::Color(255, 0x20, 0x21, 0x24), &full);
+    bm->GetHBITMAP(Gdiplus::Color(255, 0x1c, 0x1c, 0x1c), &full);   // the card's face behind
     delete bm;
     if (!full) return;
     int TW2 = (int)(160 * g.dpi), TH2 = max(1, (int)((long long)TW2 * bh / bw));
@@ -9542,7 +9746,7 @@ static void WebEnsureController(int i) {
                 c->get_CoreWebView2(&t->web);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
-                    c2->put_DefaultBackgroundColor({ 255, 0x20, 0x21, 0x24 });   // the grain's dark,
+                    c2->put_DefaultBackgroundColor({ 255, 0x1c, 0x1c, 0x1c });   // the card's dark,
                                                                                     // not Chromium's white
                 t->web->add_NavigationStarting(
                     Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
@@ -9675,11 +9879,22 @@ static void WebSwitchTo(int i) {
     WebRepaintChrome();
 }
 
+// the card the webview rides in: Radon's content grid - the page floats in a
+// rounded #1c1c1c card with Radon's MicaBorder ring, a 4dpi margin of sheet
+// showing around it. The webview's own corners stay square (an HWND cannot
+// take a path), so the ring is drawn one pixel OUTSIDE the controller's
+// bounds and the card's face fills the corner notches behind it.
+static void WebCardRect(RECT& c) {
+    int m = (int)(4 * g.dpi);
+    int x = PaneX0(false) + CardX(false), cw2 = CardW(false);
+    c = { x + m, m, x + cw2 - m, g.ch - m };
+}
+
 static void WebPlace() {
     WebTab* t = WebCur();
     if (!g.view || !t || !t->ctr) return;
-    int x = PaneX0(false) + CardX(false), cw2 = CardW(false);
-    RECT b{ x + 1, (int)(2 * g.dpi), x + cw2 - 1, g.ch - (int)(2 * g.dpi) };
+    RECT c; WebCardRect(c);
+    RECT b{ c.left + 1, c.top, c.right - 1, c.bottom };   // the ring keeps its pixel
     if (b.right <= b.left || b.bottom <= b.top) return;
     t->ctr->put_Bounds(b);
 }
@@ -9950,16 +10165,17 @@ static void WebFailCard(HDC dc, int w, int h) {
     int cw = (int)(420 * g.dpi), chh = (int)(190 * g.dpi);
     int x = (w - cw) / 2, y = (h - chh) / 2;
     RECT card{ x, y, x + cw, y + chh };
-    HBRUSH b = CreateSolidBrush(RGB(0x26, 0x26, 0x26));
+    HBRUSH b = CreateSolidBrush(wvb::Omnibox);
     FillRect(dc, &card, b); DeleteObject(b);
-    FrameRect(dc, &card, (HBRUSH)GetStockObject(GRAY_BRUSH));
+    HBRUSH f = CreateSolidBrush(wvb::Border);
+    FrameRect(dc, &card, f); DeleteObject(f);
     SetBkMode(dc, TRANSPARENT);
     SelectObject(dc, CaptionFont(g_tbcap, 17, false, L"Killer Sans"));
-    SetTextColor(dc, RGB(0xe8, 0xea, 0xed));
+    SetTextColor(dc, wvb::Ink);
     RECT t1{ x, y + (int)(24 * g.dpi), x + cw, y + (int)(52 * g.dpi) };
     DrawTextW(dc, L"The web engine is missing", -1, &t1, DT_CENTER | DT_SINGLELINE);
     SelectObject(dc, CaptionFont(g_tbcap, 13, false, L"Killer Sans"));
-    SetTextColor(dc, RGB(0x9a, 0xa0, 0xa6));
+    SetTextColor(dc, wvb::InkDim);
     RECT t2{ x + (int)(30 * g.dpi), y + (int)(60 * g.dpi), x + cw - (int)(30 * g.dpi), y + (int)(118 * g.dpi) };
     DrawTextW(dc,
         L"Docsy's browser rides Windows' own WebView2, which this machine "
@@ -12218,8 +12434,9 @@ static void LayoutMain() {
     int sw = g_webOn ? SW() : ((g.sideOn && DVF().n && !g.full) ? SW() : 0);   // the sidebar shows the FOCUSED
     int rw = RW();                              // pane's pages; the rail always rides between
     int cap = CAP();
-    int tb = TBH();                             // the toolbar row under the caption
-    int ws_ = WEBSTRIPH();                      // the browser's Chrome strip rides above it
+    int tb = g_webOn ? (int)(40 * g.dpi) : TBH();   // browser mode: the tab row's band,
+                                                    // sized for Radon's 32dpi tabs
+    int ws_ = WEBSTRIPH();                      // the browser's Radon nav row rides above it
     int sh = g.full ? 0 : SBH();                // full screen hides the footer too
     int ch = max(0, h - cap - ws_ - tb - sh);   // the children sit below caption + strip + toolbar
     sd.w = sw;
@@ -12357,7 +12574,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.rail = CreateWindowExW(0, L"DocsyRail", nullptr,
                                  WS_CHILD | WS_VISIBLE,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
-        g_wstrip = CreateWindowExW(0, L"DocsyWebStrip", nullptr,   // the browser's Chrome strip,
+        g_wstrip = CreateWindowExW(0, L"DocsyWebStrip", nullptr,   // the browser's Radon nav row,
                                    WS_CHILD, 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);   // hidden until Web
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
         DwmApply(h);   // rounded corners + themed 1px border (Windows 11; no-op before)
@@ -13037,14 +13254,15 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     tc.lpszClassName = L"DocsyStatus";
     RegisterClassExW(&tc);
 
-    WNDCLASSEXW bc{ sizeof bc };                    // the toolbar row: the Find Text button
-    bc.lpfnWndProc = BarProc; bc.hInstance = hi;
+    WNDCLASSEXW bc{ sizeof bc };                    // the toolbar row: reader tools, or the
+    bc.style = CS_DBLCLKS;                          // browser's tab row (a double-click on
+    bc.lpfnWndProc = BarProc; bc.hInstance = hi;    // bare sheet opens a tab, like the strip)
     bc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     bc.lpszClassName = L"DocsyBar";
     RegisterClassExW(&bc);
 
-    WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Chrome-style tab strip
-    wbc.style = CS_DBLCLKS;                         // a double-click on bare strip opens a tab
+    WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Radon nav row (top): the
+    wbc.style = CS_DBLCLKS;                         // logo, back/forward, the search pill,
     wbc.lpfnWndProc = WebStripProc; wbc.hInstance = hi;
     wbc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wbc.lpszClassName = L"DocsyWebStrip";
