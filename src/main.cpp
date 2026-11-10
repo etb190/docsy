@@ -9497,7 +9497,7 @@ static void WebThumbDecode(int id, IStream* st) {
     HBITMAP scaled = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
     if (scaled) {
         HDC m = CreateCompatibleDC(nullptr), s = CreateCompatibleDC(nullptr);
-        HGDIOBJ o1 = SelectObject(m, small), o2 = SelectObject(s, full);
+        HGDIOBJ o1 = SelectObject(m, scaled), o2 = SelectObject(s, full);
         SetStretchBltMode(m, HALFTONE); SetBrushOrgEx(m, 0, 0, nullptr);
         StretchBlt(m, 0, 0, TW2, TH2, s, 0, 0, bw, bh, SRCCOPY);
         SelectObject(m, o1); SelectObject(s, o2); DeleteDC(m); DeleteDC(s);
