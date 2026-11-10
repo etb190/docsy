@@ -202,6 +202,9 @@ struct DocState {
     unsigned long long scrollTick = 0;  // last scroll stamp: defers the text pre-warm until settling
     std::unordered_map<int, Ent> cache;
     unsigned long long tick = 0;
+    unsigned long long tabTick = 0;     // last time this session was the front tab: the
+                                        // render-bitmap LRU keeps the three newest (PdfViewer.Tabs.cs
+                                        // RenderCacheTabCap) and drops the rest's page bitmaps
     // flowing text selection: carets over the flattened text cells of a page,
     // plus the lazily built per-page text geometry (LRU-capped like the thumbs)
     std::unordered_map<int, TxtPage> txt;
@@ -336,6 +339,38 @@ struct App {
     bool lineHot = false;               // the divider is hovered
     int splitGrow = 0;                  // how much OpenSplit grew the window, so CloseSplit
                                         // hands back exactly that (0: an even split, closes in place)
+    // ---- tabs (KillerPDF's DocumentSession model, PdfViewer.Tabs.cs) ----
+    // Every open document is a session; a pane owns its own list and its own
+    // front tab, exactly like KillerPDF's per-pane _sessions/_active. The LIVE
+    // working set stays g.d / g.dB - the front slot holds a stale copy while
+    // its document is live, and a switch captures the live fields into the
+    // outgoing slot and moves the incoming slot into the live fields (the
+    // CaptureSessionState / ApplySessionState pair, reduced to docsy's value
+    // world: a DocState move IS the capture). A pane that never tabbed keeps
+    // its list empty and reads the live state alone, so the pre-tab paths are
+    // byte-identical.
+    std::vector<DocState> tabs[2];      // each pane's sessions, in strip order
+    int act[2] = { 0, 0 };              // each pane's front session index
+    std::vector<std::vector<UndoSnap>> tabUndo[2], tabRedo[2];   // the stacks ride the session
+    int tabWin[2] = { 0, 0 };           // leftmost tab in each strip (the overflow window)
+    // the strip's gestures (KillerPDF's Tab_DragDown/Move/Up + Shell/PaneDrag.cs):
+    int tbHot = -1, tbHotPane = 0;      // hovered tab (visible order), -1 none
+    int tbHotBtn = 0;                   // hovered strip element: 0 tab, 1 close x, 2 new +, 3 chevron
+    int tbPending = -1;                 // pressed tab awaiting the mouse-up (the switch happens
+                                        // on UP so a press can begin a drag - KillerPDF's rule)
+    bool tbPendingX = false;            // the press landed on a close x, not the tab face
+    bool tbDragging = false;            // past the 4px threshold: the tab is glued to the cursor
+    int tbDragPane = 0, tbDragIdx = 0;  // the dragged tab's pane and visible index at arm time
+    int tbDragGrab = 0;                 // cursor offset inside the grabbed tab
+    int tbDragX = 0;                    // cursor x in view coords while glued
+    int tbGhostPane = -1;               // -1 none; else the OTHER pane under the drag: ghost + caret
+    int tbCaret = -1;                   // the ghost's insertion slot in that pane's strip
+    int tbGlidePane = 0, tbGlideIdx = -1;   // the displaced neighbor's glide (one swap at a time)
+    int tbGlideDX = 0;                  // its pixel offset, easing back to 0
+    unsigned long long tbGlideT0 = 0;   // the glide's start tick
+    int tbSettlePane = 0, tbSettleIdx = -1; // the released tab's settle glide to its slot
+    int tbSettleDX = 0;
+    unsigned long long tbSettleT0 = 0;
     // annotation gestures (KillerPDF's _isDrawing / _activeInk / drag group):
     // one live gesture at a time, pinned to the pane and page it armed on, in
     // that page's DIP space at the press-time scroll - a scroll during a stroke
@@ -504,6 +539,13 @@ static int FocusSy() { return DVF().sy; }                   // its vertical scro
 static int& PaneSx(bool b) { return DV(b).sx; }
 static int& PaneSy(bool b) { return DV(b).sy; }
 
+// The tab band's reserved top inset for a pane's document layout (defined with
+// the tab section below): KillerPDF's strip is a layout row the card tucks
+// under, so a pane with two or more tabs starts its pages below the band -
+// the band paints over the covered strip, which is exactly the clip the
+// ScrollViewer row gives the same pixels in KillerPDF.
+static int BandInset(bool b);
+
 // ---- the content viewport (KillerPDF's ScrollViewer contract) ----
 // A visible overlay bar is RESERVED, not overlaid: the WPF ScrollViewer lays
 // the content out in what is left after the 12px bar column (and the 12px bar
@@ -547,6 +589,9 @@ static void SaveDoc(bool saveAs);       // the Save button + Ctrl+S / Ctrl+Shift
 static int AskPrompt3(const wchar_t* qualifier, const wchar_t* msg,    // KillerDialog's themed
                       const wchar_t* b0, const wchar_t* b1, const wchar_t* b2);   // question box
 static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err);
+static bool TabOpenInto(bool b, const std::wstring& p);   // the tabbed open (OpenInNewTab)
+static bool CloseTabAt(bool b, int idx);                  // CloseTabCore, false on a cancel
+static void TabPopPick(int row);                          // the tab menu / chevron popup's pick
 // ---- edit tools, the bar and its popups (defined with their sections) ----
 static void UndoPush(bool b);           // snapshot the pane's annotations + marks before a change
 static void UndoOp();                   // Ctrl+Z
@@ -854,7 +899,7 @@ static int FdHit(POINT p) {
 static void FdOrigin(int& bx, int& by) {     // the bar anchors over the FOCUSED pane's card:
     int bw = FdD(FdBarFix) + FdEditW(CardW(FocusB()));   // the surface its scan reads
     bx = CardW(FocusB()) - FdD(16) - bw - FdD(FdPadX) + fd.dx;
-    by = FdD(6) - FdD(FdPadT) + fd.dy;
+    by = FdD(6) - FdD(FdPadT) + fd.dy + BandInset(FocusB());   // under the tab band when one shows
 }
 static RECT FdRect() {                       // the full shadow-padded window rect
     int bx, by; FdOrigin(bx, by);
@@ -2064,7 +2109,10 @@ static void Layout(DocState& D, bool b) {   // one pane's document at the pane's
     D.top.assign((size_t)rows + 1, 0);
     D.px.assign((size_t)max(D.n, 1), 0);
     D.rh.assign((size_t)max(rows, 1), 0);
-    int y = D.gap; D.maxw = 0;
+    int y = D.gap + BandInset(b); D.maxw = 0;   // the tab band is a layout row: KillerPDF's card
+                                                // starts below its strip, so the pages do too -
+                                                // the covered strip scrolls under the opaque band,
+                                                // which is the same clip the ScrollViewer row draws
     for (int r = 0; r < rows; r++) {                 // pass 1: row heights and the widest row
         int i0 = D.vm == 1 ? D.cur : r * per;
         int cnt = D.vm == 1 ? 1 : min(per, D.n - r * per);
@@ -2138,7 +2186,7 @@ static void ApplyFit(bool pageFit, bool b) {   // one pane's fit, at that pane's
         int i0 = D.vm == 1 ? max(0, D.cur) : r * per;
         int cnt = D.vm == 1 ? 1 : min(per, D.n - i0);
         float rh = 0; for (int k = 0; k < cnt; k++) rh = max(rh, D.ph[i0 + k]);
-        z = min(z, (g.ch - 2.0 * Gap()) / (max(1.f, rh) * g.dpi));
+        z = min(z, (g.ch - BandInset(b) - 2.0 * Gap()) / (max(1.f, rh) * g.dpi));
     }
     SetZoomAt(z, 0, 0, b);
     D.fitMode = pageFit ? 1 : 0;
@@ -2283,7 +2331,7 @@ static void OpenDlg() {                          // the dialog opens into the FO
     o.lpstrFilter = L"PDF files\0*.pdf\0All files\0*.*\0";
     o.lpstrFile = f; o.nMaxFile = (DWORD)_countof(f);
     o.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    if (GetOpenFileNameW(&o)) Open(DVF(), f);
+    if (GetOpenFileNameW(&o)) TabOpenInto(FocusB(), f);   // OpenInNewTab: the dialog lands in
 }
 
 static void HandleDrop(HDROP d, HWND h) {        // the pane under the drop takes the file:
@@ -2292,7 +2340,7 @@ static void HandleDrop(HDROP d, HWND h) {        // the pane under the drop take
         POINT p; DragQueryPoint(d, &p);          // to the pane the reader is working in
         bool b = FocusB();
         if (h == g.view) b = PaneB(p.x);
-        Open(DV(b), f);
+        TabOpenInto(b, f);                       // a new tab in the pane it landed on
     }
     DragFinish(d);
 }
@@ -2331,53 +2379,16 @@ static void NewBlank() {
     xr += "trailer\n<< /Size 4 /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
     emit(xr);
     CloseHandle(f);
-    if (Open(DVF(), file)) SetStatusHold(L"New blank document");
+    // NewDocument opens the blank in its OWN tab (BeginTabLoad): a busy front
+    // tab keeps its state, an empty one is reused, so Ctrl+N never eats work
+    if (TabOpenInto(FocusB(), file)) SetStatusHold(L"New blank document");
 }
 
-// CloseFile_Click -> CloseTab: the focused pane's document leaves, its
-// annotations and find results die with it - the same teardown Open()
-// gives a replaced document, landing on KillerPDF's empty state.
+// CloseFile_Click -> CloseTab: the focused pane's front tab closes through the
+// tab model's CloseTabCore - the neighbor takes the front, the last document
+// lands on KillerPDF's empty state, and a dirty tab asks first.
 static void CloseDoc() {
-    DocState& D = DVF();
-    if (!D.n) return;
-    if (g.tedit) CommitTextEdit();
-    if (DocDirty(D)) {                         // KillerPDF's tab close asks first
-        int r = AskPrompt3(L"", L"This file has unsaved changes. Save them before closing it?",
-                           L"Cancel", L"Don't Save", L"Save");
-        if (r == 0) return;                    // Cancel: the document stays open
-        if (r == 2) {                          // Save: a failed write keeps it open too
-            std::wstring err;
-            if (!WriteAnnotatedPdf(D, D.path, err)) {
-                SetStatusHold(std::wstring(L"Save failed: ") + err);
-                return;
-            }
-        }
-    }
-    ClearCache(D);
-    D.doc = nullptr; D.n = 0; D.pw.clear(); D.ph.clear();
-    D.name.clear(); D.path.clear();
-    D.sx = D.sy = 0; D.zoom = 1.0; D.fitMode = 2; D.cur = -1;
-    D.txt.clear(); D.annos.clear(); D.prot.clear(); D.pflip.clear();
-    D.savedAnnos.clear(); D.savedProt.clear(); D.savedPflip.clear();   // the checkpoint dies with the document
-    D.tool = TOOL_SELECT;
-    g.annSelPage = -1; g.annSelIdx = -1;
-    SelClear(D);
-    bool mine = fd.pane == (&D == &g.dB);
-    if (mine && fd.open) {
-        if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
-        if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
-        fd = Find{};
-    }
-    {                                          // the sidebar shows the focused pane: empty now
-        for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-        sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;
-        sd.cw = 0; sd.ch = 0; sd.docH = 0;
-    }
-    LayoutMain();
-    InvalidateRect(g.main, nullptr, FALSE);
-    if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);
-    RailRepaint();
-    SetStatusHold(L"Document closed");
+    CloseTabAt(FocusB(), Act(FocusB()));
 }
 
 // The shared write-out: every page renders at ~150dpi with the annotations
@@ -2655,6 +2666,429 @@ static void SideSync() {
         else if (y0 < sd.scroll) SideScrollTo(y1 - sd.ch + (int)(4 * g.dpi));     // off the top: card at the bottom
     }
     if (g.side && (GetWindowLongW(g.side, GWL_STYLE) & WS_VISIBLE)) InvalidateRect(g.side, nullptr, FALSE);
+}
+
+// ============================================================
+//  Tabs - KillerPDF's DocumentSession model (Controls/Viewer/PdfViewer.Tabs.cs)
+// ============================================================
+// One window, many documents: every open PDF is a session in its pane's strip,
+// the front tab's fields are the live working set, and switching tabs captures
+// the live fields into the outgoing session and applies the incoming session's
+// fields, then re-renders. The strip itself is per pane (KillerPDF keeps
+// _sessions/_active on the viewer, not the window), the tab band appears only
+// from the second document of that pane, and every open/close/switch route
+// below mirrors its namesake there: TabOpenInto is OpenInNewTab + BeginTabLoad,
+// SwitchTab is SwitchToTab, CloseTabAt is CloseTabCore, CloseOtherTabs and
+// CloseAllTabs keep their prompts, CycleTab keeps its wrap, and TabMoveToPane
+// is DetachSessionExt + AdoptSessionExt. KillerPDF's lazy deferred tabs and
+// restart restore are the one behavior docsy does not carry: it keeps no
+// settings store at all, so there is no OpenTabs key to restore from.
+
+static std::vector<DocState>& Tabs(bool b) { return b ? g.tabs[1] : g.tabs[0]; }
+static int& Act(bool b) { return b ? g.act[1] : g.act[0]; }
+static unsigned long long g_tabTick = 0;
+
+// The strip counts DOCUMENTS, not slots: a pane's blank start state is not a
+// tab, and the front slot is a stale husk while its document is live, so the
+// count reads the live state there (KillerPDF counts Doc/DeferredPath).
+static int TabDocCount(bool b) {
+    std::vector<DocState>& T = Tabs(b);
+    if (T.empty()) return DV(b).n > 0 ? 1 : 0;
+    int c = 0;
+    for (int i = 0; i < (int)T.size(); i++)
+        if ((i == Act(b) ? DV(b).n : T[i].n) > 0) c++;
+    return c;
+}
+static bool BandShown(bool b) {   // RebuildTabStrip: the strip exists from the second
+    return !g.full && TabDocCount(b) > 1;   // document, and full screen gives the row to the page
+}
+static int BANDH() {              // the band: 3px top inset + 29px face + 1px foot
+    return (int)(33 * g.dpi);     // (KillerPDF's TabMargin 0,3,0,1 around the 29px face)
+}
+static int BandInset(bool b) { return BandShown(b) ? BANDH() : 0; }
+
+// Make sure the pane HAS a session list, adopting the live working set as its
+// first session's document on first use (EnsureInitialSession, minus the
+// capture: the front slot stays a husk until a switch parks the live state).
+static void TabEnsure(bool b) {
+    if (!Tabs(b).empty()) return;
+    Tabs(b).push_back(DocState{});
+    g.tabUndo[b].push_back({});
+    g.tabRedo[b].push_back({});
+    Act(b) = 0;
+}
+
+// Copy the live working set INTO the front session (CaptureSessionState). The
+// move is the capture: the bitmaps, annotations, transforms, checkpoint and
+// undo pair all ride the DocState. The live fields are left a husk that the
+// very next apply overwrites - nothing may read them in between.
+static void TabCaptureLive(bool b) {
+    TabEnsure(b);
+    int a = Act(b);
+    Tabs(b)[a] = std::move(DV(b));
+    g.tabUndo[b][a] = std::move(g.undo);
+    g.tabRedo[b][a] = std::move(g.redo);
+    DV(b) = DocState{};
+}
+
+// KillerPDF's CancelTransientForSwitch: the live interactions die before the
+// working set changes, so nothing bleeds onto the next document.
+static void TabCancelTransients(bool b) {
+    CommitTextEdit();
+    if (g.annPaneB == b) {                        // the pane's own gestures die with it
+        PolyCancel(g.view);
+        g.annInk = false; g.annArm = false; g.annMove = false; g.annResize = false;
+    }
+    if (g.annSelB == b) { g.annSelPage = -1; g.annSelIdx = -1; }
+    g.brushOn = false;
+    if (g.barOn) {                                // the floating bar belongs to the outgoing tool
+        g.barOn = false; g.barTool = -1;
+        if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+    }
+    if (fd.open && fd.pane == b) {                // the find is pinned to ITS pane (CloseSearchBar)
+        if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
+        if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
+        fd = Find{};
+    }
+    SelClear(DV(b));                              // ClearSelection + ClearTextSelection
+}
+
+// Point the live working set AT the session (ApplySessionState), mark it the
+// front tab, and hand the window-level surfaces their new document.
+static void TabApply(bool b, int idx) {
+    DV(b) = std::move(Tabs(b)[idx]);
+    g.undo = std::move(g.tabUndo[b][idx]);
+    g.redo = std::move(g.tabRedo[b][idx]);
+    Act(b) = idx;
+    DV(b).tabTick = ++g_tabTick;
+}
+
+// TouchRenderLru: three tabs keep their rendered page bitmaps; older sessions
+// re-render on return. ClearCache runs per session, exactly the per-tab cache
+// KillerPDF clears when a tab falls out of the LRU window.
+static void TabTrimCaches(bool b) {
+    std::vector<DocState>& T = Tabs(b);
+    std::vector<std::pair<unsigned long long, int>> v;
+    for (int i = 0; i < (int)T.size(); i++)
+        if (i != Act(b) && !T[i].cache.empty()) v.push_back({ T[i].tabTick, i });
+    std::sort(v.begin(), v.end(), [](auto& a, auto& c) { return a.first > c.first; });
+    for (int k = 3; k < (int)v.size(); k++) { ClearCache(T[v[k].second]); T[v[k].second].txt.clear(); }
+}
+
+// The surfaces that read the FOCUSED pane's document after its identity
+// changed: the sidebar's ring, the footer's page/zoom, the rail's light and
+// the toolbar's tool - FocusPane's choreography, reused for a tab switch.
+static void TabChrome(bool b) {
+    if (b != FocusB()) {                          // an unfocused pane's switch touches only itself
+        if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+        return;
+    }
+    for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
+    sd.th.clear(); sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;
+    sd.cw = 0; sd.ch = 0;
+    SideLayout();
+    UpdateTitle();
+    SideSync();
+    StatusRepaint();
+    RailRepaint();
+    if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+}
+
+// SwitchToTab: make session idx the pane's front tab.
+static void SwitchTab(bool b, int idx) {
+    TabEnsure(b);
+    if (idx < 0 || idx >= (int)Tabs(b).size() || idx == Act(b)) return;
+    TabCancelTransients(b);
+    TabCaptureLive(b);                            // the outgoing tab parks with its state
+    TabApply(b, idx);                             // ... and the target becomes live
+    TabTrimCaches(b);
+    LayoutMain();                                 // the band may appear or collapse; reflow
+    TabChrome(b);
+}
+
+// FindOpenSession: an open session for this exact file (case-insensitive full
+// path), or -1. The front slot reads the live state, the only place its
+// current path is guaranteed current.
+static int TabFindOpen(bool b, const std::wstring& p) {
+    wchar_t want[MAX_PATH * 4];
+    GetFullPathNameW(p.c_str(), (DWORD)_countof(want), want, nullptr);
+    std::vector<DocState>& T = Tabs(b);
+    for (int i = 0; i < (int)T.size(); i++) {
+        const DocState& s = (i == Act(b)) ? DV(b) : T[i];
+        if (!s.n || s.path.empty()) continue;
+        wchar_t have[MAX_PATH * 4];
+        GetFullPathNameW(s.path.c_str(), (DWORD)_countof(have), have, nullptr);
+        if (!lstrcmpiW(have, want)) return i;
+    }
+    return -1;
+}
+
+// OpenInNewTab: the dialog, a drop and the command line all land here. An
+// already-open CLEAN tab wins over a duplicate (FindOpenSession's short
+// circuit, "Already open" in the footer); an empty front tab is reused
+// (BeginTabLoad's reuse rule); a busy one spawns a new session at the strip's
+// end that inherits the current view mode, so a fresh document does not snap
+// back to Continuous when the reader lives in Single. A failed open rolls the
+// strip back exactly (AbortTabLoad).
+static bool TabOpenInto(bool b, const std::wstring& p) {
+    int found = TabFindOpen(b, p);
+    if (found >= 0) {
+        const DocState& s = (found == Act(b)) ? DV(b) : Tabs(b)[found];
+        if (!DocDirty(s)) {
+            SwitchTab(b, found);                  // a no-op when it is already the front tab
+            SetStatusHold(std::wstring(L"Already open: ") + s.name);
+            return true;
+        }
+    }
+    TabEnsure(b);
+    int prev = Act(b);
+    bool wasEmpty = !DV(b).n;                     // the front tab is blank: reuse it
+    int created = -1;
+    if (!wasEmpty) {
+        int vm = DV(b).vm, fit = DV(b).fitMode;   // the view mode the new tab inherits
+        TabCancelTransients(b);
+        TabCaptureLive(b);                        // the current document parks in its slot
+        Tabs(b).push_back(DocState{});            // the new session rides the strip's end
+        g.tabUndo[b].push_back({});
+        g.tabRedo[b].push_back({});
+        Act(b) = (int)Tabs(b).size() - 1;
+        DV(b) = DocState{};
+        DV(b).vm = vm; DV(b).fitMode = fit;
+        created = Act(b);
+    } else {
+        TabCancelTransients(b);
+    }
+    if (!Open(DV(b), p)) {
+        if (created >= 0) {                       // AbortTabLoad: the strip never saw it
+            Tabs(b).pop_back();
+            g.tabUndo[b].pop_back();
+            g.tabRedo[b].pop_back();
+            DV(b) = std::move(Tabs(b)[prev]);
+            g.undo = std::move(g.tabUndo[b][prev]);
+            g.redo = std::move(g.tabRedo[b][prev]);
+            Act(b) = prev;
+        }
+        return false;
+    }
+    return true;
+}
+
+// CloseTabCore. Returns false when a prompt was canceled (the tab stays), so
+// the sweep helpers can stop or skip. An INACTIVE dirty tab is brought forward
+// first - a save works on the live document - exactly KillerPDF's route.
+static bool CloseTabAt(bool b, int idx) {
+    TabEnsure(b);
+    if (idx < 0 || idx >= (int)Tabs(b).size()) return false;
+    bool live = idx == Act(b);
+    if (!(live ? DV(b).n : Tabs(b)[idx].n)) return false;   // the blank start tab is not a document
+    if (!live && DocDirty(Tabs(b)[idx])) SwitchTab(b, idx);
+    if (idx != Act(b)) {                          // a clean inactive tab: release it where it sits
+        ClearCache(Tabs(b)[idx]);
+        Tabs(b).erase(Tabs(b).begin() + idx);
+        g.tabUndo[b].erase(g.tabUndo[b].begin() + idx);
+        g.tabRedo[b].erase(g.tabRedo[b].begin() + idx);
+        if (idx < Act(b)) Act(b)--;
+        LayoutMain();
+        if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+        StatusRepaint();
+        return true;
+    }
+    // the front tab: capture nothing - the live fields ARE the tab
+    if (g.tedit) CommitTextEdit();
+    TabCancelTransients(b);
+    if (DocDirty(DV(b))) {                        // KillerPDF's tab close asks first
+        int r = AskPrompt3(L"", L"This file has unsaved changes. Save them before closing it?",
+                           L"Cancel", L"Don't Save", L"Save");
+        if (r == 0) return false;                 // Cancel: the document stays open
+        if (r == 2) {                             // Save: a failed write keeps it open too
+            std::wstring err;
+            if (!WriteAnnotatedPdf(DV(b), DV(b).path, err)) {
+                SetStatusHold(std::wstring(L"Save failed: ") + err);
+                return false;
+            }
+        }
+    }
+    ClearCache(DV(b));                            // the document's bitmaps die with it
+    if (fd.open && fd.pane == b) {                // the find dies only when ITS document dies
+        if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
+        if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
+        fd = Find{};
+    }
+    Tabs(b).erase(Tabs(b).begin() + idx);
+    g.tabUndo[b].erase(g.tabUndo[b].begin() + idx);
+    g.tabRedo[b].erase(g.tabRedo[b].begin() + idx);
+    if (Tabs(b).empty()) {                        // the last tab: a blank session and the
+        Tabs(b).push_back(DocState{});            // empty drop-zone state (CloseTabCore's blank)
+        g.tabUndo[b].push_back({});
+        g.tabRedo[b].push_back({});
+        Act(b) = 0;
+        DV(b) = DocState{};
+        g.undo.clear(); g.redo.clear();
+    } else {                                      // the neighbor takes the front (idx clamped)
+        int next = min(idx, (int)Tabs(b).size() - 1);
+        DV(b) = std::move(Tabs(b)[next]);
+        g.undo = std::move(g.tabUndo[b][next]);
+        g.redo = std::move(g.tabRedo[b][next]);
+        Act(b) = next;
+        DV(b).tabTick = ++g_tabTick;
+    }
+    g.annSelPage = -1; g.annSelIdx = -1;
+    LayoutMain();
+    TabChrome(b);
+    SetStatusHold(L"Document closed");
+    return true;
+}
+
+// CloseOtherTabs: every other document tab closes, each dirty one asking like
+// a manual close; a canceled tab is skipped and the sweep moves on. The keeper
+// is followed by its path - closes above it shift the indices under it.
+static void CloseOtherTabs(bool b, int keep) {
+    TabEnsure(b);
+    if (keep < 0 || keep >= (int)Tabs(b).size()) return;
+    std::wstring keepPath = (keep == Act(b)) ? DV(b).path : Tabs(b)[keep].path;
+    std::vector<std::wstring> skipped;
+    for (;;) {
+        int k = -1;
+        for (int i = 0; i < (int)Tabs(b).size(); i++)
+            if (((i == Act(b)) ? DV(b).path : Tabs(b)[i].path) == keepPath) { k = i; break; }
+        if (k < 0) return;
+        int hit = -1;
+        std::wstring hitPath;
+        for (int i = 0; i < (int)Tabs(b).size(); i++) {
+            if (i == k) continue;
+            bool live = i == Act(b);
+            if (!((live ? DV(b).n : Tabs(b)[i].n) > 0)) continue;
+            const std::wstring& p2 = live ? DV(b).path : Tabs(b)[i].path;
+            bool gone = false;
+            for (auto& s2 : skipped) if (s2 == p2) { gone = true; break; }
+            if (gone) continue;
+            hit = i; hitPath = p2;
+            break;
+        }
+        if (hit < 0) return;
+        if (!CloseTabAt(b, hit)) skipped.push_back(hitPath);
+    }
+}
+
+// CloseAllTabs (Ctrl+Shift+Q): ONE combined ask for every dirty tab rather
+// than a prompt each, then the pane resets to a single blank session.
+static void CloseAllTabs(bool b) {
+    TabEnsure(b);
+    bool any = false, anyDirty = false;
+    for (int i = 0; i < (int)Tabs(b).size(); i++) {
+        DocState& S = (i == Act(b)) ? DV(b) : Tabs(b)[i];
+        if (!S.n) continue;
+        any = true;
+        if (DocDirty(S)) anyDirty = true;
+    }
+    if (!any) return;
+    if (g.tedit) CommitTextEdit();
+    if (anyDirty) {
+        int r = AskPrompt3(L"", L"You have unsaved changes. Save them before closing all tabs?",
+                           L"Cancel", L"Don't Save", L"Save");
+        if (r == 0) return;
+        if (r == 2) {
+            for (int i = 0; i < (int)Tabs(b).size(); i++) {
+                DocState& S = (i == Act(b)) ? DV(b) : Tabs(b)[i];
+                if (!S.n || !DocDirty(S)) continue;
+                std::wstring err;
+                if (!WriteAnnotatedPdf(S, S.path, err)) {
+                    SetStatusHold(std::wstring(L"Save failed: ") + err);
+                    return;                       // a failed save stops the sweep, window up
+                }
+                SnapClean(S);
+            }
+        }
+    }
+    for (int i = 0; i < (int)Tabs(b).size(); i++) ClearCache(Tabs(b)[i]);
+    if (fd.open && fd.pane == b) {
+        if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
+        if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
+        fd = Find{};
+    }
+    Tabs(b).clear();
+    g.tabUndo[b].clear();
+    g.tabRedo[b].clear();
+    Tabs(b).push_back(DocState{});
+    g.tabUndo[b].push_back({});
+    g.tabRedo[b].push_back({});
+    Act(b) = 0;
+    DV(b) = DocState{};
+    g.undo.clear(); g.redo.clear();
+    g.annSelPage = -1; g.annSelIdx = -1;
+    LayoutMain();
+    TabChrome(b);
+    SetStatusHold(L"All tabs closed");
+}
+
+// CycleTab: Ctrl+Tab walks the document tabs forward, Ctrl+Shift+Tab backward,
+// wrapping, blanks skipped.
+static void CycleTab(bool b, int dir) {
+    if (TabDocCount(b) < 2) return;
+    int cnt = (int)Tabs(b).size();
+    for (int k = 1; k <= cnt; k++) {
+        int i = ((Act(b) + dir * k) % cnt + cnt) % cnt;
+        if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) { SwitchTab(b, i); return; }
+    }
+}
+
+// DetachSessionExt + AdoptSessionExt: a session is self-contained - document,
+// annotations, transforms, checkpoint, undo pair, render cache and view state
+// all ride the value - so a move between panes is a move, nothing reloads.
+// The tab you just dragged is the one you are looking at.
+static void TabMoveToPane(bool from, int idx, bool to, int insertAt) {
+    if (from == to) return;
+    TabEnsure(from); TabEnsure(to);
+    if (idx < 0 || idx >= (int)Tabs(from).size()) return;
+    if (!(idx == Act(from) ? DV(from).n : Tabs(from)[idx].n)) return;
+    bool wasLive = idx == Act(from);
+    DocState s;
+    std::vector<UndoSnap> us, rs;
+    if (wasLive) {
+        s = std::move(DV(from));
+        us = std::move(g.undo); rs = std::move(g.redo);
+    } else {
+        s = std::move(Tabs(from)[idx]);
+        us = std::move(g.tabUndo[from][idx]); rs = std::move(g.tabRedo[from][idx]);
+    }
+    Tabs(from).erase(Tabs(from).begin() + idx);
+    g.tabUndo[from].erase(g.tabUndo[from].begin() + idx);
+    g.tabRedo[from].erase(g.tabRedo[from].begin() + idx);
+    if (wasLive) {
+        if (Tabs(from).empty()) {
+            Tabs(from).push_back(DocState{});
+            g.tabUndo[from].push_back({});
+            g.tabRedo[from].push_back({});
+            Act(from) = 0;
+            DV(from) = DocState{};
+            g.undo.clear(); g.redo.clear();
+        } else {
+            int next = min(idx, (int)Tabs(from).size() - 1);
+            DV(from) = std::move(Tabs(from)[next]);
+            g.undo = std::move(g.tabUndo[from][next]);
+            g.redo = std::move(g.tabRedo[from][next]);
+            Act(from) = next;
+            DV(from).tabTick = ++g_tabTick;
+        }
+    } else if (idx < Act(from)) Act(from)--;
+    if (fd.open && fd.pane == from && wasLive) {  // the scan's document left this pane:
+        if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }   // the find dies with it
+        if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
+        fd = Find{};
+    }
+    s.tabTick = ++g_tabTick;
+    for (auto& sn : us) sn.paneB = to;            // the snapshots now belong to the other pane
+    for (auto& sn : rs) sn.paneB = to;
+    int at = std::clamp(insertAt, 0, (int)Tabs(to).size());
+    Tabs(to).insert(Tabs(to).begin() + at, std::move(s));
+    g.tabUndo[to].insert(g.tabUndo[to].begin() + at, std::move(us));
+    g.tabRedo[to].insert(g.tabRedo[to].begin() + at, std::move(rs));
+    if (at <= Act(to)) Act(to)++;
+    TabTrimCaches(from); TabTrimCaches(to);
+    SwitchTab(to, at);
+    LayoutMain();                                 // both strips may have grown or collapsed
+    TabChrome(from); TabChrome(to);
 }
 
 static void EnsureSideBack(HDC ref, int w, int h) {
@@ -4759,6 +5193,8 @@ static LRESULT CALLBACK ListPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_lp.who == 0) {
             g.textFont = g_lp.items[hot];
             ApplyTextStyleToSelection();
+        } else if (g_lp.who == 2) {              // the tab strip's menus (TabPopPick)
+            TabPopPick(hot);
         } else {
             bool b = FocusB();
             DocState& D = DV(b);
@@ -5909,9 +6345,11 @@ static void PaintViewBars(HDC dc, int w, int h, int xoff) {
     int track = cw - (vshow ? gb : 0);   // the content viewport: the v-bar's column is reserved
     bool hshow = D.docW > track;         // out of it, and the h-bar answers to THAT width
     int gutH = hshow ? gb : 0;
+    int ins = BandInset(false);          // the band is a layout row: the track starts under it
     if (vshow) {
-        int tl, tp; BarThumb(D.docH, h - gutH, D.sy, tl, tp);   // the v-track stops short of
-        bool hot = D.vHot || D.vDrag;                           // the h-bar's reserved row
+        int tl, tp; BarThumb(D.docH, h - ins - gutH, D.sy, tl, tp);   // the v-track stops short of
+        tp += ins;                                               // the h-bar's reserved row
+        bool hot = D.vHot || D.vDrag;
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, xoff + cw - gb + (gb - bw) / 2, tp, bw, tl, r, hot);
     }
@@ -5936,9 +6374,11 @@ static void PaintPaneBars(HDC dc, DocState& D, bool b, bool vhot, bool hhot) {
     int track = (x1 - x0) - (vshow ? gb : 0);            // the content viewport: the v-bar's
     bool hshow = D.docW > track;                         // column comes out of it first
     int gutH = hshow ? gb : 0;
+    int ins = BandInset(b);                              // the track starts under the band
     if (vshow) {
-        int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp);   // the v-track stops short
-        int bw = vhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);       // of the h-bar's reserved row
+        int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp);   // the v-track stops short
+        tp += ins;                                       // of the h-bar's reserved row
+        int bw = vhot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, x1 - gb + (gb - bw) / 2, tp, bw, tl, r, vhot);
     }
     if (hshow) {
@@ -5978,6 +6418,723 @@ static void ViewWheel(WPARAM wp, LPARAM lp) {
     }
 }
 
+// ============================================================
+//  The tab strip - KillerPDF's band (PdfViewer.TabStrip.cs + PdfViewer.xaml)
+// ============================================================
+// The band is a layout row at the top of the pane's own pass: the window's
+// grainy field shows through where no tab paints, the active tab carries the
+// menu tier (#141414) and joins the card below it, the inactive tabs are
+// transparent with a 1px #555 divider apiece, and the card's tucked top
+// border is the hairline at the band's foot. Equal cells between a 160px
+// floor and a 260px ceiling, the count capped at the floor, the overflow a
+// chevron that lists the collapsed tabs, and the "+" that opens a blank
+// document - every number below is KillerPDF's, at the window's DPI.
+
+static const int TAB_FLOOR = 160, TAB_CEIL = 260;   // TabFloorWidth / TabCeilingWidth
+static const int TAB_BTN = 22, TAB_BTN_GAP = 4;     // the + and chevron cells (26px pitch)
+static int TABF(int v) { return (int)(v * g.dpi); }
+
+static HFONT TabFont() {                 // TabTitleFontSize 12, the toolbar's family
+    static HFONT f = nullptr; static double fd = 0;
+    if (f && fd != g.dpi) { DeleteObject(f); f = nullptr; }
+    if (!f) f = CaptionFont(f, 12, false, L"Killer Sans UI");
+    fd = g.dpi;
+    return f;
+}
+
+// The tab's title: the file name without its extension (KillerPDF's Title),
+// with the dirty dot KillerPDF's RefreshTabLabel prefixes. The front slot
+// reads the live state - the only place its dirtiness is current.
+static std::wstring TabTitle(bool b, int idx) {
+    const DocState& s = (idx == Act(b)) ? DV(b) : Tabs(b)[idx];
+    const std::wstring& nm = s.name;
+    std::wstring t = nm;
+    size_t dot = nm.find_last_of(L'.');
+    size_t sl = nm.find_last_of(L"\\/");
+    if (dot != std::wstring::npos && (sl == std::wstring::npos || dot > sl) && dot > 0) t = nm.substr(0, dot);
+    return DocDirty(s) ? L"\x2022 " + t : t;   // IsDirty ? "\u2022 " + Title : Title
+}
+
+// ApplyTabWindow, at docsy's own band: which tabs fit at this width, the
+// contiguous window that shifts the least to keep the active tab on screen,
+// and whether the chevron shows. `start`/`cap` are VISIBLE slots; the caller
+// maps them to sessions.
+struct TabStripGeo {
+    int x0, cell, start, cap, hostW;    // the strip's left edge, the equal cell width,
+    bool chev;                          // the window's first slot, its count, the chevron
+    int faceTop, faceH, actH;           // the faces' geometry (inactive 29, active 30)
+};
+static void TabStripLayout(bool b, TabStripGeo& G) {
+    int cardL = PaneX0(b) + CardX(b), cardR = cardL + CardW(b);
+    G.faceTop = TABF(3); G.faceH = TABF(29); G.actH = TABF(30);
+    G.start = 0; G.cap = 0; G.chev = false; G.hostW = 0; G.cell = 0; G.x0 = cardL;
+    // visible sessions: the doc tabs, in strip order (a blank start slot is
+    // not a tab - UniformGrid ignores a collapsed child, so docsy skips it)
+    std::vector<int> vis;
+    for (int i = 0; i < (int)Tabs(b).size(); i++)
+        if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) vis.push_back(i);
+    int n = (int)vis.size();
+    if (n == 0) return;
+    int btnR = cardR - TABF(2);                       // the + hugs the card's right inset
+    int plusL = btnR - TABF(TAB_BTN);
+    int avail = plusL - TABF(TAB_BTN_GAP) - cardL;    // the strip measures against the
+                                                      // band's remaining width
+    int cap = avail / TABF(TAB_FLOOR);
+    bool overflow = cap < n;
+    if (overflow) {
+        cap = max(1, (avail - TABF(TAB_BTN)) / TABF(TAB_FLOOR));
+        if (cap >= n) overflow = false;
+    }
+    G.chev = overflow;
+    int stripAvail = max(0, avail - (overflow ? TABF(TAB_BTN) : 0));
+    int visCount = overflow ? cap : n;
+    G.hostW = max(TABF(TAB_FLOOR), min(stripAvail, visCount * TABF(TAB_CEIL)));
+    G.cap = visCount;
+    G.cell = G.hostW / max(1, visCount);
+    if (overflow) {
+        int start = std::clamp(g.tabWin[b], 0, n - cap);
+        int actVis = -1;                              // the active tab's visible slot
+        for (int k = 0; k < n; k++)
+            if (vis[k] == Act(b)) { actVis = k; break; }
+        if (actVis >= 0) {
+            if (actVis < start) start = actVis;
+            else if (actVis > start + cap - 1) start = actVis - cap + 1;
+        }
+        g.tabWin[b] = start;
+        G.start = start;
+    } else {
+        g.tabWin[b] = 0;
+        G.cap = n;
+    }
+}
+
+// The one geometry both the paint and the hit test share: a VISIBLE index's
+// face rect (k counts through the full visible list; the window's first slot
+// sits at the strip's left edge).
+static void TabSlotRect(const TabStripGeo& G, int k, RECT& r) {
+    int x = G.x0 + (k - G.start) * G.cell;
+    r = { x, G.faceTop, x + G.cell, G.faceTop + G.faceH };
+}
+
+// The strip's hit test, the paint's own geometry: 0 field, 1 tab, 2 close x,
+// 3 the +, 4 the chevron. `vis` maps a visible slot back to its session.
+static int TabBandHitAt(bool b, const TabStripGeo& G, const std::vector<int>& vis, POINT p, int& slot) {
+    slot = -1;
+    if (!BandShown(b)) return 0;
+    if (p.y < 0 || p.y >= BANDH()) return 0;
+    int cardL = PaneX0(b) + CardX(b), cardR = cardL + CardW(b);
+    if (p.x < cardL || p.x >= cardR) return 0;
+    int btnR = cardR - TABF(2);
+    int plusL = btnR - TABF(TAB_BTN);
+    if (p.x >= plusL && p.x < btnR && p.y >= TABF(4) && p.y < TABF(24)) return 3;
+    if (G.chev) {
+        int chevL = plusL - TABF(TAB_BTN_GAP) - TABF(TAB_BTN);
+        if (p.x >= chevL && p.x < chevL + TABF(TAB_BTN) && p.y >= TABF(4) && p.y < TABF(24)) return 4;
+    }
+    for (int k = G.start; k < G.start + G.cap && k < (int)vis.size(); k++) {
+        RECT r; TabSlotRect(G, k, r);
+        if (p.x >= r.left && p.x < r.right && p.y >= G.faceTop && p.y < G.faceTop + G.faceH) {
+            slot = k;
+            bool active = vis[k] == Act(b);
+            int xr = r.right - TABF(2);               // the close x owns its own 24px zone
+            if (!active && p.x >= xr - TABF(24) && p.x < xr && p.y >= G.faceTop + TABF(2) && p.y < G.faceTop + G.faceH - TABF(2))
+                return 2;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void TabBandInvalidate(bool b) {   // the band's own strip, nothing else
+    if (!g.view || !BandShown(b)) return;
+    RECT r{ PaneX0(b), 0, PaneX0(b) + PaneW(b), BANDH() };
+    InvalidateRect(g.view, &r, FALSE);
+}
+
+// The band's paint. Draw order is KillerPDF's z-order: the field, the foot
+// fade, the card's tucked hairline, then the tabs - the active tab last among
+// its neighbors so its ring is never overpainted - then the + and the chevron.
+static void TabBandPaint(HDC dc, bool b) {
+    if (!BandShown(b)) return;
+    TabEnsure(b);
+    TabStripGeo G; TabStripLayout(b, G);
+    std::vector<int> vis;
+    for (int i = 0; i < (int)Tabs(b).size(); i++)
+        if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) vis.push_back(i);
+    int cardL = PaneX0(b) + CardX(b), cardR = cardL + CardW(b);
+    int BH = BANDH();
+    // the field: the band paints no fill of its own - the window's grainy
+    // background shows through, exactly KillerPDF's transparent strip
+    RECT band{ PaneX0(b), 0, PaneX0(b) + PaneW(b), BH };
+    FillRect(dc, &band, GrainBrush(1));
+    // the foot fade (TabStripFade): transparent to 45%, #59000000 at the foot,
+    // the whole gradient at BarShadowOpacity 0.38
+    {
+        Gdiplus::Graphics gs(dc);
+        Gdiplus::LinearGradientBrush br(Gdiplus::PointF(0, (float)BH * 0.45f),
+                                        Gdiplus::PointF(0, (float)BH),
+                                        Gdiplus::Color(0, 0, 0, 0), Gdiplus::Color(0x22, 0, 0, 0));
+        gs.FillRectangle(&br, Gdiplus::RectF((float)band.left, (float)BH * 0.45f,
+                                             (float)(band.right - band.left), (float)BH * 0.55f));
+    }
+    // the card's tucked top border: the hairline at the band's foot. The ends
+    // round at the active tab's radius (CardCorners.AtTabBand) unless the
+    // first/last visible tab is the active one - that tab's own edge is flat
+    // and flush, and a curve under it would cut a notch out of the join.
+    int actVis = -1;
+    for (int k = 0; k < (int)vis.size(); k++) if (vis[k] == Act(b)) { actVis = k; break; }
+    bool firstActive = G.cap > 0 && actVis == G.start;
+    // the trailing corner is the active tab's only when it truly sits on the
+    // strip's edge - with the chevron showing, the last visible tab is a
+    // middle tab in every way that matters (RebuildTabStrip's IsLast rule)
+    bool lastActive = !G.chev && G.cap > 0 && actVis == G.start + G.cap - 1;
+    int rad3 = TABF(3);
+    int hlL = cardL + (firstActive ? 0 : rad3), hlR = cardR - (lastActive ? 0 : rad3);
+    {
+        // exact #555555, one pixel, GDI+ so the ends meet the corner arcs
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+        gs.FillRectangle(&hb, Gdiplus::RectF((float)hlL, (float)BH - 1.f, (float)(hlR - hlL), 1.f));
+        Gdiplus::Pen pen(Gdiplus::Color(255, 0x55, 0x55, 0x55), 1.f);
+        if (!firstActive) gs.DrawArc(&pen, Gdiplus::RectF((float)cardL - 0.5f, (float)BH - 1.f - rad3 - 0.5f,
+                                    (float)(2 * rad3), (float)(2 * rad3)), 180, 90);
+        if (!lastActive)  gs.DrawArc(&pen, Gdiplus::RectF((float)cardR - 1.f - 2 * rad3 - 0.5f,
+                                    (float)BH - 1.f - rad3 - 0.5f, (float)(2 * rad3), (float)(2 * rad3)), 270, 90);
+    }
+    // the tabs. The focused pane's ring is solid accent; the unfocused pane's
+    // drops to the card's border color; a lone pane's melts into its face -
+    // UpdatePaneFocusRing's three states. Painted inactive-first, active
+    // last; a grabbed tab sits above everything, glued to the cursor.
+    bool paneFocused = g.split && b == FocusB();
+    bool paneDimmed = g.split && b != FocusB();
+    int hotK = (g.tbHotPane == b) ? g.tbHot : -1;
+    SetBkMode(dc, TRANSPARENT);
+    HFONT of = (HFONT)SelectObject(dc, TabFont());
+    int kEnd = min(G.start + G.cap, (int)vis.size());
+    auto glideDx = [&](int k) -> int {           // a swapping neighbor or a released
+        if (g.tbGlideIdx == k && g.tbGlidePane == b && g.tbGlideT0) {   // tab easing home
+            double t = min(1.0, (GetTickCount64() - g.tbGlideT0) / 140.0);
+            if (t >= 1) { g.tbGlideIdx = -1; return 0; }
+            return (int)std::lround(g.tbGlideDX * (1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)));
+        }
+        if (g.tbSettleIdx == k && g.tbSettlePane == b && g.tbSettleT0) {
+            double t = min(1.0, (GetTickCount64() - g.tbSettleT0) / 120.0);
+            if (t >= 1) { g.tbSettleIdx = -1; return 0; }
+            return (int)std::lround(g.tbSettleDX * (1.0 - (1.0 - t) * (1.0 - t) * (1.0 - t)));
+        }
+        return 0;
+    };
+    auto drawCloseX = [&](int xr, int cy, bool xhot) {
+        HPEN xp = CreatePen(PS_SOLID, max(1, (int)std::lround(1.2 * g.dpi)),
+                            xhot ? RGB(0xE0, 0x44, 0x44) : RGB(0xa3, 0xa3, 0xa3));
+        HGDIOBJ op = SelectObject(dc, xp);
+        int g2 = TABF(4);                        // the 8px cross inside the 24px zone
+        MoveToEx(dc, xr - g2, cy - g2, nullptr); LineTo(dc, xr + g2, cy + g2);
+        MoveToEx(dc, xr + g2, cy - g2, nullptr); LineTo(dc, xr - g2, cy + g2);
+        SelectObject(dc, op);
+        DeleteObject(xp);
+    };
+    for (int pass = 0; pass < 2; pass++) {          // inactive first, the active last
+        for (int k = G.start; k < kEnd; k++) {
+            int si = vis[k];
+            bool active = si == Act(b);
+            if ((pass == 0) == active) continue;
+            if (g.tbDragging && g.tbDragPane == b && k == g.tbDragIdx) continue;   // glued: pass 2
+            RECT r; TabSlotRect(G, k, r);
+            int dx = glideDx(k);
+            int fl = r.left + dx, fr = r.right + dx;
+            // the divider: an inactive tab's 1px right border, dropped on the
+            // strip's last slot while the chevron is hidden (IsLast)
+            bool isLastVis = k == kEnd - 1;
+            if (!G.chev && isLastVis) { /* the band's edge: no stray rule */ }
+            else {
+                Gdiplus::Graphics gs(dc);
+                Gdiplus::SolidBrush db(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+                gs.FillRectangle(&db, Gdiplus::RectF((float)fr - 1.f, (float)G.faceTop, 1.f, (float)G.faceH));
+            }
+            // the label, dirty dot included, ellipsized before the close x
+            std::wstring title = TabTitle(b, si);
+            RECT tr{ fl + TABF(10), G.faceTop, fr - TABF(24) - TABF(6), G.faceTop + G.faceH };
+            SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+            DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            // the close x: muted, danger red under the cursor (TabCloseButton)
+            int xr = fr - TABF(2) - TABF(12), cy = G.faceTop + G.faceH / 2;
+            drawCloseX(xr, cy, hotK == k && g.tbHotBtn == 1);
+        }
+        if (pass == 0 && actVis >= G.start && actVis < kEnd &&
+            !(g.tbDragging && g.tbDragPane == b && actVis == g.tbDragIdx)) {
+            // the ACTIVE tab: the menu tier's face, rounded at the top, flush
+            // to the card - the two read as one surface (RebuildTabStrip's -1)
+            RECT r; TabSlotRect(G, actVis, r);
+            int dx = glideDx(actVis);
+            int fl = r.left + dx, fr = r.right + dx;
+            int ft = G.faceTop, fb2 = ft + G.actH;  // the active face reaches the foot
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath face;
+            float rr = (float)rad3;
+            face.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
+            face.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
+            face.AddLineTo((float)fr, (float)fb2);
+            face.AddLineTo((float)fl, (float)fb2);
+            face.CloseFigure();
+            Gdiplus::SolidBrush faceBr(Gdiplus::Color(255, 0x14, 0x14, 0x14));   // #141414
+            gs.FillPath(&faceBr, &face);
+            // the accent stripe: the top 3px, then the sides - solid on the
+            // focused pane, the card's border color on the dimmed one, and a
+            // fade to clear on a lone pane (TabActiveRingFadeBrush)
+            Gdiplus::GraphicsPath stripe;
+            stripe.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
+            stripe.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
+            stripe.AddLineTo((float)fr, (float)ft + 3 * rr);
+            stripe.AddLineTo((float)fl, (float)ft + 3 * rr);
+            stripe.CloseFigure();
+            Gdiplus::SolidBrush st(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+            gs.FillPath(&st, &stripe);
+            BYTE sr = 0x22, sg = 0xbb, sb = 0x56;
+            if (paneDimmed) { sr = sg = sb = 0x55; }
+            if (paneFocused) {
+                Gdiplus::SolidBrush side(Gdiplus::Color(255, sr, sg, sb));
+                gs.FillRectangle(&side, Gdiplus::RectF((float)fl, (float)ft, 1.f, (float)(fb2 - ft)));
+                gs.FillRectangle(&side, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)(fb2 - ft)));
+            } else if (!paneDimmed) {
+                Gdiplus::LinearGradientBrush sd(Gdiplus::PointF(0, (float)ft), Gdiplus::PointF(0, (float)fb2),
+                                                Gdiplus::Color(255, sr, sg, sb), Gdiplus::Color(0, sr, sg, sb));
+                gs.FillRectangle(&sd, Gdiplus::RectF((float)fl, (float)ft, 1.f, (float)(fb2 - ft)));
+                gs.FillRectangle(&sd, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)(fb2 - ft)));
+            }
+            // the label and the x on the active face
+            std::wstring title = TabTitle(b, vis[actVis]);
+            RECT tr{ fl + TABF(10), ft, fr - TABF(24) - TABF(6), fb2 };
+            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+            DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            int xr = fr - TABF(2) - TABF(12), cy = ft + G.faceH / 2;
+            drawCloseX(xr, cy, hotK == actVis && g.tbHotBtn == 1);
+        }
+    }
+    if (g.tbDragging && g.tbDragPane == b && g.tbDragIdx >= G.start && g.tbDragIdx < kEnd) {
+        // the grabbed tab rides the cursor, clamped into its strip (Tab_DragMove)
+        RECT r; TabSlotRect(G, g.tbDragIdx, r);
+        int rel = std::clamp(g.tbDragX - g.tbDragGrab - G.x0, 0, max(0, G.hostW - G.cell));
+        int fl = G.x0 + rel, fr = fl + (r.right - r.left);
+        bool active = vis[g.tbDragIdx] == Act(b);
+        int ft = G.faceTop, fb2 = ft + (active ? G.actH : G.faceH);
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath face;
+        float rr = (float)rad3;
+        face.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
+        face.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
+        face.AddLineTo((float)fr, (float)fb2);
+        face.AddLineTo((float)fl, (float)fb2);
+        face.CloseFigure();
+        Gdiplus::SolidBrush faceBr(Gdiplus::Color(255, 0x14, 0x14, 0x14));
+        gs.FillPath(&faceBr, &face);
+        Gdiplus::GraphicsPath stripe;
+        stripe.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
+        stripe.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
+        stripe.AddLineTo((float)fr, (float)ft + 3 * rr);
+        stripe.AddLineTo((float)fl, (float)ft + 3 * rr);
+        stripe.CloseFigure();
+        Gdiplus::SolidBrush st(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+        gs.FillPath(&st, &stripe);
+        std::wstring title = TabTitle(b, vis[g.tbDragIdx]);
+        RECT tr{ fl + TABF(10), ft, fr - TABF(24) - TABF(6), fb2 };
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        int xr = fr - TABF(2) - TABF(12), cy = ft + G.faceH / 2;
+        drawCloseX(xr, cy, false);
+    }
+    SelectObject(dc, of);
+    // the "+" (NewTabBtn): a new blank document in this pane, RowHover under
+    // the cursor
+    int btnR = cardR - TABF(2);
+    int plusL = btnR - TABF(TAB_BTN);
+    bool plusHot = g.tbHotPane == b && g.tbHotBtn == 2;
+    if (plusHot) {
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
+        Gdiplus::GraphicsPath hp;
+        float hr = (float)TABF(3);
+        hp.AddArc((float)plusL, (float)TABF(4), 2 * hr, 2 * hr, 180, 90);
+        hp.AddArc((float)plusL + TABF(TAB_BTN) - 2 * hr, (float)TABF(4), 2 * hr, 2 * hr, 270, 90);
+        hp.AddArc((float)plusL + TABF(TAB_BTN) - 2 * hr, (float)TABF(24) - 2 * hr, 2 * hr, 2 * hr, 0, 90);
+        hp.AddArc((float)plusL, (float)TABF(24) - 2 * hr, 2 * hr, 2 * hr, 90, 90);
+        hp.CloseFigure();
+        gs.FillPath(&hb, &hp);
+    }
+    {
+        int cx = plusL + TABF(TAB_BTN) / 2, cy = (TABF(4) + TABF(24)) / 2;
+        int g2 = TABF(5);                        // the 11px plus glyph
+        HPEN xp = CreatePen(PS_SOLID, 1, plusHot ? RGB(0xe0, 0xe0, 0xe0) : RGB(0xa3, 0xa3, 0xa3));
+        HGDIOBJ op = SelectObject(dc, xp);
+        MoveToEx(dc, cx - g2, cy, nullptr); LineTo(dc, cx + g2, cy);
+        MoveToEx(dc, cx, cy - g2, nullptr); LineTo(dc, cx, cy + g2);
+        SelectObject(dc, op);
+        DeleteObject(xp);
+    }
+    // the overflow chevron, only while tabs are collapsed out of the strip
+    if (G.chev) {
+        int chevL = plusL - TABF(TAB_BTN_GAP) - TABF(TAB_BTN);
+        bool chevHot = g.tbHotPane == b && g.tbHotBtn == 3;
+        if (chevHot) {
+            Gdiplus::Graphics gs(dc);
+            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            gs.FillRectangle(&hb, Gdiplus::RectF((float)chevL, (float)TABF(4),
+                                                 (float)TABF(TAB_BTN), (float)TABF(20)));
+        }
+        int cx = chevL + TABF(TAB_BTN) / 2, cy = (TABF(4) + TABF(24)) / 2;
+        int g2 = TABF(4);
+        HPEN xp = CreatePen(PS_SOLID, 1, chevHot ? RGB(0xe0, 0xe0, 0xe0) : RGB(0xa3, 0xa3, 0xa3));
+        HGDIOBJ op = SelectObject(dc, xp);
+        MoveToEx(dc, cx - g2, cy - g2 / 2, nullptr);   // ChevronDown E70D
+        LineTo(dc, cx, cy + g2 / 2 + (g2 - g2 / 2));
+        LineTo(dc, cx + g2, cy - g2 / 2);
+        SelectObject(dc, op);
+        DeleteObject(xp);
+    }
+}
+
+// The drag's window-level feedback (Shell/PaneDrag.cs): over the OTHER pane
+// the real tab cannot follow the hand, so a translucent ghost takes over and
+// a 2px accent caret marks the insertion slot. The ghost is the dragged tab's
+// own face - its title from the source pane, its width from the source cell.
+static void TabDragPaint(HDC dc) {
+    if (!g.tbDragging || g.tbGhostPane < 0) return;
+    bool from = g.tbDragPane != 0;
+    bool b = g.tbGhostPane != 0;
+    TabStripGeo Gs; TabStripLayout(from, Gs);       // the dragged face's own width
+    std::vector<int> visFrom;
+    for (int i = 0; i < (int)Tabs(from).size(); i++)
+        if ((i == Act(from) ? DV(from).n : Tabs(from)[i].n) > 0) visFrom.push_back(i);
+    if (g.tbDragIdx < 0 || g.tbDragIdx >= (int)visFrom.size()) return;
+    int wsi = visFrom[g.tbDragIdx];
+    std::wstring title = TabTitle(from, wsi);
+    int w = std::clamp(Gs.cell, TABF(TAB_FLOOR), TABF(TAB_CEIL));
+    if (!BandShown(b)) return;
+    TabStripGeo G; TabStripLayout(b, G);
+    int gl = g.tbDragX - g.tbDragGrab, gr = gl + w;
+    if (gr < PaneX0(b) || gl > PaneX0(b) + PaneW(b)) return;   // not over this pane
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::GraphicsPath face;
+    float rr = (float)TABF(3);
+    face.AddArc((float)gl, (float)Gs.faceTop, 2 * rr, 2 * rr, 180, 90);
+    face.AddArc((float)gr - 2 * rr, (float)Gs.faceTop, 2 * rr, 2 * rr, 270, 90);
+    face.AddLineTo((float)gr, (float)Gs.faceTop + Gs.actH);
+    face.AddLineTo((float)gl, (float)Gs.faceTop + Gs.actH);
+    face.CloseFigure();
+    Gdiplus::SolidBrush fb(Gdiplus::Color(210, 0x14, 0x14, 0x14));   // TabDragGhost, Opacity .82
+    gs.FillPath(&fb, &face);
+    SetBkMode(dc, TRANSPARENT);
+    HFONT of = (HFONT)SelectObject(dc, TabFont());
+    RECT tr{ gl + TABF(10), Gs.faceTop, gr - TABF(24), Gs.faceTop + Gs.faceH };
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(dc, of);
+    // the caret: 2px accent at the insertion slot's leading edge
+    if (g.tbCaret >= 0) {
+        int cx = G.x0 + g.tbCaret * G.cell;
+        cx = std::clamp(cx, G.x0, G.x0 + G.hostW);
+        Gdiplus::SolidBrush cb(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+        gs.FillRectangle(&cb, Gdiplus::RectF((float)cx, (float)G.faceTop, 2.f, (float)G.faceH));
+    }
+}
+
+// ---- the strip's pointer gestures (Tab_MouseDown / Tab_DragDown/Move/Up) ----
+
+struct TabPopCtx { int kind = -1; bool pane = 0; int tab = 0; std::vector<int> map; };
+static TabPopCtx g_tabPop;
+static void ListPopClose();   // defined with the list popup below
+
+// The tab menu and the overflow chevron share the list popup; the rows carry
+// their own action table here. KillerPDF's menu: Open Containing Folder,
+// Close Tab, Close Others, Close All Tabs (the tear-out entry is the one
+// docsy cannot offer - it is a one-window reader).
+static void TabPopPick(int row) {
+    if (g_tabPop.kind == 1) {                     // the chevron's hidden tabs
+        if (row >= 0 && row < (int)g_tabPop.map.size()) SwitchTab(g_tabPop.pane, g_tabPop.map[row]);
+        return;
+    }
+    if (g_tabPop.kind != 0 || row < 0) return;
+    bool b = g_tabPop.pane;
+    if (row == 0) {                               // Open Containing Folder
+        int si = g_tabPop.tab;
+        const std::wstring& p = (si == Act(b)) ? DV(b).path : Tabs(b)[si].path;
+        if (!p.empty() && GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES)
+            ShellExecuteW(g.main, L"open", L"explorer.exe",
+                          (std::wstring(L"/select,\"") + p + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+    } else if (row == 1) {
+        CloseTabAt(b, g_tabPop.tab);
+    } else if (row == 2) {
+        CloseOtherTabs(b, g_tabPop.tab);
+    } else if (row == 3) {
+        CloseAllTabs(b);
+    }
+}
+
+// A press on the strip: pending until the mouse-up, so a press can begin a
+// drag without switching first (KillerPDF's left-click-switches-on-UP rule).
+// A press on the + or the chevron arms those; the field focuses the pane.
+static bool TabStripDown(HWND h, POINT p) {
+    bool b = g.split ? (p.x >= g.splitX + SplitHalf()) : false;
+    if (p.y >= BANDH() || !BandShown(b)) return false;
+    TabEnsure(b);
+    TabStripGeo G; TabStripLayout(b, G);
+    std::vector<int> vis;
+    for (int i = 0; i < (int)Tabs(b).size(); i++)
+        if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) vis.push_back(i);
+    int slot;
+    int what = TabBandHitAt(b, G, vis, p, slot);
+    FocusPane(b);                                 // a strip click claims the pane first
+    if (what == 3) { g.tbDragPane = b; g.tbPending = -2; return true; }   // the +
+    if (what == 4) { g.tbDragPane = b; g.tbPending = -3; return true; }   // the chevron
+    if (what == 1 || what == 2) {
+        g.tbPending = slot;                       // the visible slot, session resolved on UP
+        g.tbPendingX = what == 2;
+        g.tbDragPane = b;
+        g.tbDragIdx = slot;
+        g.tbDragGrab = p.x - (G.x0 + (slot - G.start) * G.cell);
+        g.tbDragX = p.x;
+        g.tbDragging = false;
+        return true;
+    }
+    g.tbPending = -1;                             // the field: the focus was the whole action
+    return true;
+}
+
+static bool TabStripMove(HWND h, POINT p) {
+    // hover first (the +, the chevron, the tabs and their close x)
+    bool b = g.split ? (p.x >= g.splitX + SplitHalf()) : false;
+    int hot = -1, hotPane = b, hotBtn = 0;
+    if (p.y < BANDH()) {
+        bool hb = g.split ? (p.x >= g.splitX + SplitHalf()) : false;
+        if (BandShown(hb)) {
+            TabEnsure(hb);
+            TabStripGeo G; TabStripLayout(hb, G);
+            std::vector<int> vis;
+            for (int i = 0; i < (int)Tabs(hb).size(); i++)
+                if ((i == Act(hb) ? DV(hb).n : Tabs(hb)[i].n) > 0) vis.push_back(i);
+            int slot;
+            int what = TabBandHitAt(hb, G, vis, p, slot);
+            if (what == 1 || what == 2) { hot = slot; hotBtn = what; hotPane = hb; }
+            else if (what == 3) { hot = -1; hotBtn = 2; hotPane = hb; }
+            else if (what == 4) { hot = -1; hotBtn = 3; hotPane = hb; }
+        }
+    }
+    if (hot != g.tbHot || hotPane != g.tbHotPane || hotBtn != g.tbHotBtn) {
+        bool wasPane = g.tbHotPane;               // the old and new faces repaint: a hover
+        bool wasAny = g.tbHot >= 0 || g.tbHotBtn >= 2;   // flip is two invalidations
+        bool isAny = hot >= 0 || hotBtn >= 2;
+        g.tbHot = hot; g.tbHotPane = hotPane; g.tbHotBtn = hotBtn;
+        if (isAny) TrackLeave(h);
+        if (wasAny) TabBandInvalidate(wasPane);
+        if (isAny) TabBandInvalidate(hotPane);
+    }
+    // the drag physics: past the system's 4px drag threshold the grabbed tab
+    // glues to the cursor and swaps when its advancing edge crosses a
+    // neighbor's layout-slot midpoint (edge against midpoint gives the
+    // hysteresis, so a tab parked on a boundary does not bounce)
+    if (g.tbPending >= 0 && !g.tbPendingX) {
+        bool pb = g.tbDragPane;
+        if (!g.tbDragging && abs(p.x - g.tbDragX) >= 4) g.tbDragging = true;   // tbDragX
+        if (g.tbDragging) {                       // still holds the press point until now
+            g.tbDragX = p.x;
+            g.tbGhostPane = -1; g.tbCaret = -1;
+            if (g.split && pb != PaneB(p.x)) {    // over the OTHER pane: the ghost has it
+                g.tbGhostPane = PaneB(p.x);
+                // the caret slot: the strip boundary the cursor sits before
+                bool tb = g.tbGhostPane != 0;
+                if (BandShown(tb)) {
+                    TabStripGeo G2; TabStripLayout(tb, G2);
+                    int cnt = TabDocCount(tb);
+                    int rel = p.x - G2.x0;
+                    g.tbCaret = std::clamp((rel + G2.cell / 2) / max(1, G2.cell), 0, cnt);
+                } else g.tbCaret = TabDocCount(tb);
+                TabBandInvalidate(pb);
+                TabBandInvalidate(tb);
+                return true;
+            }
+            // reorder: swap with a neighbor when an edge crosses its midpoint
+            TabEnsure(pb);
+            TabStripGeo G; TabStripLayout(pb, G);
+            std::vector<int> vis;
+            for (int i = 0; i < (int)Tabs(pb).size(); i++)
+                if ((i == Act(pb) ? DV(pb).n : Tabs(pb)[i].n) > 0) vis.push_back(i);
+            int cur = g.tbDragIdx;
+            if (cur < 0 || cur >= (int)vis.size()) return true;
+            int slide = G.cell;
+            double rawLeft = p.x - g.tbDragGrab;
+            double leftEdge = rawLeft, rightEdge = rawLeft + slide;
+            auto midX = [&](int k) { return G.x0 + (k - G.start) * G.cell + G.cell / 2.0; };
+            if (cur + 1 < (int)vis.size() && cur + G.start + 1 < G.start + G.cap &&
+                rightEdge > midX(cur + 1)) {
+                int a = vis[cur], c = vis[cur + 1];
+                std::swap(Tabs(pb)[a], Tabs(pb)[c]);
+                std::swap(g.tabUndo[pb][a], g.tabUndo[pb][c]);
+                std::swap(g.tabRedo[pb][a], g.tabRedo[pb][c]);
+                if (Act(pb) == a) Act(pb) = c; else if (Act(pb) == c) Act(pb) = a;
+                g.tbGlidePane = pb; g.tbGlideIdx = cur; g.tbGlideDX = slide;    // it jumped left:
+                g.tbGlideT0 = GetTickCount64();                 // from one cell right of its new slot
+                g.tbDragIdx = cur + 1;
+                SetTimer(h, 9, 16, nullptr);
+            } else if (cur - 1 >= G.start && leftEdge < midX(cur - 1)) {
+                int a = vis[cur], c = vis[cur - 1];
+                std::swap(Tabs(pb)[a], Tabs(pb)[c]);
+                std::swap(g.tabUndo[pb][a], g.tabUndo[pb][c]);
+                std::swap(g.tabRedo[pb][a], g.tabRedo[pb][c]);
+                if (Act(pb) == a) Act(pb) = c; else if (Act(pb) == c) Act(pb) = a;
+                g.tbGlidePane = pb; g.tbGlideIdx = cur; g.tbGlideDX = -slide;   // it jumped right
+                g.tbGlideT0 = GetTickCount64();
+                g.tbDragIdx = cur - 1;
+                SetTimer(h, 9, 16, nullptr);
+            }
+            TabBandInvalidate(pb);
+            return true;
+        }
+    }
+    return g.tbDragging;
+}
+
+static bool TabStripUp(HWND h, POINT p) {
+    if (g.tbPending == -2) {                      // the +: NewDocument into this pane
+        g.tbPending = -1;
+        NewBlank();                               // the pane was focused at the press
+        return true;
+    }
+    if (g.tbPending == -3) {                      // the chevron lists the collapsed tabs
+        g.tbPending = -1;
+        bool b = g.tbDragPane;
+        TabStripGeo G; TabStripLayout(b, G);
+        std::vector<int> vis;
+        for (int i = 0; i < (int)Tabs(b).size(); i++)
+            if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) vis.push_back(i);
+        g_tabPop = TabPopCtx{ 1, b, -1, {} };
+        std::vector<std::wstring> items;
+        for (int k = 0; k < (int)vis.size(); k++) {
+            if (k >= G.start && k < min(G.start + G.cap, (int)vis.size())) continue;
+            g_tabPop.map.push_back(vis[k]);
+            std::wstring t = TabTitle(b, vis[k]);
+            if (vis[k] == Act(b)) t = L"\x2022 " + t;   // bold reads as a bullet here
+            items.push_back(t);
+        }
+        if (!items.empty()) {
+            int cardR = G.x0 + CardW(b);
+            int chevL = cardR - TABF(2) - TABF(TAB_BTN) - TABF(TAB_BTN_GAP) - TABF(TAB_BTN);
+            POINT pt{ chevL, BANDH() + 2 };
+            ClientToScreen(h, &pt);
+            ListPopOpen(g.main, pt, items, 2, -1);
+        }
+        return true;
+    }
+    if (g.tbPending >= 0) {
+        int slot = g.tbPending;
+        bool b = g.tbDragPane;
+        bool wasX = g.tbPendingX;
+        bool wasDragging = g.tbDragging;
+        g.tbPending = -1; g.tbPendingX = false;
+        if (!wasDragging) {
+            TabEnsure(b);
+            TabStripGeo G; TabStripLayout(b, G);
+            std::vector<int> vis;
+            for (int i = 0; i < (int)Tabs(b).size(); i++)
+                if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) vis.push_back(i);
+            if (slot < G.start || slot >= min(G.start + G.cap, (int)vis.size())) return true;
+            int si = vis[slot];
+            if (wasX) CloseTabAt(b, si);          // the close x answers on the release
+            else SwitchTab(b, si);                // a plain click switches on UP
+            return true;
+        }
+        // the drag ends. Over the other pane: a move, checked on RELEASE (the
+        // capture would otherwise be pulled out from under the running drag)
+        g.tbDragging = false;
+        if (g.tbGhostPane >= 0) {
+            bool to = g.tbGhostPane != 0;
+            TabStripGeo G2; TabStripLayout(to, G2);
+            std::vector<int> visTo;
+            for (int i = 0; i < (int)Tabs(to).size(); i++)
+                if ((i == Act(to) ? DV(to).n : Tabs(to)[i].n) > 0) visTo.push_back(i);
+            int from = g.tbDragPane;
+            std::vector<int> visFrom;
+            for (int i = 0; i < (int)Tabs(from).size(); i++)
+                if ((i == Act(from) ? DV(from).n : Tabs(from)[i].n) > 0) visFrom.push_back(i);
+            int si = g.tbDragIdx >= 0 && g.tbDragIdx < (int)visFrom.size() ? visFrom[g.tbDragIdx] : -1;
+            int at = g.tbCaret >= 0 && g.tbCaret <= (int)visTo.size()
+                   ? (g.tbCaret < (int)visTo.size() ? visTo[g.tbCaret] : (int)Tabs(to).size())
+                   : (int)Tabs(to).size();
+            g.tbGhostPane = -1; g.tbCaret = -1;
+            if (si >= 0) TabMoveToPane(from, si, to, at);
+            return true;
+        }
+        // a reorder settles: the grabbed tab glides from its dragged position
+        // into its final slot (the neighbors already swapped under it)
+        TabStripGeo G; TabStripLayout(b, G);
+        int home = G.x0 + (g.tbDragIdx - G.start) * G.cell;
+        g.tbSettlePane = b; g.tbSettleIdx = g.tbDragIdx;
+        g.tbSettleDX = (g.tbDragX - g.tbDragGrab) - home;
+        g.tbSettleT0 = GetTickCount64();
+        g.tbGlideIdx = -1;
+        SetTimer(h, 9, 16, nullptr);
+        TabBandInvalidate(b);
+        return true;
+    }
+    return false;
+}
+
+static bool TabStripMid(POINT p) {                // middle-click closes, like KillerPDF's
+    if (p.y >= BANDH()) return false;
+    bool b = g.split ? (p.x >= g.splitX + SplitHalf()) : false;
+    if (!BandShown(b)) return false;
+    TabEnsure(b);
+    TabStripGeo G; TabStripLayout(b, G);
+    std::vector<int> vis;
+    for (int i = 0; i < (int)Tabs(b).size(); i++)
+        if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) vis.push_back(i);
+    int slot;
+    int what = TabBandHitAt(b, G, vis, p, slot);
+    if (what == 1 || what == 2) { CloseTabAt(b, vis[slot]); return true; }
+    return false;
+}
+
+static bool TabStripRClick(HWND h, POINT p) {     // the tab's context menu
+    if (p.y >= BANDH()) return false;
+    bool b = g.split ? (p.x >= g.splitX + SplitHalf()) : false;
+    if (!BandShown(b)) return false;
+    TabEnsure(b);
+    TabStripGeo G; TabStripLayout(b, G);
+    std::vector<int> vis;
+    for (int i = 0; i < (int)Tabs(b).size(); i++)
+        if ((i == Act(b) ? DV(b).n : Tabs(b)[i].n) > 0) vis.push_back(i);
+    int slot;
+    int what = TabBandHitAt(b, G, vis, p, slot);
+    if (what != 1 && what != 2) return false;
+    int si = vis[slot];
+    g_tabPop = TabPopCtx{ 0, b, si, {} };
+    std::vector<std::wstring> items{ L"Open Containing Folder", L"Close Tab",
+                                     L"Close Other Tabs", L"Close All Tabs" };
+    POINT pt{ p.x, BANDH() + 2 };
+    ClientToScreen(h, &pt);
+    ListPopOpen(g.main, pt, items, 2, -1);
+    return true;
+}
+
+static void TabStripAnimTick(HWND h) {            // the glide/settle pump (timer 9)
+    unsigned long long now = GetTickCount64();
+    bool glide = g.tbGlideIdx >= 0 && g.tbGlideT0 && now - g.tbGlideT0 < 140;
+    bool settle = g.tbSettleIdx >= 0 && g.tbSettleT0 && now - g.tbSettleT0 < 120;
+    if (glide) TabBandInvalidate(g.tbGlidePane != 0);
+    if (settle) TabBandInvalidate(g.tbSettlePane != 0);
+    if (!glide && !settle) {
+        if (g.tbGlideIdx >= 0) { g.tbGlideIdx = -1; TabBandInvalidate(g.tbGlidePane != 0); }
+        if (g.tbSettleIdx >= 0) { g.tbSettleIdx = -1; TabBandInvalidate(g.tbSettlePane != 0); }
+        KillTimer(h, 9);
+        return;
+    }
+    SetTimer(h, 9, 16, nullptr);
+}
+
 static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
@@ -6006,12 +7163,14 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                         Draw(g.bdc, wB, g.ch, xB, g.dB, rg);
                         DeleteObject(rg);
                         PaintPaneBars(g.bdc, g.dB, true, g.dB.vHot || g.dB.vDrag, g.dB.hHot || g.dB.hDrag);
+                        TabBandPaint(g.bdc, true);   // the pane's own tab band, over its card's top
                     } else {
                         RECT pr{ 0, 0, wA, g.ch };
                         HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
                         Draw(g.bdc, wA, g.ch, 0, g.d, rg);
                         DeleteObject(rg);
                         PaintPaneBars(g.bdc, g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
+                        TabBandPaint(g.bdc, false);
                     }
                 }
                 RECT band{ g.splitX + 1, 0, min(g.cw, g.splitX + SplitHalf()), g.ch };
@@ -6025,7 +7184,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             } else {                                // green when it means "grab me"
                 Draw(g.bdc, g.cw, g.ch, 0, g.d);                    // card floats on never shows a
                 PaintViewBars(g.bdc, g.cw, g.ch, 0);                // seam at a pane boundary
+                TabBandPaint(g.bdc, false);
             }
+            TabDragPaint(g.bdc);                    // the cross-pane drag's ghost + caret
             if (g.brushOn) {                        // the Draw tool's brush ring: the ink
                 DocState& DC = DV(PaneB(g.brushPt.x));   // color at the brush's own size,
                 float k = (float)(DC.zoom * g.dpi);      // KillerPDF's ShowBrushPreview
@@ -6073,6 +7234,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
+        if (wp == 9) { TabStripAnimTick(h); return 0; }   // the strip's glide/settle pump
         if (wp == 6) {                         // the full-screen hint's expiry repaint
             KillTimer(h, 6);
             if (GetTickCount64() >= g.hintUntil) InvalidateRect(h, nullptr, FALSE);
@@ -6112,6 +7274,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         SetCapture(h);
+        if (TabStripDown(h, p)) return 0;       // the strip owns its band first: a press
+                                                // arms a switch/drag pending the release
         if (fd.open) {                           // the floating bar owns its pixels first: the
             int bx, by; FdOrigin(bx, by);        // grip drags, the ring focuses the edit, the
             POINT q{ p.x - bx, p.y - by };       // buttons act - a press on the bar never falls
@@ -6173,7 +7337,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int cardR = PaneX0(inB) + CardX(inB) + CardW(inB);   // this pane's card's right edge
             int cardL = PaneX0(inB) + CardX(inB);
             if (vshow && p.x >= cardR - gb && p.x < cardR) { // the v-bar hugs the card's edge
-                int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp);   // the track stops
+                int ins = BandInset(inB);
+                int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;   // under the band
                 if (p.y >= tp && p.y < tp + tl) { D.vDrag = true; D.vGrab = p.y - tp; }   // short
                 else ScrollPane(inB, D.sx, D.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
                 return 0;
@@ -6192,7 +7357,8 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         bool hshow = D.n && D.docW > track;
         int gutH = hshow ? gb : 0;
         if (vshow && p.x >= cw - gb && p.x < cw) {   // the vertical bar: inside the card's edge
-            int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp);
+            int ins = BandInset(false);
+            int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;   // under the band
             if (p.y >= tp && p.y < tp + tl) { D.vDrag = true; D.vGrab = p.y - tp; }
             else ScrollTo(D.sx, D.sy + (p.y < tp ? -(int)(g.ch * 0.9) : (int)(g.ch * 0.9)));
             return 0;
@@ -6239,6 +7405,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (TabStripMove(h, p)) return 0;       // the strip's hover tiles + the drag physics
         if (fd.drag) {                           // the grip is moving the bar: the offsets update,
             RECT was = FdRect();                 // the edit rides along, and the frame lands in
             fd.dx += p.x - fd.dragX;             // the back buffer as one atomic blit. Only the
@@ -6437,7 +7604,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (lineHot) return 0;               // the grab zone: no bar hover underneath
             if (D.n && D.docH > g.ch && p.x >= cardR - gb && p.x < cardR) {
                 int gutH = (D.n && D.docW > ViewW(D, inB)) ? gb : 0;
-                int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl;
+                int ins = BandInset(inB);
+                int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;
+                vhot = p.y >= tp && p.y < tp + tl;
             }
             if (D.n && D.docW > ViewW(D, inB) && p.y >= g.ch - gb && p.x >= cardL && p.x < cardR - ((D.docH > g.ch) ? gb : 0)) {
                 int track = CardW(inB) - ((D.docH > g.ch) ? gb : 0);
@@ -6456,7 +7625,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         bool vhot = D.n && D.docH > g.ch && p.x >= cw - SBar() && p.x < cw;
         if (vhot) {
             int gutH = (D.n && D.docW > cw - SBar()) ? SBar() : 0;
-            int tl, tp; BarThumb(D.docH, g.ch - gutH, D.sy, tl, tp); vhot = p.y >= tp && p.y < tp + tl;
+            int ins = BandInset(false);
+            int tl, tp; BarThumb(D.docH, g.ch - ins - gutH, D.sy, tl, tp); tp += ins;
+            vhot = p.y >= tp && p.y < tp + tl;
         }
         bool hhot = !vhot && D.n && D.docW > cw - (D.docH > g.ch ? SBar() : 0) && p.y >= g.ch - SBar() && p.x < cw - (vhot ? SBar() : 0);
         if (hhot) { int tl, tp; BarThumb(D.docW, cw - (vhot ? SBar() : 0), D.sx, tl, tp); hhot = p.x >= tp && p.x < tp + tl; }
@@ -6467,7 +7638,21 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_MBUTTONUP: {                     // middle-click closes the tab under it
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (TabStripMid(p)) return 0;
+        break;
+    }
+    case WM_RBUTTONUP: {                     // the tab's context menu
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (TabStripRClick(h, p)) return 0;
+        break;
+    }
     case WM_MOUSELEAVE:
+        if (g.tbHot >= 0 || g.tbHotBtn >= 2) {   // the strip's hover tiles clear on leave
+            g.tbHot = -1; g.tbHotBtn = 0;
+            InvalidateRect(h, nullptr, FALSE);
+        }
         if (g.d.vHot || g.d.hHot || g.dB.vHot || g.dB.hHot || fd.hot >= 0) {
             g.d.vHot = g.d.hHot = g.dB.vHot = g.dB.hHot = false; fd.hot = -1;
             InvalidateRect(h, nullptr, FALSE);
@@ -6480,7 +7665,13 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             InvalidateRect(h, &u, FALSE);
         }
         return 0;
-    case WM_LBUTTONUP:
+    case WM_LBUTTONUP: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (g.tbPending >= -3 && (g.tbPending != -1 || g.tbDragging)) {
+            ReleaseCapture();                    // the strip's pending press answers here
+            TabStripUp(h, p);
+            return 0;
+        }
         if (g_teResize) {                        // the drag ends: the real edit takes the pixels
             g_teResize = false;                  // back and the caret returns - KillerPDF hands
             ReleaseCapture();                    // focus back so typing continues (_tehBox?.Focus())
@@ -6552,8 +7743,13 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.d.vDrag = g.d.hDrag = g.dB.vDrag = g.dB.hDrag = g.splitDrag = false;
         ReleaseCapture();
         return 0;
+        }
     case WM_CAPTURECHANGED:
         fd.drag = false;                       // someone else took it (a modal loop, a close)
+        if (g.tbPending >= -3) {               // the strip's pending press dies with it:
+            g.tbPending = -1; g.tbPendingX = false;   // a stolen capture is a click off the band
+            g.tbDragging = false; g.tbGhostPane = -1; g.tbCaret = -1;
+        }
         return 0;
     case WM_LBUTTONDBLCLK: {
         // double-click word selection, copied at once (KillerPDF's TrySelectWordAtPosition)
@@ -9725,7 +10921,14 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (ctrl && !shift) NewBlank();
             break;
         case 'W':
-            if (ctrl && !shift) CloseDoc();
+            if (ctrl && shift) CloseOtherTabs(FocusB(), Act(FocusB()));   // Close Others
+            else if (ctrl) CloseDoc();
+            break;
+        case 'Q':
+            if (ctrl && shift) CloseAllTabs(FocusB());   // Ctrl+Shift+Q: close every tab
+            break;
+        case VK_TAB:                               // Ctrl+Tab / Ctrl+Shift+Tab cycle the
+            if (ctrl) CycleTab(FocusB(), shift ? -1 : 1);   // focused pane's document tabs
             break;
         case 'S':
             if (ctrl) SaveDoc(shift);              // Ctrl+S saves in place, Ctrl+Shift+S asks
@@ -9851,24 +11054,48 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_CLOSE: {
         // KillerPDF's quit prompt (Str_Dlg_UnsavedExit through KillerDialog.
         // AskToSave): unsaved work asks before the window dies. Save writes
-        // every dirty pane in place - a failed write keeps the window up.
+        // every dirty tab of both panes in place - a session holds a live
+        // engine handle, so its document saves without coming forward - and a
+        // failed write keeps the window up.
         if (g.tedit) CommitTextEdit();
-        bool aDirty = DocDirty(g.d), bDirty = DocDirty(g.dB);
+        auto paneDirty = [&](bool b) {
+            std::vector<DocState>& T = Tabs(b);
+            if (T.empty()) return DocDirty(DV(b));    // a pane that never tabbed: the live state alone
+            for (int i = 0; i < (int)T.size(); i++)
+                if (DocDirty(i == Act(b) ? DV(b) : T[i])) return true;
+            return false;
+        };
+        bool aDirty = paneDirty(false), bDirty = paneDirty(true);
         if (!aDirty && !bDirty) { DestroyWindow(h); return 0; }
         int r = AskPrompt3(L"", L"You have unsaved changes. Save them before closing Docsy?",
                            L"Cancel", L"Don't Save", L"Save");
         if (r == 2) {
-            std::wstring err;
-            if (aDirty && !WriteAnnotatedPdf(g.d, g.d.path, err)) {
-                SetStatusHold(std::wstring(L"Save failed: ") + err);
-                return 0;                      // a failed save is not a closed window
-            }
-            SnapClean(g.d);
-            if (bDirty && !WriteAnnotatedPdf(g.dB, g.dB.path, err)) {
-                SetStatusHold(std::wstring(L"Save failed: ") + err);
-                return 0;
-            }
-            SnapClean(g.dB);
+            auto savePane = [&](bool b) -> bool {
+                std::vector<DocState>& T = Tabs(b);
+                if (T.empty()) {
+                    if (!DocDirty(DV(b))) return true;
+                    std::wstring err;
+                    if (!WriteAnnotatedPdf(DV(b), DV(b).path, err)) {
+                        SetStatusHold(std::wstring(L"Save failed: ") + err);
+                        return false;
+                    }
+                    SnapClean(DV(b));
+                    return true;
+                }
+                for (int i = 0; i < (int)T.size(); i++) {
+                    DocState& S = (i == Act(b)) ? DV(b) : T[i];
+                    if (!DocDirty(S)) continue;
+                    std::wstring err;
+                    if (!WriteAnnotatedPdf(S, S.path, err)) {
+                        SetStatusHold(std::wstring(L"Save failed: ") + err);
+                        return false;
+                    }
+                    SnapClean(S);
+                }
+                return true;
+            };
+            if (!savePane(false)) return 0;          // a failed save is not a closed window
+            if (!savePane(true)) return 0;
         }
         if (r == 2 || r == 1) DestroyWindow(h);   // Save / Don't Save close; Cancel stays
         return 0;
@@ -10194,7 +11421,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                  SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
     if (shot) {
-        if (lstrcmpW(argv[3], L"-") && !Open(g.d, argv[3])) return 2;
+        if (lstrcmpW(argv[3], L"-") && !TabOpenInto(false, argv[3])) return 2;
         // CI preview seed: a committed selection over one page's per-character carets
         // (sel=page:c0:c1), so the release screenshot shows the selection quads
         if (argc >= 5 && !wcsncmp(argv[4], L"sel=", 4)) {
@@ -10282,7 +11509,14 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
         // pair of overlay bars rides its own card edges, pane A's hugs the
         // divider, and neither thumb may wash out over a page or a stale strip
         for (int a = 3; a < argc; a++)
-            if (!wcsncmp(argv[a], L"fileB=", 6)) Open(g.dB, argv[a] + 6);
+            if (!wcsncmp(argv[a], L"fileB=", 6)) TabOpenInto(true, argv[a] + 6);
+        // CI preview seed 6b: tab2=<path> opens a second document as a new tab
+        // in pane A through the real TabOpenInto, so the release screenshot
+        // shows the band KillerPDF shows from its second document - the front
+        // tab with its accent stripe and dirty dot, the neighbor on the field,
+        // the hairline and the + at the card's edge
+        for (int a = 3; a < argc; a++)
+            if (!wcsncmp(argv[a], L"tab2=", 5)) TabOpenInto(false, argv[a] + 5);
         // CI preview seed 7: tool=N switches the focused pane's tool through the
         // real SetTool, so the rail's selected-state face and the tool's cursor
         // state are what the shot shows
@@ -10359,7 +11593,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
 
     ShowWindow(g.main, show);
     UpdateWindow(g.main);
-    if (argc > 1) Open(g.d, argv[1]);
+    if (argc > 1) TabOpenInto(false, argv[1]);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     return 0;
