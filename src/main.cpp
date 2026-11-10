@@ -1048,6 +1048,8 @@ static bool g_webFail = false;           // the WebView2 runtime is missing (rar
 static bool g_webSide = false;           // the web-tab thumbnail sidebar (closed by default, like Safari)
 static HWND g_wstrip = nullptr;          // the browser's Safari toolbar (on top)
 static int WEBSTRIPH() { return g_webOn ? (int)(44 * g.dpi) : 0; }   // the toolbar band (Safari)
+static HWND g_wtool = nullptr;           // the reader's own top toolbar, carried into browser mode
+static int WEBTOOLH() { return g_webOn ? TBH() : 0; }   // ...with one button: back to the PDF reader
 static int WEBTABH() { return (int)(34 * g.dpi); }   // the tab band: the reader's 3px inset + 29px face + 1px foot
 static void WebToggle(bool on);           // the Web / Reader buttons
 static bool WebBtnEnabled(int id);        // the web row's buttons arm without a document
@@ -1520,6 +1522,152 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             RECT r; GetClientRect(h, &r);
             SetCursor(LoadCursorW(nullptr, BarHit(p, r.right) >= 0 ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+
+// ---- browser mode's top toolbar: the reader's own toolbar row (same grain,
+// same button face, same glyph-over-caption layout, same height) carrying a
+// single button that returns to the PDF reader ----
+static bool g_wtoolHot = false, g_wtoolDown = false;
+
+static RECT WebToolBtn() {
+    HDC dc = GetDC(g_wtool);
+    RECT rc{ 0, 0, 0, 0 };
+    HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+    DrawTextW(dc, L"PDF", -1, &rc, DT_CALCRECT | DT_SINGLELINE);
+    SelectObject(dc, of);
+    ReleaseDC(g_wtool, dc);
+    int bw = max((int)(24 * g.dpi), (int)(rc.right - rc.left)) + (int)(12 * g.dpi);
+    int x = (int)(4 * g.dpi), y = (int)(2 * g.dpi);
+    return RECT{ x, y, x + bw, y + TbBtnH() };
+}
+
+static void WebToolDraw(HDC dc, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    RECT bar{ 0, 0, w, h };
+    FillRect(dc, &bar, GrainBrush(1));
+    RECT b = WebToolBtn();
+    bool pr = g_wtoolDown && g_wtoolHot, hot = g_wtoolHot;
+    if (hot || pr) {                                   // the reader's hover / pressed tile
+        Gdiplus::Graphics gs(dc);
+        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::GraphicsPath p;
+        float rr = (float)(4 * g.dpi);
+        float fx = (float)b.left, fy = (float)b.top;
+        float fw = (float)(b.right - b.left), fh = (float)(b.bottom - b.top);
+        p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+        p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+        p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+        p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+        p.CloseFigure();
+        Gdiplus::SolidBrush f(pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
+                                 : Gdiplus::Color(255, 0x40, 0x40, 0x40));
+        gs.FillPath(&f, &p);
+    }
+    int capH = 0;
+    {   RECT mc{ 0, 0, 0, 0 };
+        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        DrawTextW(dc, L"Find Text", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
+        SelectObject(dc, of);
+        capH = mc.bottom - mc.top;
+    }
+    int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);
+    int colH = gh + gap + capH;
+    int avail = (int)(b.bottom - b.top) - colH;
+    int y0 = b.top + max(0, avail) / 2;
+    RECT gr{ b.left, y0, b.right, y0 + gh };
+    RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
+    SetBkMode(dc, TRANSPARENT);
+    const wchar_t* glyph = L"\uE8A5";                  // the document page
+    SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
+    SetTextColor(dc, RGB(16, 16, 16));
+    RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
+    DrawTextW(dc, glyph, -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, glyph, -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+    SetTextColor(dc, RGB(16, 16, 16));
+    RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
+    DrawTextW(dc, L"PDF", -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+    DrawTextW(dc, L"PDF", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_SIZE: InvalidateRect(h, nullptr, FALSE); return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT r; GetClientRect(h, &r);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureBarBack(dc, r.right, r.bottom);
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the shared grain phase
+            SetBrushOrgEx(g_bardc, -po.x, -po.y, nullptr);
+            WebToolDraw(g_bardc, r.right, r.bottom);
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_bardc, 0, 0, SRCCOPY);
+        }
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT: {
+        RECT r; GetClientRect(h, &r);
+        POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+        SetBrushOrgEx((HDC)wp, -po.x, -po.y, nullptr);
+        WebToolDraw((HDC)wp, r.right, r.bottom);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT b = WebToolBtn();
+        bool hot = PtInRect(&b, p) != 0;
+        if (hot != g_wtoolHot) {
+            g_wtoolHot = hot;
+            if (hot) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        if (g_wtoolHot) { g_wtoolHot = false; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT b = WebToolBtn();
+        if (PtInRect(&b, p)) {
+            SetCapture(h);
+            g_wtoolDown = true; g_wtoolHot = true;
+            InvalidateRect(h, nullptr, FALSE);
+        }
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        if (g_wtoolDown) {
+            g_wtoolDown = false;
+            if (GetCapture() == h) ReleaseCapture();
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT b = WebToolBtn();
+            bool inside = PtInRect(&b, p) != 0;
+            g_wtoolHot = false;
+            InvalidateRect(h, nullptr, FALSE);
+            if (inside) WebToggle(false);              // back to the PDF reader
+        }
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        if (g_wtoolDown) { g_wtoolDown = false; InvalidateRect(h, nullptr, FALSE); }
+        return 0;
+    case WM_MOUSEWHEEL:
+        return SendMessageW(g.main, m, wp, lp);
+    case WM_SETCURSOR:
+        if (LOWORD(lp) == HTCLIENT) {
+            POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            RECT b = WebToolBtn();
+            SetCursor(LoadCursorW(nullptr, PtInRect(&b, p) ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         break;
@@ -9165,6 +9313,8 @@ static int WebNavHit(POINT p) {
 }
 
 static void WebRound(Gdiplus::GraphicsPath& p, float l, float t, float r, float b, float rr) {
+    rr = std::min(rr, std::min((r - l) / 2.0f, (b - t) / 2.0f));   // an arc wider than its box overshoots
+    if (rr < 0.5f) { p.AddRectangle(Gdiplus::RectF(l, t, r - l, b - t)); return; }   // (the focus ring's stray edges)
     p.AddArc(l, t, 2 * rr, 2 * rr, 180, 90);
     p.AddArc(r - 2 * rr, t, 2 * rr, 2 * rr, 270, 90);
     p.AddArc(r - 2 * rr, b - 2 * rr, 2 * rr, 2 * rr, 0, 90);
@@ -9268,7 +9418,7 @@ static void WebStripPaint(HDC dc, int w, int h) {
     bool secure = t && t->url.rfind(L"https://", 0) == 0;
     if (secure) {
         int lockX = (int)g_webOmni.left + TABF(14);
-        if (!editFocus && g_wedit) {
+        if (g_wedit) {                                 // the lock follows the centered text, idle or editing
             wchar_t tx[512] = L"";
             int len = GetWindowTextW(g_wedit, tx, 512);
             if (len > 0) {
@@ -9433,8 +9583,8 @@ static void WebBarLayout() {
     int mx = (int)r.right - TABF(10);
     g_wbR[WB_MENU] = { mx - d, cy, mx, cy + d };
     mx -= pitch; g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d };
-    mx -= pitch; g_wbR[WB_READER] = { mx - d, cy, mx, cy + d };
-    int lo = (int)g_wbR[WB_FWD].right + TABF(18), hi = (int)g_wbR[WB_READER].left - TABF(18);
+    g_wbR[WB_READER] = { 0, 0, 0, 0 };             // the PDF button lives on the top toolbar now
+    int lo = (int)g_wbR[WB_FWD].right + TABF(18), hi = (int)g_wbR[WB_NEWTAB].left - TABF(18);
     int pw = max(10, min(hi - lo, TABF(560)));     // the capsule: centered in the window, capped
     int pl = std::clamp((int)r.right / 2 - pw / 2, lo, max(lo, hi - pw));
     g_webOmni = { pl, py, pl + pw, py + ph };
@@ -9485,9 +9635,7 @@ static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_SETFOCUS) {                        // focus opens the field to the full address,
         WebTab* ft = WebCur();                     // selects all, and left-aligns it
         SetWindowTextW(h, ft ? ft->url.c_str() : L"");
-        LRESULT r = CallWindowProcW(g_weditPrev, h, m, wp, lp);
-        LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
-        if (s & ES_CENTER) SetWindowLongPtrW(h, GWL_STYLE, s & ~ES_CENTER);
+        LRESULT r = CallWindowProcW(g_weditPrev, h, m, wp, lp);   // (stays centered, like Safari)
         PostMessageW(h, EM_SETSEL, 0, -1);
         InvalidateRect(h, nullptr, TRUE);
         if (g_wstrip) InvalidateRect(g_wstrip, nullptr, FALSE);   // the ring + padlock follow
@@ -9495,8 +9643,6 @@ static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     if (m == WM_KILLFOCUS) {                       // the blur puts the pill back the way
         LRESULT r = CallWindowProcW(g_weditPrev, h, m, wp, lp);   // the page left it
-        LONG_PTR s = GetWindowLongPtrW(h, GWL_STYLE);
-        if (!(s & ES_CENTER)) SetWindowLongPtrW(h, GWL_STYLE, s | ES_CENTER);
         WebSyncOmniboxForce();
         InvalidateRect(h, nullptr, TRUE);
         return r;
@@ -9968,6 +10114,7 @@ static void WebToggle(bool on) {
     if (on) {
         if (g_wt.empty()) WebNewTab(L"https://duckduckgo.com/", true);
         else { WebEnsureEnv(); WebShowCurrent(); }
+        if (g_wtool) { ShowWindow(g_wtool, SW_SHOWNOACTIVATE); InvalidateRect(g_wtool, nullptr, FALSE); }
         if (g_wstrip) { ShowWindow(g_wstrip, SW_SHOWNOACTIVATE); InvalidateRect(g_wstrip, nullptr, FALSE); }
         if (g_webFail && g.view) InvalidateRect(g.view, nullptr, FALSE);
     } else {
@@ -9975,6 +10122,8 @@ static void WebToggle(bool on) {
         if (t) t->captureDue = GetTickCount64() + 250;   // the parting thumb
         WebEnsurePump();
         if (g_wstrip) ShowWindow(g_wstrip, SW_HIDE);
+        if (g_wtool) ShowWindow(g_wtool, SW_HIDE);
+        g_wtoolHot = g_wtoolDown = false;
         for (auto& w : g_wt) if (w.ctr) w.ctr->put_IsVisible(FALSE);
         if (g_wedit) { ShowWindow(g_wedit, SW_HIDE); SetFocus(g.main); }
     }
@@ -10050,11 +10199,7 @@ static int WebSideAt(int y) {                      // the tab under a rail y, li
 
 static void WebSideDraw(HDC dc, int w, int h) {
     RECT r{ 0, 0, w, h };
-    {   HBRUSH sb = CreateSolidBrush(wvb::Band);   // flat, with a hairline on the page side
-        FillRect(dc, &r, sb); DeleteObject(sb);
-        RECT eg{ w - 1, 0, w, h };
-        HBRUSH eb = CreateSolidBrush(wvb::Edge);
-        FillRect(dc, &eg, eb); DeleteObject(eb); }
+    FillRect(dc, &r, GrainBrush(1));               // the reader's own field: the shared dark grain
     int n = (int)g_wt.size();
     if (!n || ws.cw <= 0 || ws.top.empty()) return;
     int avail = ws.cw - SBar();
@@ -10068,10 +10213,18 @@ static void WebSideDraw(HDC dc, int w, int h) {
         int y = ws.top[i] - ws.scroll;
         if (y + th + gap + labH < 0) continue;
         int btop = y - padT, bbot = y + th + gap + labH + padB;
-        if ((i == ws.cur || i == ws.hover) && bbot > 0) {   // a rounded tile: lit for the open
-            RECT band{ TABF(6), max(0, btop), avail - TABF(6), min(h, bbot) };   // tab, softer for
-            WebTileC(dc, band, i == ws.cur ? Gdiplus::Color(255, 0x3a, 0x3a, 0x3c)   // the cursor's
-                                           : Gdiplus::Color(255, 0x2f, 0x2f, 0x31), 8.0f);
+        if ((i == ws.cur || i == ws.hover) && bbot > 0) {   // the reader's item band: the green
+            RECT band{ 0, max(0, btop), avail, min(h, bbot) };   // SelectionBg gradient behind the
+            if (i == ws.cur) {                                   // open tab, RowHoverBrush under the cursor
+                Gdiplus::Graphics gs(dc);
+                Gdiplus::LinearGradientBrush gb(Gdiplus::Rect(band.left, band.top - 1, band.right - band.left, band.bottom - band.top + 2),
+                                                Gdiplus::Color(255, 0x38, 0x75, 0x52),
+                                                Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
+                gs.FillRectangle(&gb, (int)band.left, (int)band.top,
+                                 (int)(band.right - band.left), (int)(band.bottom - band.top));
+            } else {
+                FillRect(dc, &band, RowHoverBrush());
+            }
         }
         RECT tr{ x, y, x + ws.tw, y + th };
         const WebTab& t = g_wt[i];
@@ -10086,7 +10239,7 @@ static void WebSideDraw(HDC dc, int w, int h) {
             FillRect(dc, &tr, (HBRUSH)GetStockObject(LTGRAY_BRUSH));
             FrameRect(dc, &tr, ThumbEdgeBrush());
         }
-        RECT nr{ 0, y + th + gap, avail, y + th + gap + labH };
+        RECT nr{ TABF(6), y + th + gap, avail - TABF(6), y + th + gap + labH };
         SetTextColor(dc, i == ws.cur ? RGB(0xff, 0xff, 0xff) : RGB(0xa3, 0xa3, 0xa3));
         std::wstring lab = t.title.empty() ? t.url : t.title;
         DrawTextW(dc, lab.c_str(), -1, &nr, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -12476,7 +12629,7 @@ static void LayoutMain() {
     // owns it (the parent for whatever no child covers). The strips are thin
     // bands - a layout pass moves edges, never documents - so this stays a
     // few InvalidateRects, not a repaint.
-    struct Kid { HWND w; RECT was; } kids[6] = { { g.bar, {} }, { g_wstrip, {} }, { g.side, {} }, { g.rail, {} }, { g.view, {} }, { g.status, {} } };
+    struct Kid { HWND w; RECT was; } kids[7] = { { g.bar, {} }, { g_wtool, {} }, { g_wstrip, {} }, { g.side, {} }, { g.rail, {} }, { g.view, {} }, { g.status, {} } };
     for (auto& k : kids)
         if (k.w) {
             GetWindowRect(k.w, &k.was);
@@ -12485,7 +12638,9 @@ static void LayoutMain() {
         }
     int sw = g_webOn ? (g_webSide ? SW() : 0) : ((g.sideOn && DVF().n && !g.full) ? SW() : 0);   // the sidebar shows the FOCUSED
     int rw = RW();                              // pane's pages; the rail always rides between
-    int cap = CAP();
+    int cap0 = CAP();
+    int tl = WEBTOOLH();                        // browser mode: the reader's toolbar row, one button
+    int cap = cap0 + tl;                        // everything below sits under caption + toolbar
     int tb = g_webOn ? WebBandH() : TBH();      // browser mode: the tab band - there only
                                                 // from the second tab, like the reader's
     int ws_ = WEBSTRIPH();                      // the browser's toolbar rides above it
@@ -12493,6 +12648,7 @@ static void LayoutMain() {
     int ch = max(0, h - cap - ws_ - tb - sh);   // the children sit below caption + strip + toolbar
     sd.w = sw;
     if (g_webOn) {
+        if (g_wtool) MoveWindow(g_wtool, 0, cap0, w, tl, TRUE);
         if (g_wstrip) MoveWindow(g_wstrip, 0, cap, w, ws_, TRUE);
         if (g.bar) MoveWindow(g.bar, 0, cap + ws_, w, tb, TRUE);
     } else if (g.bar) {
@@ -12626,6 +12782,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         g.rail = CreateWindowExW(0, L"DocsyRail", nullptr,
                                  WS_CHILD | WS_VISIBLE,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
+        g_wtool = CreateWindowExW(0, L"DocsyWebTool", nullptr,     // browser mode's reader toolbar
+                                  WS_CHILD, 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         g_wstrip = CreateWindowExW(0, L"DocsyWebStrip", nullptr,   // the browser's Safari toolbar,
                                    WS_CHILD, 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);   // hidden until Web
         DragAcceptFiles(h, TRUE); DragAcceptFiles(g.view, TRUE); DragAcceptFiles(g.side, TRUE);
@@ -13132,7 +13290,7 @@ static int Shot(const wchar_t* out, int w, int h) {
     HGDIOBJ old = SelectObject(dc, b);
     int sw = g_webOn ? sd.w : ((g.sideOn && DVF().n && !g.full) ? sd.w : 0);   // web: the rail
     int rw = RW();                                  // always shows the OPEN WEB TABS
-    int cap = CAP(), sh = g_webOn ? 0 : SBH();
+    int cap0 = CAP(), cap = cap0 + WEBTOOLH(), sh = g_webOn ? 0 : SBH();
     int tb = g_webOn ? WebBandH() : TBH();          // browser mode: the tab band
     int ws_ = WEBSTRIPH();                          // the nav row rides between caption and tabs
     int ch = max(1, h - cap - ws_ - tb - sh);
@@ -13244,6 +13402,15 @@ static int Shot(const wchar_t* out, int w, int h) {
         BitBlt(dc, 0, cap + ws_, w, tb, m4, 0, 0, SRCCOPY);
         SelectObject(m4, o4); DeleteObject(b4); DeleteDC(m4);
     }
+    if (!g.full && g_webOn && cap > cap0) {    // the reader's toolbar row, one PDF button
+        HDC m9 = CreateCompatibleDC(dc);
+        HBITMAP b9 = CreateCompatibleBitmap(dc, w, cap - cap0);
+        HGDIOBJ o9 = SelectObject(m9, b9);
+        SetBrushOrgEx(m9, 0, -cap0, nullptr);
+        WebToolDraw(m9, w, cap - cap0);
+        BitBlt(dc, 0, cap0, w, cap - cap0, m9, 0, 0, SRCCOPY);
+        SelectObject(m9, o9); DeleteObject(b9); DeleteDC(m9);
+    }
     if (!g.full && ws_ > 0) {                  // the browser's Safari toolbar, topmost
         HDC m8 = CreateCompatibleDC(dc);
         HBITMAP b8 = CreateCompatibleBitmap(dc, w, ws_);
@@ -13326,6 +13493,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     bc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     bc.lpszClassName = L"DocsyBar";
     RegisterClassExW(&bc);
+
+    WNDCLASSEXW wtc{ sizeof wtc };                  // browser mode's top toolbar (one button: PDF)
+    wtc.lpfnWndProc = WebToolProc; wtc.hInstance = hi;
+    wtc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wtc.lpszClassName = L"DocsyWebTool";
+    RegisterClassExW(&wtc);
 
     WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Safari toolbar (top): the
     wbc.style = CS_DBLCLKS;                         // logo, back/forward, the search pill,
@@ -13576,6 +13749,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 g_wt.push_back(std::move(t1)); g_wt.push_back(std::move(t2));
                 g_wtCur = 0;
                 g_webOn = true;
+                if (g_wtool) ShowWindow(g_wtool, SW_SHOWNOACTIVATE);
                 if (g_wstrip) ShowWindow(g_wstrip, SW_SHOWNOACTIVATE);
                 LayoutMain();
                 WebBarLayout();
