@@ -489,7 +489,7 @@ static void InfoOpen();
 static bool InfoIsOpen();
 static void SetStatusHold(const std::wstring& t, unsigned ms = 2500);   // the footer's held line
 static void SetTool(int t, bool b);     // the toolbar's tool buttons (KillerPDF's SetTool)
-static void CommitTextEdit(bool commit = true);   // the Text tool's box (defined with the tools)
+static void CommitTextEdit(bool commit = true, bool restore = false);   // the Text tool's box
 static void NewBlank();                 // Ctrl+N: a blank document into the focused pane
 static void CloseDoc();                 // the Close button: the focused pane's document leaves
 static void SaveDoc(bool saveAs);       // the Save button + Ctrl+S / Ctrl+Shift+S
@@ -2747,13 +2747,17 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 // (CommitFlowingHighlight). Each pane keeps its own tool, exactly like
 // KillerPDF keeps the editing state per viewer instance.
 
-// The text box commits on focus loss, on any view motion, or on Escape -
-// Escape discards, everything else lands as an AT_TEXT annotation carrying
-// the bar's full style (KillerPDF's BuildCommittedTextAnnotation). Empty
-// content discards, exactly like KillerPDF. Del inside the box rides the
-// same discard when it empties the box: the whole annotation goes with the
-// input, nothing left.
-static void CommitTextEdit(bool commit) {
+// The text box commits on focus loss, on any view motion, or on Ctrl+Enter -
+// the text lands as an AT_TEXT annotation carrying the bar's full style
+// (KillerPDF's BuildCommittedTextAnnotation); empty content discards, exactly
+// like KillerPDF. Del inside the box deletes the WHOLE textbox - input and
+// frame, nothing left, whatever the selection is (the user's contract; the
+// character edits stay with Backspace). Escape backs out: a re-edited box is
+// RESTORED, KillerPDF's CancelActiveTextEdit, so backing out never deletes.
+static Annot g_teRestore;          // the re-edit's original, parked while the box is
+static int g_teRestorePage = -1, g_teRestoreIdx = -1;   // open (CancelActiveTextEdit's
+static bool g_teRestoreB = false;  // _reeditOriginal - Escape puts it back, Del drops it)
+static void CommitTextEdit(bool commit, bool restore) {
     if (!g.tedit) return;                       // the default argument rides the forward
     HWND e = g.tedit;
     int len = GetWindowTextLengthW(e);
@@ -2802,6 +2806,16 @@ static void CommitTextEdit(bool commit) {
             D.annos[fpg].push_back(a);
         }
     }
+    else if (restore && g_teRestoreIdx >= 0) {
+        // KillerPDF's CancelActiveTextEdit: backing out of a re-edit puts the
+        // original annotation back where it sat - Escape is a cancel, never
+        // a delete; the snapshot UndoPush took at open stays the undo pair,
+        // so no extra entry rides here
+        DocState& D = DV(g_teRestoreB);
+        std::vector<Annot>& list = D.annos[g_teRestorePage];
+        list.insert(list.begin() + std::clamp(g_teRestoreIdx, 0, (int)list.size()), g_teRestore);
+    }
+    g_teRestoreIdx = -1;   // the stash is spent whichever way the box closed
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
 }
 
@@ -2875,17 +2889,12 @@ static LRESULT CALLBACK TextEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (m == WM_KEYDOWN) {
-        if (wp == VK_ESCAPE) { CommitTextEdit(false); return 0; }
-        if (wp == VK_DELETE) {      // Del that empties the box takes the whole box with
-            DWORD s0 = 0, s1 = 0;   // it - the input and the frame land nowhere, nothing
-            SendMessageW(h, EM_GETSEL, (WPARAM)&s0, (LPARAM)&s1);   // is left on the page
-            LRESULT last = SendMessageW(h, EM_LINEINDEX,      // the end of the text in the
-                             SendMessageW(h, EM_GETLINECOUNT, 0, 0) - 1, 0);  // same index
-            LRESULT total = last + SendMessageW(h, EM_LINELENGTH, last, 0);  // space the
-            if (total == 0 || (s0 == 0 && s1 == (DWORD)total)) {     // selection reports
-                CommitTextEdit(false); return 0;
-            }
-        }                           // a caret Del mid-text stays ordinary editing
+        if (wp == VK_ESCAPE) { CommitTextEdit(false, true); return 0; }   // backs out - a
+                                     // re-edited box returns (CancelActiveTextEdit)
+        if (wp == VK_DELETE) {      // Del deletes the WHOLE textbox - input and frame,
+            CommitTextEdit(false);  // nothing left, whatever the selection is; letters
+            return 0;               // are Backspace's business
+        }
         if (wp == VK_RETURN && (GetKeyState(VK_CONTROL) < 0)) { CommitTextEdit(); return 0; }
         if (wp == 'A' && GetKeyState(VK_CONTROL) < 0) {
             SendMessageW(h, EM_SETSEL, 0, -1); return 0;   // WPF TextBox's Ctrl+A SelectAll - a
@@ -2928,6 +2937,9 @@ static void TextPlace(bool b, POINT p) {
                 g.textStrike = a.strike; g.textUnder = a.under;
                 g.textRGB = a.color; g.textA = a.alpha;
                 g.textFillRGB = a.fill; g.textFillA = a.fillA;
+                g_teRestore = a;           // park the original: Escape puts it back,
+                g_teRestorePage = pg;      // Del drops it for good (CommitTextEdit's
+                g_teRestoreIdx = ai; g_teRestoreB = b;   // restore switch)
                 it->second.erase(it->second.begin() + ai);
                 TextEditOpen(b, pg, tx, ty, tw, text.c_str());   // defined below
                 return;
@@ -3021,11 +3033,8 @@ static void TextEditOpen(bool b, int pg, float tx, float ty, float tw, const wch
     g.teditDef = (WNDPROC)SetWindowLongPtrW(g.tedit, GWLP_WNDPROC, (LONG_PTR)TextEditProc);
     SetFocus(g.tedit);
     SendMessageW(g.tedit, EM_SETSEL, 0, -1);   // KillerPDF opens every box select-all
-                                               // (QueueTextEditorFocus selectAll: true):
-                                               // Del wipes the whole content in one press
-                                               // and the empty re-edit commit drops the
-                                               // box - the reference's own delete-the-
-                                               // textbox flow, no nibbling letter by letter
+                                               // (QueueTextEditorFocus selectAll: true) -
+                                               // typing over it replaces the text at once
     SetStatusHold(L"Editing text. Change size/color above, Enter to save");
     InvalidateRect(g.view, nullptr, FALSE);   // the composite paints the ring the edit's
                                               // punch-out exposes (WS_CLIPCHILDREN owns
@@ -5443,6 +5452,10 @@ static bool AnnotHit(const Annot& a, float fx, float fy, float k) {
             if (PtSegDist(fx, fy, a.ix[i], a.iy[i], a.ix[i + 1], a.iy[i + 1]) <= reach) return true;
         return false;
     }
+    if (a.type == AT_TEXT) {   // KillerPDF's HitTestAnnotation grabs a text box with a
+        return fx >= a.x - 8 && fx <= a.x + a.w + 8 &&    // forgiving margin - a one-line
+               fy >= a.y - 10 && fy <= a.y + a.h + 10;    // box is a thin band, so clicks
+    }                                                     // near it still select it
     return fx >= a.x - pad && fx <= a.x + a.w + pad && fy >= a.y - pad && fy <= a.y + a.h + pad;
 }
 
@@ -9294,7 +9307,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             break;
         case VK_ESCAPE:
             if (g.annPoly) PolyCancel(h);          // the polygon session backs out first
-            else if (g.tedit) CommitTextEdit(false);    // the open text box discards next
+            else if (g.tedit) CommitTextEdit(false, true);   // ESC backs the box out: a
+                                                             // re-edit's original returns
             else if (fd.open) FindClose();         // the bar leaves next
             else if (g.full) ToggleFull(h);        // full screen leaves next
             else if (g.annSelPage >= 0) {          // then the annotation selection
