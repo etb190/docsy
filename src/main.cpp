@@ -8050,6 +8050,66 @@ static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c, bool shadow = t
     DrawTextW(dc, glyph, -1, &in, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+// ---- KillerPDF's PaneShadow, landing on the rail ----
+// The card butts the rail and casts its PaneShadow on all four sides (SidebarLayout.cs:
+// the hand-rolled SidebarShadow gradient died the day DocPaneBorder carried the real
+// one, because the real one already darkens the surface beside the card). Bottom over
+// the footer, right over the window gutter - and the LEFT halo over the rail's field,
+// which KillerPDF's own dark-theme render reads as a 28->20 dip across the rail's last
+// ~8px. The top shows nothing anywhere: the card tucks under the opaque tab band. The
+// rail is a separate child window, so its share of the halo lands here - the same
+// falloff the footer paints (black, blur 16, depth 5 down, opacity 0.6), factored for
+// the card's LEFT edge: the vertical term fades in across the silhouette's pushed-down
+// top edge, the horizontal term runs the gaussian leftward from the rail's right edge,
+// and the corner pull-in c recedes near the card's rounded top-left corner the way the
+// footer's does around its bottom ones. (The bottom corner wraps below the rail's last
+// row - the silhouette reaches 5px past it - so only the top needs the pull-in.) Baked
+// once per height/dpi into a black alpha strip whose right edge abuts the card and
+// AlphaBlended over whatever the rail has drawn - both paint paths, icons included,
+// which is KillerPDF's own z-order: the shadow's pane renders above the sidebar's.
+static HBITMAP g_rshbm = nullptr; static HDC g_rshdc = nullptr;
+static int g_rshw = 0, g_rshh = 0; static double g_rshdpi = 0;
+
+static void DrawRailShadow(HDC dc, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    int sw = min(w, (int)(20 * g.dpi) + 2);   // the visible reach: ~2.5 sigma, past this
+                                              // the falloff is under one percent of ink
+    if (!g_rshbm || g_rshw != sw || g_rshh != h || g_rshdpi != g.dpi) {
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), sw, -h, 1, 32, BI_RGB };
+        BYTE* px = nullptr;
+        HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);
+        if (px && bm) {
+            const double sig = 8.0 * g.dpi, depth = 5.0 * g.dpi;
+            int rad = max(2, (int)(6 * g.dpi));
+            for (int y = 0; y < h; y++) {
+                double vy = Phi((y - depth) / sig);      // the silhouette starts 5px down:
+                                                         // the halo fades in over its top
+                double cy = max(0.0, (double)y - depth); // height past that top edge
+                double c = cy < rad ? rad - std::sqrt((double)rad * rad - (rad - cy) * (rad - cy))
+                                    : 0.0;               // the corner's pull-in, footer-style
+                BYTE* row = px + (size_t)y * sw * 4;
+                for (int x = 0; x < sw; x++) {
+                    // the card's left edge abuts the strip's right edge (x = sw): the
+                    // gaussian runs leftward from it, pulled in by the corner above
+                    double a = 0.6 * vy * Phi((x - sw - c) / sig);
+                    BYTE* p = row + (size_t)x * 4;
+                    p[0] = p[1] = p[2] = 0;
+                    p[3] = (BYTE)std::lround(a * 255.0);
+                }
+            }
+            if (!g_rshdc) g_rshdc = CreateCompatibleDC(dc);
+            if (g_rshbm) DeleteObject(g_rshbm);
+            g_rshbm = bm;
+            SelectObject(g_rshdc, g_rshbm);
+            g_rshw = sw; g_rshh = h; g_rshdpi = g.dpi;
+        }
+    }
+    if (g_rshbm) {
+        BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        AlphaBlend(dc, w - sw, 0, sw, h, g_rshdc, 0, 0, sw, h, bf);
+    }
+}
+
 static void RailDraw(HDC dc, int w, int h) {
     RECT r{ 0, 0, w, h };
     FillRect(dc, &r, GrainBrush(1));        // the shared field, so the rail reads as part
@@ -8073,7 +8133,8 @@ static void RailDraw(HDC dc, int w, int h) {
                    : RGB(0xe0, 0xe0, 0xe0);
         RailIcon(dc, i, bs[i], c);
     }
-}
+    DrawRailShadow(dc, w, h);               // the card's left halo, over the icons the way
+}                                           // KillerPDF's z-order paints it - last ink down
 
 static void RailRepaint() { if (g.rail) InvalidateRect(g.rail, nullptr, FALSE); }
 
