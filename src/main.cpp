@@ -6485,12 +6485,13 @@ static Gdiplus::PrivateFontCollection* TabFaces() {
 
 static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
     Gdiplus::PrivateFontCollection* pc = TabFaces();
-    INT n = 0; pc->GetFamilyCount(&n);
+    INT n = pc->GetFamilyCount();
     if (!n) {                                       // no faces: the GDI fallback above
         SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c);
         HFONT f = TabFont();
         HGDIOBJ of = SelectObject(dc, f);
-        DrawTextW(dc, s.c_str(), -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT rr = r;
+        DrawTextW(dc, s.c_str(), -1, &rr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(dc, of);
         return;
     }
@@ -6505,9 +6506,9 @@ static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
     if (!ui) return;
     Gdiplus::Graphics gs(dc);
     gs.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    Gdiplus::Font f(ui, (REAL)(12 * g.dpi), Gdiplus::UnitPixel);   // TabTitleFontSize 12 at the DPI
+    Gdiplus::Font f(ui, (float)(12 * g.dpi), Gdiplus::UnitPixel);   // TabTitleFontSize 12 at the DPI
     Gdiplus::SolidBrush br(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
-    Gdiplus::RectF rf((REAL)r.left, (REAL)r.top, (REAL)(r.right - r.left), (REAL)(r.bottom - r.top));
+    Gdiplus::RectF rf((float)r.left, (float)r.top, (float)(r.right - r.left), (float)(r.bottom - r.top));
     Gdiplus::StringFormat sf;
     sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap | Gdiplus::StringFormatFlagsNoFitBlackBox);
     sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
