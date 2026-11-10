@@ -11,9 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - name: WebView2 SDK
+        shell: cmd
+        run: |
+          curl -sSL -o wv2.zip https://www.nuget.org/api/v2/package/Microsoft.Web.WebView2
+          mkdir wv2 && tar -xf wv2.zip -C wv2
+          if not exist wv2\build\native\include\webview2.h exit 1
+          if not exist wv2\build\native\x64\WebView2LoaderStatic.lib exit 1
       - name: Build
         shell: cmd
-        run: rc /nologo /fo src\docsy.res src\docsy.rc && cl /nologo /std:c++20 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /Fe:docsy.exe src\main.cpp src\docsy.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest > build.log 2>&1
+        run: rc /nologo /fo src\docsy.res src\docsy.rc && cl /nologo /std:c++20 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /I"wv2\build\native\include" /Fe:docsy.exe src\main.cpp src\docsy.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest /LIBPATH:"wv2\build\native\x64" WebView2LoaderStatic.lib advapi32.lib > build.log 2>&1
       - name: Show build log
         if: always()
         shell: bash
