@@ -2153,8 +2153,30 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
     try {                                                // the toolbar act on the focused pane,
         wchar_t full[MAX_PATH * 4];                      // a drop loads the pane it landed on
         GetFullPathNameW(p.c_str(), (DWORD)_countof(full), full, nullptr);
-        auto f = StorageFile::GetFileFromPathAsync(full).get();
-        auto d = PdfDocument::LoadFromFileAsync(f).get();
+        // the file is read into memory and the engine chews on the copy:
+        // LoadFromFileAsync pins the on-disk file for the PdfDocument's whole
+        // life, so every later in-place save died on a sharing violation and
+        // the disk never changed - the reader's "save does nothing". A memory
+        // copy holds no handle; the path stays free for Save's overwrite.
+        HANDLE fh = CreateFileW(full, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (fh == INVALID_HANDLE_VALUE) throw std::runtime_error("open");
+        LARGE_INTEGER fsz{};
+        if (!GetFileSizeEx(fh, &fsz) || fsz.QuadPart <= 0) { CloseHandle(fh); throw std::runtime_error("size"); }
+        std::vector<BYTE> bytes((size_t)fsz.QuadPart);
+        DWORD got = 0, rd = 0;
+        while (got < bytes.size() &&
+               ReadFile(fh, bytes.data() + got, (DWORD)(bytes.size() - got), &rd, nullptr) && rd) got += rd;
+        CloseHandle(fh);                                 // the disk file is nobody's hostage now
+        if (got != bytes.size()) throw std::runtime_error("read");
+        InMemoryRandomAccessStream st;
+        DataWriter w(st);
+        w.WriteBytes(winrt::array_view<const BYTE>(bytes.data(), bytes.data() + bytes.size()));
+        w.StoreAsync().get();
+        w.FlushAsync().get();
+        w.DetachStream();                                // the writer lets go; the doc keeps the stream
+        st.Seek(0);
+        auto d = PdfDocument::LoadFromStreamAsync(st).get();
         uint32_t n = d.PageCount();
         if (!n) throw std::runtime_error("empty");
         std::vector<float> w(n, 612.f), h(n, 792.f);
@@ -2293,17 +2315,26 @@ static void CloseDoc() {
 
 // The shared write-out: every page renders at ~150dpi with the annotations
 // composited - the same paint the screen shows - and lands as JPEG pages in a
-// minimal PDF. SaveDoc's writer is the only emitter.
+// minimal PDF. SaveDoc's writer is the only emitter. The bytes land in a
+// sibling temp first and REPLACE the target only once the whole PDF is out -
+// a half-written save must never eat the file it was saving. SaveAs adopts
+// the same rule: the copy is completed off to the side, then moved into place.
 static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err) {
-    HANDLE f = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    std::wstring tmp = file + L".docsy-tmp";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) { err = L"the file could not be written"; return false; }
     auto pageJpeg = [&](int i, std::vector<BYTE>& out) -> bool {
         int w = std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400);
         int h = max(1, (int)std::lround((float)w * D.ph[i] / max(1.f, D.pw[i])));
         HBITMAP b = GetBmp(D, i, w, h);
         if (!b) return false;
+        // a private copy takes the burn-in: GetBmp's bitmap is the screen cache,
+        // and painting into it would bake the annotations into every later
+        // frame - a box deleted after the save would still ghost on screen
+        HBITMAP cp = (HBITMAP)CopyImage(b, IMAGE_BITMAP, w, h, 0);
+        if (!cp) return false;
         HDC mdc = CreateCompatibleDC(nullptr);
-        HGDIOBJ ob = SelectObject(mdc, b);
+        HGDIOBJ ob = SelectObject(mdc, cp);
         float k = (float)w / max(1.f, D.pw[i]);
         PaintAnnots(mdc, D, i, 0, 0, k);   // annotations burn in
         CLSID jpg{}; UINT cnt = 0, bytes = 0;
@@ -2312,9 +2343,9 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         auto* enc = (Gdiplus::ImageCodecInfo*)buf.data();
         Gdiplus::GetImageEncoders(cnt, bytes, enc);
         for (UINT e = 0; e < cnt; e++) if (!lstrcmpW(enc[e].MimeType, L"image/jpeg")) jpg = enc[e].Clsid;
-        Gdiplus::Bitmap bm(b, nullptr);
+        Gdiplus::Bitmap bm(cp, nullptr);
         IStream* os = nullptr;
-        if (CreateStreamOnHGlobal(nullptr, TRUE, &os) != S_OK) { SelectObject(mdc, ob); DeleteDC(mdc); return false; }
+        if (CreateStreamOnHGlobal(nullptr, TRUE, &os) != S_OK) { SelectObject(mdc, ob); DeleteDC(mdc); DeleteObject(cp); return false; }
         bool ok = false;
         if (bm.Save(os, &jpg, nullptr) == Gdiplus::Ok) {
             LARGE_INTEGER z1{}; z1.QuadPart = 0;
@@ -2327,7 +2358,7 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
             ok = os->Read(out.data(), (ULONG)out.size(), &rd) == S_OK && rd == out.size();
         }
         os->Release();
-        SelectObject(mdc, ob); DeleteDC(mdc);
+        SelectObject(mdc, ob); DeleteDC(mdc); DeleteObject(cp);
         return ok && !out.empty();
     };
     std::string head = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
@@ -2367,6 +2398,7 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
     }
     if (failed) {
         CloseHandle(f);
+        DeleteFileW(tmp.c_str());   // the temp dies alone; the real file never knew
         err = L"a page could not be rendered";
         return false;
     }
@@ -2379,6 +2411,11 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
     xr += "trailer\n<< /Size " + std::to_string(3 + D.n * 2) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
     emit(xr);
     CloseHandle(f);
+    if (!MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());   // the temp dies alone; the real file never knew
+        err = L"the file could not be replaced";
+        return false;
+    }
     return true;
 }
 
