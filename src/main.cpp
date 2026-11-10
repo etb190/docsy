@@ -90,7 +90,8 @@ using std::min; using std::max;
 #include <wrl/client.h>
 #include <wrl/event.h>   // Microsoft::WRL::Callback: the WebView2 COM event lambdas
 #include <webview2.h>    // the WebView2 SDK - CI fetches the Microsoft.Web.WebView2 package
-namespace wv = Microsoft::Web::WebView2::Win32;   // the engine; docsy ships only loader glue
+// WebView2's SDK header declares every interface and entry point at global scope;
+// the  prefix the first draft used is gone - the names are simply global.
 namespace wrl = Microsoft::WRL;                   // ComPtr + Callback: the event lambdas
 
 // the info dialog's edit margins - the SDK's own value, guarded because some
@@ -8931,8 +8932,8 @@ constexpr COLORREF Focus1   = RGB(0x8a, 0xb4, 0xf8);   // Chrome's focus blue
 struct WebTab {
     unsigned long long id = 0;
     std::wstring url, title;
-    wrl::ComPtr<wv::ICoreWebView2Controller> ctr;
-    wrl::ComPtr<wv::ICoreWebView2> web;
+    wrl::ComPtr<ICoreWebView2Controller> ctr;
+    wrl::ComPtr<ICoreWebView2> web;
     double zoom = 1.0;
     bool loading = false, canBack = false, canFwd = false;
     bool capturing = false, capturePending = false;
@@ -8945,7 +8946,7 @@ struct WebTab {
 static std::vector<WebTab> g_wt;
 static int g_wtCur = -1;
 static unsigned long long g_wtIds = 1;
-static wrl::ComPtr<wv::ICoreWebView2Environment> g_wvEnv;
+static wrl::ComPtr<ICoreWebView2Environment> g_wvEnv;
 static bool g_webChecked = false, g_webAvail = false;
 
 // the sidebar's web state - the same fields sd carries, pointed at the tabs
@@ -9454,8 +9455,8 @@ static void WebCaptureTab(int id) {
     t->capturing = true;
     wrl::ComPtr<IStream> st;
     if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &st))) { t->capturing = false; return; }
-    wrl::ComPtr<wv::ICoreWebView2CapturePreviewCompletedHandler> cb =
-        Microsoft::WRL::Callback<wv::ICoreWebView2CapturePreviewCompletedHandler>(
+    wrl::ComPtr<ICoreWebView2CapturePreviewCompletedHandler> cb =
+        Microsoft::WRL::Callback<ICoreWebView2CapturePreviewCompletedHandler>(
             [id, st](HRESULT hr) -> HRESULT {
                 WebTab* t = WebTabById(id);
                 if (t) {
@@ -9465,7 +9466,7 @@ static void WebCaptureTab(int id) {
                 }
                 return S_OK;
             });
-    t->web->CapturePreview(wv::COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, st.Get(), cb.Get());
+    t->web->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, st.Get(), cb.Get());
 }
 
 static void WebThumbDecode(int id, IStream* st) {
@@ -9531,20 +9532,20 @@ static void WebEnsureController(int i) {
     if (t->ctr) return;
     unsigned long long id = t->id;
     g_wvEnv->CreateCoreWebView2Controller(g.view,
-        Microsoft::WRL::Callback<wv::ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-            [id](HRESULT hr, wv::ICoreWebView2Controller* c) -> HRESULT {
+        Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+            [id](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
                 if (FAILED(hr) || !c) { g_webFail = true; WebRepaintChrome(); return S_OK; }
                 WebTab* t = WebTabById(id);
                 if (!t) { c->Close(); return S_OK; }
                 t->ctr = c;
                 c->get_CoreWebView2(&t->web);
-                wrl::ComPtr<wv::ICoreWebView2Controller2> c2;
+                wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
                     c2->put_DefaultBackgroundColor({ 255, 0x20, 0x21, 0x24 });   // the grain's dark,
                                                                                     // not Chromium's white
                 t->web->add_NavigationStarting(
-                    Microsoft::WRL::Callback<wv::ICoreWebView2NavigationStartingEventHandler>(
-                        [id](wv::ICoreWebView2*, wv::ICoreWebView2NavigationStartingEventArgs*) -> HRESULT {
+                    Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
+                        [id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*) -> HRESULT {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
                             t->loading = true;
@@ -9552,8 +9553,8 @@ static void WebEnsureController(int i) {
                             return S_OK;
                         }).Get(), &t->tkNavS);
                 t->web->add_NavigationCompleted(
-                    Microsoft::WRL::Callback<wv::ICoreWebView2NavigationCompletedEventHandler>(
-                        [id](wv::ICoreWebView2*, wv::ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
+                    Microsoft::WRL::Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                        [id](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
                             t->loading = false;
@@ -9564,8 +9565,8 @@ static void WebEnsureController(int i) {
                             return S_OK;
                         }).Get(), &t->tkNavC);
                 t->web->add_SourceChanged(
-                    Microsoft::WRL::Callback<wv::ICoreWebView2SourceChangedEventHandler>(
-                        [id](wv::ICoreWebView2* s, wv::ICoreWebView2SourceChangedEventArgs*) -> HRESULT {
+                    Microsoft::WRL::Callback<ICoreWebView2SourceChangedEventHandler>(
+                        [id](ICoreWebView2* s, ICoreWebView2SourceChangedEventArgs*) -> HRESULT {
                             WebTab* t = WebTabById(id);
                             if (!t || !s) return S_OK;
                             LPWSTR u = nullptr;
@@ -9576,8 +9577,8 @@ static void WebEnsureController(int i) {
                             return S_OK;
                         }).Get(), &t->tkSrc);
                 t->web->add_DocumentTitleChanged(
-                    Microsoft::WRL::Callback<wv::ICoreWebView2DocumentTitleChangedEventHandler>(
-                        [id](wv::ICoreWebView2* s, IUnknown*) -> HRESULT {
+                    Microsoft::WRL::Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
+                        [id](ICoreWebView2* s, IUnknown*) -> HRESULT {
                             WebTab* t = WebTabById(id);
                             if (!t || !s) return S_OK;
                             LPWSTR ti = nullptr;
@@ -9588,14 +9589,12 @@ static void WebEnsureController(int i) {
                             if (g.side) InvalidateRect(g.side, nullptr, FALSE);
                             return S_OK;
                         }).Get(), &t->tkTitle);
-                wrl::ComPtr<wv::ICoreWebView2_2> w2;
-                if (SUCCEEDED(t->web.As(&w2)) && w2)
-                    w2->add_HistoryChanged(
-                        Microsoft::WRL::Callback<wv::ICoreWebView2HistoryChangedEventHandler>(
-                            [id](wv::ICoreWebView2*, IUnknown*) -> HRESULT {
-                                WebHistorySync(id);
-                                return S_OK;
-                            }).Get(), &t->tkHist);
+                t->web->add_HistoryChanged(    // HistoryChanged rides the base interface
+                    Microsoft::WRL::Callback<ICoreWebView2HistoryChangedEventHandler>(
+                        [id](ICoreWebView2*, IUnknown*) -> HRESULT {
+                            WebHistorySync(id);
+                            return S_OK;
+                        }).Get(), &t->tkHist);
                 c->put_IsVisible(g_webOn && g_wtCur >= 0 && g_wtCur < (int)g_wt.size()
                                  && g_wt[g_wtCur].id == id ? TRUE : FALSE);
                 WebPlace(); WebRepaintChrome();
@@ -9612,7 +9611,7 @@ static void WebEnsureEnv() {
     if (!g_webChecked) {
         g_webChecked = true;
         LPWSTR ver = nullptr;
-        if (SUCCEEDED(wv::GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver)) && ver) {
+        if (SUCCEEDED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver)) && ver) {
             g_webVer = ver;
             CoTaskMemFree(ver);
             g_webAvail = true;
@@ -9624,9 +9623,9 @@ static void WebEnsureEnv() {
     std::wstring udf = (la ? std::wstring(la) : std::wstring(L".")) + L"\\Docsy\\WebView2";
     if (la) CoTaskMemFree(la);
     g_wvEnv = nullptr;
-    wv::CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), nullptr,
-        Microsoft::WRL::Callback<wv::ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-            [](HRESULT hr, wv::ICoreWebView2Environment* env) -> HRESULT {
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), nullptr,
+        Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+            [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
                 if (FAILED(hr) || !env) { g_webFail = true; WebRepaintChrome(); return S_OK; }
                 g_wvEnv = env;
                 for (int i = 0; i < (int)g_wt.size(); i++) WebEnsureController(i);
