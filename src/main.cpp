@@ -6566,17 +6566,18 @@ static void TabBandPaint(HDC dc, bool b) {
     int BH = BANDH();
     // the field: the band paints no fill of its own - the window's grainy
     // background shows through, exactly KillerPDF's transparent strip
-    RECT band{ PaneX0(b), 0, PaneX0(b) + PaneW(b), BH };
-    FillRect(dc, &band, GrainBrush(1));
+    int bx0 = PaneX0(b), bw0 = PaneW(b);
+    RECT bandR{ bx0, 0, bx0 + bw0, BH };
+    FillRect(dc, &bandR, GrainBrush(1));
     // the foot fade (TabStripFade): transparent to 45%, #59000000 at the foot,
     // the whole gradient at BarShadowOpacity 0.38
     {
-        Gdiplus::Graphics gs(dc);
-        Gdiplus::LinearGradientBrush br(Gdiplus::PointF(0, (float)BH * 0.45f),
-                                        Gdiplus::PointF(0, (float)BH),
-                                        Gdiplus::Color(0, 0, 0, 0), Gdiplus::Color(0x22, 0, 0, 0));
-        gs.FillRectangle(&br, Gdiplus::RectF((float)band.left, (float)BH * 0.45f,
-                                             (float)(band.right - band.left), (float)BH * 0.55f));
+        Gdiplus::Graphics gfade(dc);
+        Gdiplus::Color c0((BYTE)0, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::Color c1((BYTE)0x22, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::RectF fadeR((float)bx0, (float)BH * 0.45f, (float)bw0, (float)BH * 0.55f);
+        Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
+        gfade.FillRectangle(&fadeBr, fadeR);
     }
     // the card's tucked top border: the hairline at the band's foot. The ends
     // round at the active tab's radius (CardCorners.AtTabBand) unless the
@@ -6589,19 +6590,20 @@ static void TabBandPaint(HDC dc, bool b) {
     // strip's edge - with the chevron showing, the last visible tab is a
     // middle tab in every way that matters (RebuildTabStrip's IsLast rule)
     bool lastActive = !G.chev && G.cap > 0 && actVis == G.start + G.cap - 1;
-    int rad3 = TABF(3);
-    int hlL = cardL + (firstActive ? 0 : rad3), hlR = cardR - (lastActive ? 0 : rad3);
+    int r3 = (int)(3 * g.dpi);
+    int hlL = cardL + (firstActive ? 0 : r3), hlR = cardR - (lastActive ? 0 : r3);
     {
         // exact #555555, one pixel, GDI+ so the ends meet the corner arcs
-        Gdiplus::Graphics gs(dc);
-        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x55, 0x55, 0x55));
-        gs.FillRectangle(&hb, Gdiplus::RectF((float)hlL, (float)BH - 1.f, (float)(hlR - hlL), 1.f));
-        Gdiplus::Pen pen(Gdiplus::Color(255, 0x55, 0x55, 0x55), 1.f);
-        if (!firstActive) gs.DrawArc(&pen, Gdiplus::RectF((float)cardL - 0.5f, (float)BH - 1.f - rad3 - 0.5f,
-                                    (float)(2 * rad3), (float)(2 * rad3)), 180, 90);
-        if (!lastActive)  gs.DrawArc(&pen, Gdiplus::RectF((float)cardR - 1.f - 2 * rad3 - 0.5f,
-                                    (float)BH - 1.f - rad3 - 0.5f, (float)(2 * rad3), (float)(2 * rad3)), 270, 90);
+        Gdiplus::Graphics ghl(dc);
+        ghl.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        Gdiplus::Color hairC((BYTE)255, (BYTE)0x55, (BYTE)0x55, (BYTE)0x55);
+        Gdiplus::SolidBrush hairBr(hairC);
+        ghl.FillRectangle(&hairBr, Gdiplus::RectF((float)hlL, (float)BH - 1.f, (float)(hlR - hlL), 1.f));
+        Gdiplus::Pen hairPen(hairC, 1.f);
+        if (!firstActive) ghl.DrawArc(&hairPen, Gdiplus::RectF((float)cardL - 0.5f, (float)BH - 1.f - r3 - 0.5f,
+                                    (float)(2 * r3), (float)(2 * r3)), 180.f, 90.f);
+        if (!lastActive)  ghl.DrawArc(&hairPen, Gdiplus::RectF((float)cardR - 1.f - 2 * r3 - 0.5f,
+                                    (float)BH - 1.f - r3 - 0.5f, (float)(2 * r3), (float)(2 * r3)), 270.f, 90.f);
     }
     // the tabs. The focused pane's ring is solid accent; the unfocused pane's
     // drops to the card's border color; a lone pane's melts into its face -
@@ -6651,7 +6653,7 @@ static void TabBandPaint(HDC dc, bool b) {
             if (!G.chev && isLastVis) { /* the band's edge: no stray rule */ }
             else {
                 Gdiplus::Graphics gs(dc);
-                Gdiplus::SolidBrush db(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+                Gdiplus::SolidBrush db(Gdiplus::Color((BYTE)255, 0x55, 0x55, 0x55));
                 gs.FillRectangle(&db, Gdiplus::RectF((float)fr - 1.f, (float)G.faceTop, 1.f, (float)G.faceH));
             }
             // the label, dirty dot included, ellipsized before the close x
@@ -6674,13 +6676,13 @@ static void TabBandPaint(HDC dc, bool b) {
             Gdiplus::Graphics gs(dc);
             gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             Gdiplus::GraphicsPath face;
-            float rr = (float)rad3;
+            float rr = (float)r3;
             face.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
             face.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
             face.AddLine((float)fr, (float)ft + rr, (float)fr, (float)fb2);
             face.AddLine((float)fr, (float)fb2, (float)fl, (float)fb2);
             face.CloseFigure();
-            Gdiplus::SolidBrush faceBr(Gdiplus::Color(255, 0x14, 0x14, 0x14));   // #141414
+            Gdiplus::SolidBrush faceBr(Gdiplus::Color((BYTE)255, 0x14, 0x14, 0x14));   // #141414
             gs.FillPath(&faceBr, &face);
             // the accent stripe: the top 3px, then the sides - solid on the
             // focused pane, the card's border color on the dimmed one, and a
@@ -6691,19 +6693,19 @@ static void TabBandPaint(HDC dc, bool b) {
             stripe.AddLine((float)fr, (float)ft + rr, (float)fr, (float)ft + 3 * rr);
             stripe.AddLine((float)fr, (float)ft + 3 * rr, (float)fl, (float)ft + 3 * rr);
             stripe.CloseFigure();
-            Gdiplus::SolidBrush st(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
-            gs.FillPath(&st, &stripe);
+            Gdiplus::SolidBrush stripeBr(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
+            gs.FillPath(&stripeBr, &stripe);
             BYTE sr = 0x22, sg = 0xbb, sb = 0x56;
             if (paneDimmed) { sr = sg = sb = 0x55; }
             if (paneFocused) {
-                Gdiplus::SolidBrush side(Gdiplus::Color(255, sr, sg, sb));
+                Gdiplus::SolidBrush side(Gdiplus::Color((BYTE)255, sr, sg, sb));
                 gs.FillRectangle(&side, Gdiplus::RectF((float)fl, (float)ft, 1.f, (float)(fb2 - ft)));
                 gs.FillRectangle(&side, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)(fb2 - ft)));
             } else if (!paneDimmed) {
-                Gdiplus::LinearGradientBrush sd(Gdiplus::PointF(0, (float)ft), Gdiplus::PointF(0, (float)fb2),
-                                                Gdiplus::Color(255, sr, sg, sb), Gdiplus::Color(0, sr, sg, sb));
-                gs.FillRectangle(&sd, Gdiplus::RectF((float)fl, (float)ft, 1.f, (float)(fb2 - ft)));
-                gs.FillRectangle(&sd, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)(fb2 - ft)));
+                Gdiplus::LinearGradientBrush sideBr(Gdiplus::PointF(0, (float)ft), Gdiplus::PointF(0, (float)fb2),
+                                                Gdiplus::Color((BYTE)255, sr, sg, sb), Gdiplus::Color((BYTE)0, sr, sg, sb));
+                gs.FillRectangle(&sideBr, Gdiplus::RectF((float)fl, (float)ft, 1.f, (float)(fb2 - ft)));
+                gs.FillRectangle(&sideBr, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)(fb2 - ft)));
             }
             // the label and the x on the active face
             std::wstring title = TabTitle(b, vis[actVis]);
@@ -6724,13 +6726,13 @@ static void TabBandPaint(HDC dc, bool b) {
         Gdiplus::Graphics gs(dc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         Gdiplus::GraphicsPath face;
-        float rr = (float)rad3;
+        float rr = (float)r3;
         face.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
         face.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
         face.AddLine((float)fr, (float)ft + rr, (float)fr, (float)fb2);
         face.AddLine((float)fr, (float)fb2, (float)fl, (float)fb2);
         face.CloseFigure();
-        Gdiplus::SolidBrush faceBr(Gdiplus::Color(255, 0x14, 0x14, 0x14));
+        Gdiplus::SolidBrush faceBr(Gdiplus::Color((BYTE)255, 0x14, 0x14, 0x14));
         gs.FillPath(&faceBr, &face);
         Gdiplus::GraphicsPath stripe;
         stripe.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
@@ -6738,8 +6740,8 @@ static void TabBandPaint(HDC dc, bool b) {
         stripe.AddLine((float)fr, (float)ft + rr, (float)fr, (float)ft + 3 * rr);
         stripe.AddLine((float)fr, (float)ft + 3 * rr, (float)fl, (float)ft + 3 * rr);
         stripe.CloseFigure();
-        Gdiplus::SolidBrush st(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
-        gs.FillPath(&st, &stripe);
+        Gdiplus::SolidBrush stripeBr(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
+        gs.FillPath(&stripeBr, &stripe);
         std::wstring title = TabTitle(b, vis[g.tbDragIdx]);
         RECT tr{ fl + TABF(10), ft, fr - TABF(24) - TABF(6), fb2 };
         SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
@@ -6756,7 +6758,7 @@ static void TabBandPaint(HDC dc, bool b) {
     if (plusHot) {
         Gdiplus::Graphics gs(dc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
+        Gdiplus::SolidBrush hb(Gdiplus::Color((BYTE)255, 0x40, 0x40, 0x40));   // RowHoverBrush
         Gdiplus::GraphicsPath hp;
         float hr = (float)TABF(3);
         hp.AddArc((float)plusL, (float)TABF(4), 2 * hr, 2 * hr, 180, 90);
@@ -6782,7 +6784,7 @@ static void TabBandPaint(HDC dc, bool b) {
         bool chevHot = g.tbTabHotPane == b && g.tbHotBtn == 3;
         if (chevHot) {
             Gdiplus::Graphics gs(dc);
-            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            Gdiplus::SolidBrush hb(Gdiplus::Color((BYTE)255, 0x40, 0x40, 0x40));
             gs.FillRectangle(&hb, Gdiplus::RectF((float)chevL, (float)TABF(4),
                                                  (float)TABF(TAB_BTN), (float)TABF(20)));
         }
@@ -6827,7 +6829,7 @@ static void TabDragPaint(HDC dc) {
     face.AddLine((float)gr, (float)Gs.faceTop + rr, (float)gr, (float)Gs.faceTop + Gs.actH);
     face.AddLine((float)gr, (float)Gs.faceTop + Gs.actH, (float)gl, (float)Gs.faceTop + Gs.actH);
     face.CloseFigure();
-    Gdiplus::SolidBrush fb(Gdiplus::Color(210, 0x14, 0x14, 0x14));   // TabDragGhost, Opacity .82
+    Gdiplus::SolidBrush fb(Gdiplus::Color((BYTE)210, 0x14, 0x14, 0x14));   // TabDragGhost, Opacity .82
     gs.FillPath(&fb, &face);
     SetBkMode(dc, TRANSPARENT);
     HFONT of = (HFONT)SelectObject(dc, TabFont());
@@ -6839,7 +6841,7 @@ static void TabDragPaint(HDC dc) {
     if (g.tbCaret >= 0) {
         int cx = G.x0 + g.tbCaret * G.cell;
         cx = std::clamp(cx, G.x0, G.x0 + G.hostW);
-        Gdiplus::SolidBrush cb(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+        Gdiplus::SolidBrush cb(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
         gs.FillRectangle(&cb, Gdiplus::RectF((float)cx, (float)G.faceTop, 2.f, (float)G.faceH));
     }
 }
@@ -7194,7 +7196,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 Gdiplus::Graphics gs(g.bdc);
                 gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 float d = max(4.0f, 3.0f * k);
-                Gdiplus::Pen pen(Gdiplus::Color(255, 0xff, 0x00, 0x00), 1.0f * (float)g.dpi);
+                Gdiplus::Pen pen(Gdiplus::Color((BYTE)255, 0xff, 0x00, 0x00), 1.0f * (float)g.dpi);
                 gs.DrawEllipse(&pen, g.brushPt.x - d / 2, g.brushPt.y - d / 2, d, d);
             }
             if (g.tedit) {                          // the text box's ring + corner handles: the
@@ -8916,12 +8918,12 @@ static void FindDraw(HDC dc, int ox, int oy) {
         Gdiplus::GraphicsPath* inner = CardPath((float)ox + FdD(FdPadX), (float)oy + FdD(FdPadT),
                                                 (float)bw, (float)bh, (float)FdD(6), 1);
         if (Gdiplus::TextureBrush* t = GrainTex(2)) gs.FillPath(t, inner);
-        else { Gdiplus::SolidBrush mb(Gdiplus::Color(255, 0x14, 0x14, 0x14)); gs.FillPath(&mb, inner); }
+        else { Gdiplus::SolidBrush mb(Gdiplus::Color((BYTE)255, 0x14, 0x14, 0x14)); gs.FillPath(&mb, inner); }
         Gdiplus::GraphicsPath band;
         band.AddPath(outer, FALSE);
         band.AddPath(inner, FALSE);
         band.SetFillMode(Gdiplus::FillModeAlternate);
-        Gdiplus::SolidBrush edge(Gdiplus::Color(255, 0x55, 0x55, 0x55));
+        Gdiplus::SolidBrush edge(Gdiplus::Color((BYTE)255, 0x55, 0x55, 0x55));
         gs.FillPath(&edge, &band);
         delete outer;
         delete inner;
@@ -8948,13 +8950,13 @@ static void FindDraw(HDC dc, int ox, int oy) {
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         Gdiplus::GraphicsPath* outer = CardPath((float)x, (float)y, (float)ew, (float)eh, (float)FdD(3), 0);
         Gdiplus::GraphicsPath* inner = CardPath((float)x, (float)y, (float)ew, (float)eh, (float)FdD(3), 1);
-        Gdiplus::SolidBrush bg(Gdiplus::Color(255, 0x1c, 0x1c, 0x1c));
+        Gdiplus::SolidBrush bg(Gdiplus::Color((BYTE)255, 0x1c, 0x1c, 0x1c));
         gs.FillPath(&bg, inner);
         Gdiplus::GraphicsPath band;
         band.AddPath(outer, FALSE);
         band.AddPath(inner, FALSE);
         band.SetFillMode(Gdiplus::FillModeAlternate);
-        Gdiplus::SolidBrush ring(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a));   // CardBorderBrush (Dark)
+        Gdiplus::SolidBrush ring(Gdiplus::Color((BYTE)255, 0x4a, 0x4a, 0x4a));   // CardBorderBrush (Dark)
         gs.FillPath(&ring, &band);
         delete outer;
         delete inner;
@@ -8971,7 +8973,7 @@ static void FindDraw(HDC dc, int ox, int oy) {
     {
         Gdiplus::Graphics gs(dc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::SolidBrush dot(Gdiplus::Color(255, 0xa3, 0xa3, 0xa3));   // MutedTextBrush
+        Gdiplus::SolidBrush dot(Gdiplus::Color((BYTE)255, 0xa3, 0xa3, 0xa3));   // MutedTextBrush
         float gx = (float)R.grip.left + (float)std::lround(3.5 * g.dpi);  // the 1.5px dot
         float gy = (float)R.grip.top + (float)std::lround(5.5 * g.dpi);   // margins inside
         for (int c = 0; c < 2; c++)
@@ -9003,11 +9005,11 @@ static void FindDraw(HDC dc, int ox, int oy) {
             p.CloseFigure();
             if (on) {
                 Gdiplus::Rect gr(fx, fy, fw, fh);   // SelectionBg: #387552 -> #104e2b
-                Gdiplus::LinearGradientBrush gb(gr, Gdiplus::Color(255, 0x38, 0x75, 0x52),
-                                                   Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
+                Gdiplus::LinearGradientBrush gb(gr, Gdiplus::Color((BYTE)255, 0x38, 0x75, 0x52),
+                                                   Gdiplus::Color((BYTE)255, 0x10, 0x4e, 0x2b), 90.0f);
                 gs.FillPath(&gb, &p);
             } else {
-                Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
+                Gdiplus::SolidBrush f(Gdiplus::Color((BYTE)255, 0x40, 0x40, 0x40));   // RowHoverBrush
                 gs.FillPath(&f, &p);
             }
         }
@@ -9061,7 +9063,7 @@ static void FindDraw(HDC dc, int ox, int oy) {
             p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
             p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
             p.CloseFigure();
-            Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));   // RowHoverBrush
+            Gdiplus::SolidBrush f(Gdiplus::Color((BYTE)255, 0x40, 0x40, 0x40));   // RowHoverBrush
             gs.FillPath(&f, &p);
         }
         SelectObject(dc, FdFontGlyph());
@@ -9973,9 +9975,9 @@ static void InfoDialogDraw(HDC dc, int w, int h) {
         SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
         DrawTextW(dc, labels[i], -1, &lab, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
         Gdiplus::GraphicsPath* pth = boxPath(box);
-        Gdiplus::SolidBrush fill(Gdiplus::Color(255, 0x10, 0x10, 0x10));
+        Gdiplus::SolidBrush fill(Gdiplus::Color((BYTE)255, 0x10, 0x10, 0x10));
         gs.FillPath(&fill, pth);
-        Gdiplus::Pen edge(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+        Gdiplus::Pen edge(Gdiplus::Color((BYTE)255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
         gs.DrawPath(&edge, pth);
         delete pth;
         if (!live) {                       // the shot host speaks for the edits
@@ -10010,18 +10012,18 @@ static void InfoDialogDraw(HDC dc, int w, int h) {
         bool accent = wh == 1, hot = g_idlg.hot == wh;
         Gdiplus::GraphicsPath* pth = boxPath(br);
         if (accent && hot) {
-            Gdiplus::SolidBrush gb(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+            Gdiplus::SolidBrush gb(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
             gs.FillPath(&gb, pth);
         } else if (accent) {
-            Gdiplus::Pen pb(Gdiplus::Color(255, 0x22, 0xbb, 0x56), (float)max(1.0, g.dpi));
+            Gdiplus::Pen pb(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56), (float)max(1.0, g.dpi));
             gs.DrawPath(&pb, pth);
         } else if (hot) {
-            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            Gdiplus::SolidBrush hb(Gdiplus::Color((BYTE)255, 0x40, 0x40, 0x40));
             gs.FillPath(&hb, pth);
-            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            Gdiplus::Pen pb(Gdiplus::Color((BYTE)255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
             gs.DrawPath(&pb, pth);
         } else {
-            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            Gdiplus::Pen pb(Gdiplus::Color((BYTE)255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
             gs.DrawPath(&pb, pth);
         }
         delete pth;
@@ -10367,7 +10369,7 @@ static void AskDialogDraw(HDC dc, int w, int h) {
     // the 28px ring, top-aligned in the 38px column - KillerDialog's Notice
     // Border, its amber darkening for the light theme never leaving dark here
     float inset = max(1.0f, (float)g.dpi);           // the 2px pen eats inward, keep the box
-    Gdiplus::Pen ring(Gdiplus::Color(255, 0xff, 0xbe, 0x50), 2.0f * (float)g.dpi);
+    Gdiplus::Pen ring(Gdiplus::Color((BYTE)255, 0xff, 0xbe, 0x50), 2.0f * (float)g.dpi);
     gs.DrawEllipse(&ring, (float)(24 * g.dpi) + inset, (float)top + inset,
                    (float)(28 * g.dpi) - 2 * inset, (float)(28 * g.dpi) - 2 * inset);
     RECT bang{ (int)(24 * g.dpi), top, (int)(24 * g.dpi) + (int)(28 * g.dpi), top + (int)(28 * g.dpi) };
@@ -10398,18 +10400,18 @@ static void AskDialogDraw(HDC dc, int w, int h) {
         bool accent = k == g_ask.def, hot = g_ask.hot == k;
         Gdiplus::GraphicsPath* pth = boxPath(br);
         if (accent && hot) {
-            Gdiplus::SolidBrush gb(Gdiplus::Color(255, 0x22, 0xbb, 0x56));
+            Gdiplus::SolidBrush gb(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
             gs.FillPath(&gb, pth);
         } else if (accent) {
-            Gdiplus::Pen pb(Gdiplus::Color(255, 0x22, 0xbb, 0x56), (float)max(1.0, g.dpi));
+            Gdiplus::Pen pb(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56), (float)max(1.0, g.dpi));
             gs.DrawPath(&pb, pth);
         } else if (hot) {
-            Gdiplus::SolidBrush hb(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            Gdiplus::SolidBrush hb(Gdiplus::Color((BYTE)255, 0x40, 0x40, 0x40));
             gs.FillPath(&hb, pth);
-            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            Gdiplus::Pen pb(Gdiplus::Color((BYTE)255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
             gs.DrawPath(&pb, pth);
         } else {
-            Gdiplus::Pen pb(Gdiplus::Color(255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
+            Gdiplus::Pen pb(Gdiplus::Color((BYTE)255, 0x4a, 0x4a, 0x4a), (float)max(1.0, g.dpi));
             gs.DrawPath(&pb, pth);
         }
         delete pth;
