@@ -9186,12 +9186,13 @@ static void WebAccentPill(HDC dc, int x, int y, int w) {
     Gdiplus::Color sts[] = { Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)),
                              Gdiplus::Color(255, GetRValue(s), GetGValue(s), GetBValue(s)),
                              Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)) };
+    Gdiplus::REAL pos[] = { 0.0f, 0.5f, 1.0f };   // Light3 -> Light2 -> Light3, Radon's Pill
     Gdiplus::LinearGradientBrush br(rc,
         Gdiplus::Color(255, GetRValue(a), GetGValue(a), GetBValue(a)),
         Gdiplus::Color(255, GetRValue(s), GetGValue(s), GetBValue(s)),
-        Gdiplus::LinearGradientModeHorizontal);   // the wrapper has no colors-array ctor:
-    br.SetInterpolationColors(sts, 3);            // build the two-color brush, then the 3 stops
-    gs.FillPath(&br, &p);
+        Gdiplus::LinearGradientModeHorizontal);
+    br.SetInterpolationColors(sts, pos, 3);       // the preset blend wants the stops AND
+    gs.FillPath(&br, &p);                         // their positions, like SetGradientStops
 }
 
 // ---- the nav row (Radon's MainPage titlebar): logo, back/forward, the
