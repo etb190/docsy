@@ -702,9 +702,14 @@ static void DwmApply(HWND h) {
     }
 }
 
+// Every chrome face rides bold now - the caption bar, the toolbar captions and
+// glyphs, the status row, the find bar, both dialogs, the bars' labels: the
+// `bold` argument stays only so the call sites keep reading the same, but the
+// weight is the app's own, not the caller's.
 static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
+    (void)bold;
     if (!slot)
-        slot = CreateFontW(-(int)std::lround(px * g.dpi), 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
+        slot = CreateFontW(-(int)std::lround(px * g.dpi), 0, 0, 0, FW_BOLD,
                            0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
     return slot;
@@ -1079,29 +1084,52 @@ static int BarHit(POINT p, int w) {
 // The composed Transform icon's arrows: DrawToolbarGlyph's vector strokes, not
 // a font glyph - "The Segoe MDL2 move glyph shrunk to fit the box rendered its
 // bottom arrowhead as a single pixel, so it read as cut off" is the reference's
-// own reason for drawing them. The 12 segments live in the path's 11x11 unit
+// own reason for drawing them. The geometry lives in the path's 11x11 unit
 // space (center 8,8); the path box is 70% of the glyph size (14px at
-// GlyphLarge 20), so units scale by 14/11 and center on the frame.
-// StrokeThickness 1 stays 1 (Shape.Stretch scales the geometry, never the pen),
-// square caps, miter joins - a 1px GDI line lands on the same pixels.
-static void TfArrows(HDC dc, int cx, int cy, COLORREF c) {
-    static const float seg[12][4] = {   // x0,y0,x1,y1 in the path's unit space:
-        { 8, 2.5f, 8, 6 },      { 8, 10, 8, 13.5f },        // the four stems...
-        { 2.5f, 8, 6, 8 },      { 10, 8, 13.5f, 8 },
-        { 6, 4.5f, 8, 2.5f },   { 8, 2.5f, 10, 4.5f },      // ...the four heads,
-        { 6, 11.5f, 8, 13.5f }, { 8, 13.5f, 10, 11.5f },    // two strokes each
-        { 4.5f, 6, 2.5f, 8 },   { 2.5f, 8, 4.5f, 10 },      // meeting at the tip
-        { 11.5f, 6, 13.5f, 8 }, { 13.5f, 8, 11.5f, 10 },
+// GlyphLarge 20), so units scale by 14/11 and the box sits 3px inside the
+// 20px frame - DrawToolbarGlyph's Grid(22) with the Border(20) centered and
+// the Path(14) inside it. StrokeThickness 1 stays 1 (Shape.Stretch scales the
+// geometry, never the pen).
+// The strokes draw through GDI+, not GDI pens: the reference renders WPF, and
+// the old integer LineTo port put every open stroke end ON its endpoint pixel,
+// so the tip-to-tip ink read one pixel narrower than WPF's and the 2-vs-1
+// empty columns at the frame's inner edges leaned the arrows right (and down).
+// WPF strokes are antialiased at float positions with Square caps - each open
+// end grows half a stroke width past its endpoint, a half-covered edge pixel
+// at every tip - and PixelOffsetModeHalf is the WPF grid (integer coordinates
+// are pixel corners, so a stroke at x.5 fills one full column). The four
+// arrowheads ride one three-point subpath each, so the two strokes meeting at
+// a tip miter-join there the way Geometry.Parse's own polylines do, with caps
+// only at the free base ends.
+static void TfArrows(HDC dc, float x0, float y0, COLORREF c) {
+    static const float stem[4][4] = {   // x0,y0,x1,y1 in the path's unit space:
+        { 8, 2.5f, 8, 6 },      { 8, 10, 8, 13.5f },        // the four stems,
+        { 2.5f, 8, 6, 8 },      { 10, 8, 13.5f, 8 },        // capped at both ends
+    };
+    static const float head[4][3][2] = {    // the four heads, three points each:
+        { { 6, 4.5f },  { 8, 2.5f },  { 10, 4.5f } },
+        { { 6, 11.5f }, { 8, 13.5f }, { 10, 11.5f } },
+        { { 4.5f, 6 },  { 2.5f, 8 },  { 4.5f, 10 } },   // miter-joined at the
+        { { 11.5f, 6 }, { 13.5f, 8 }, { 11.5f, 10 } },  // tip, capped at the bases
     };
     const float s = 14.0f / 11.0f * (float)g.dpi;   // 11x11 units -> the 14px path box
-    HPEN p = CreatePen(PS_SOLID, 1, c);
-    HGDIOBJ og = SelectObject(dc, p);
-    for (auto& q : seg) {
-        MoveToEx(dc, cx + (int)std::lround((q[0] - 8) * s), cy + (int)std::lround((q[1] - 8) * s), nullptr);
-        LineTo(dc, cx + (int)std::lround((q[2] - 8) * s), cy + (int)std::lround((q[3] - 8) * s));
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gs.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::Pen p(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)), 1.0f);
+    p.SetStartCap(Gdiplus::LineCapSquare);
+    p.SetEndCap(Gdiplus::LineCapSquare);
+    p.SetLineJoin(Gdiplus::LineJoinMiter);
+    auto X = [&](float u) { return x0 + (u - 2.5f) * s; };
+    auto Y = [&](float u) { return y0 + (u - 2.5f) * s; };
+    Gdiplus::GraphicsPath gp;
+    for (auto& q : stem) { gp.AddLine(X(q[0]), Y(q[1]), X(q[2]), Y(q[3])); gp.StartFigure(); }
+    for (auto& h3 : head) {
+        gp.AddLine(X(h3[0][0]), Y(h3[0][1]), X(h3[1][0]), Y(h3[1][1]));
+        gp.AddLine(X(h3[1][0]), Y(h3[1][1]), X(h3[2][0]), Y(h3[2][1]));
+        gp.StartFigure();
     }
-    SelectObject(dc, og);
-    DeleteObject(p);
+    gs.DrawPath(&p, &gp);
 }
 
 static void BarDraw(HDC dc, int w, int h) {
@@ -1195,8 +1223,9 @@ static void BarDraw(HDC dc, int w, int h) {
                 Rectangle(dc, fr2.left, fr2.top, fr2.right, fr2.bottom);
                 SelectObject(dc, ob);
                 SelectObject(dc, og); DeleteObject(fr);
-                TfArrows(dc, gx + ox + fw2 / 2, gy + oy + fh2 / 2, c);   // the vector arrows,
-            };                                           // centered on the frame
+                TfArrows(dc, (float)(gx + ox) + 3.0f * (float)g.dpi,          // the vector arrows:
+                         (float)(gy + oy) + 3.0f * (float)g.dpi, c);          // the 14px path box
+            };                                           // 3px inside the 20px frame
             if (!sel) drawTf(RGB(16, 16, 16), 0, 1);   // Direction 270: the shadow hangs
             drawTf(fg, 0, 0);                          // BELOW the icon, never beside it
         } else {
@@ -1413,7 +1442,7 @@ static void ClearCache(DocState& D) {
 
 static HFONT UiFont() {
     if (!g_uifont) {
-        g_uifont = CreateFontW(-MulDiv(9, (int)(g.dpi * 96), 72), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        g_uifont = CreateFontW(-MulDiv(9, (int)(g.dpi * 96), 72), 0, 0, 0, FW_BOLD, 0, 0, 0,
                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     }
@@ -3137,7 +3166,7 @@ static void RoundRectFill(HDC dc, int x, int y, int w, int h, int r, bool hot) {
 
 static HFONT SideFont() {   // the page label: BrandSansFont ("Killer Sans") at FontSize 14
     if (!g_sidefont)
-        g_sidefont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        g_sidefont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_BOLD, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans");
     return g_sidefont;
@@ -4754,7 +4783,7 @@ static void AbCheckGlyph(HDC dc, const RECT& box) {
             { L"Segoe UI", L'\u2713' }, { L"Segoe UI Symbol", L'\u2713' },
             { L"Segoe MDL2 Assets", L'\uE73E' } };
         for (const auto& t : tries) {
-            HFONT tf = CreateFontW(-(int)std::lround(10 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+            HFONT tf = CreateFontW(-(int)std::lround(10 * g.dpi), 0, 0, 0, FW_BOLD, 0, 0, 0,
                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                    ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, t.face);
             HGDIOBJ of = SelectObject(dc, tf);
@@ -6253,7 +6282,7 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
         int cy = h / 2;
         if (g.logo) DrawIconEx(dc, xoff + (cw - sz) / 2, cy - sz - (int)(6 * g.dpi), g.logo, sz, sz, 0, nullptr, DI_NORMAL);
         SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(200, 200, 205));
-        SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
+        SelectObject(dc, UiFont());
         RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
@@ -6494,7 +6523,7 @@ static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
     Gdiplus::PrivateFontCollection* pc = TabFaces();
     Gdiplus::FontFamily fam;                        // the collection's only family
     INT got = 0; pc->GetFamilies(1, &fam, &got);
-    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
     if (!got || fam.GetLastStatus() != Gdiplus::Ok || f.GetLastStatus() != Gdiplus::Ok) {
         SetBkMode(dc, TRANSPARENT);                 // no face: GDI's Segoe UI
         HFONT gf = TabFont();
@@ -8724,7 +8753,7 @@ static HFONT FdFontEdit()  { return CaptionFont(g_fntEdit,  13, false, L"Killer 
 static HFONT FdFontOpt()   { return CaptionFont(g_fntOpt,   12, false, L"Killer Sans UI"); }
 static HFONT FdFontAb()    {            // "ab": KillerPDF's underlined Whole Word glyph
     if (!g_fntAb)
-        g_fntAb = CreateFontW(-FdD(12), 0, 0, 0, FW_NORMAL, 0, TRUE, 0,
+        g_fntAb = CreateFontW(-FdD(12), 0, 0, 0, FW_BOLD, 0, TRUE, 0,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans UI");
     return g_fntAb;
