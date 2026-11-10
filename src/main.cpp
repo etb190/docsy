@@ -2329,26 +2329,45 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         int h = max(1, (int)std::lround((float)w * D.ph[i] / max(1.f, D.pw[i])));
         HBITMAP b = GetBmp(D, i, w, h);
         if (!b) return false;
-        // a private copy takes the burn-in: GetBmp's bitmap is the screen cache,
-        // and painting into it would bake the annotations into every later
-        // frame - a box deleted after the save would still ghost on screen
-        HBITMAP cp = (HBITMAP)CopyImage(b, IMAGE_BITMAP, w, h, 0);
-        if (!cp) return false;
-        HDC mdc = CreateCompatibleDC(nullptr);
-        HGDIOBJ ob = SelectObject(mdc, cp);
+        // the burn-in lands on a private 32bpp DIB section, and the JPEG encoder
+        // reads the section's OWN memory (Bitmap over scan0). The old path handed
+        // GDI+ an HBITMAP that was selected into a DC - GetDIBits, which GDI+
+        // reads pixels through, is undefined for a selected bitmap and came back
+        // all zeros: the saved PDF was white pages, and the encoder's walk over
+        // the bad buffer took the app down. A DIB section has no DC coupling and
+        // no HBITMAP wrap at all - the buffer is ours, the pixels are real.
+        void* bits = nullptr;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;                    // top-down, like every consumer here
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        HBITMAP dib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!dib || !bits) { if (dib) DeleteObject(dib); return false; }
+        HDC ddc = CreateCompatibleDC(nullptr);
+        HGDIOBJ od = SelectObject(ddc, dib);
+        HDC sdc = CreateCompatibleDC(nullptr);         // the cache bitmap is a read-only
+        HGDIOBJ osel = SelectObject(sdc, b);           // source: a plain blit, never drawn into
+        BitBlt(ddc, 0, 0, w, h, sdc, 0, 0, SRCCOPY);
+        SelectObject(sdc, osel); DeleteDC(sdc);
         float k = (float)w / max(1.f, D.pw[i]);
-        PaintAnnots(mdc, D, i, 0, 0, k);   // annotations burn in
+        PaintAnnots(ddc, D, i, 0, 0, k);               // annotations burn in
         CLSID jpg{}; UINT cnt = 0, bytes = 0;
         Gdiplus::GetImageEncodersSize(&cnt, &bytes);
         std::vector<BYTE> buf(bytes);
         auto* enc = (Gdiplus::ImageCodecInfo*)buf.data();
         Gdiplus::GetImageEncoders(cnt, bytes, enc);
         for (UINT e = 0; e < cnt; e++) if (!lstrcmpW(enc[e].MimeType, L"image/jpeg")) jpg = enc[e].Clsid;
-        Gdiplus::Bitmap bm(cp, nullptr);
         IStream* os = nullptr;
-        if (CreateStreamOnHGlobal(nullptr, TRUE, &os) != S_OK) { SelectObject(mdc, ob); DeleteDC(mdc); DeleteObject(cp); return false; }
+        if (CreateStreamOnHGlobal(nullptr, TRUE, &os) != S_OK) { SelectObject(ddc, od); DeleteDC(ddc); DeleteObject(dib); return false; }
         bool ok = false;
-        if (bm.Save(os, &jpg, nullptr) == Gdiplus::Ok) {
+        {
+            Gdiplus::Bitmap bm(w, h, w * 4, PixelFormat32bppRGB, (BYTE*)bits);   // wraps OUR
+            ok = bm.Save(os, &jpg, nullptr) == Gdiplus::Ok;   // buffer - it stays alive
+        }                                                     // until after this Save
+        if (ok) {
             LARGE_INTEGER z1{}; z1.QuadPart = 0;
             os->Seek(z1, STREAM_SEEK_SET, nullptr);
             STATSTG st2{};
@@ -2359,8 +2378,8 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
             ok = os->Read(out.data(), (ULONG)out.size(), &rd) == S_OK && rd == out.size();
         }
         os->Release();
-        SelectObject(mdc, ob); DeleteDC(mdc); DeleteObject(cp);
-        return ok && !out.empty();
+        SelectObject(ddc, od); DeleteDC(ddc); DeleteObject(dib);   // the bitmap view is
+        return ok && !out.empty();                                 // gone before the buffer
     };
     std::string head = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
     DWORD wr = 0;
