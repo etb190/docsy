@@ -6454,21 +6454,24 @@ static const int TAB_FLOOR = 160, TAB_CEIL = 260;   // TabFloorWidth / TabCeilin
 static const int TAB_BTN = 22, TAB_BTN_GAP = 4;     // the + and chevron cells (26px pitch)
 static int TABF(int v) { return (int)(v * g.dpi); }
 
-static HFONT TabFont() {                 // TabTitleFontSize 12, KillerPDF's MonoFont family:
-    static HFONT f = nullptr; static double fd = 0;   // "Killer Sans UI, Segoe UI" - the app
-    if (f && fd != g.dpi) { DeleteObject(f); f = nullptr; }   // ships its own face, docsy cannot,
-    if (!f) f = CaptionFont(f, 12, false, L"Segoe UI");       // so the family's declared fallback
+static HFONT TabFont() {                 // the GDI emergency face: TabTitleFontSize 12,
+    static HFONT f = nullptr; static double fd = 0;   // KillerPDF's MonoFont family list is
+    if (f && fd != g.dpi) { DeleteObject(f); f = nullptr; }   // "Killer Sans UI, Segoe UI" -
+    if (!f) f = CaptionFont(f, 12, false, L"Segoe UI");       // Segoe UI is its own fallback
     fd = g.dpi;
     return f;
 }
 
-// The tab label, drawn with GDI+ off the bundled faces. The subsets carry no
-// hinting tables, and GDI's rasterizer grid-snaps their unhinted 12px stems
-// into mush - KillerPDF draws this exact face through WPF's renderer and it
-// reads clean, so the label takes GDI+'s own anti-aliased path instead.
-// The collection is the UI face ALONE: a shared collection pairs the slanted
-// Killer Sans brand face with it, a name lookup there once missed and the
-// labels slid into the brand's lean - one face in, one family out, no lookup.
+// The tab label, drawn with GDI+ so the face renders like KillerPDF's WPF text:
+// GDI's rasterizer grid-snaps the bundled subsets' unhinted 12px stems into fat
+// blur, which the reader read as broken. The collection carries the UI face
+// ALONE (a shared collection pairs it with the slanted brand face); the Font
+// pins every argument - unit UnitWorld (0) and style FontStyleRegular (0), both
+// zero, so whichever order this SDK's ctor declares the pair in, the em lands
+// at 12*dpi world units = pixels and the style stays Regular. The two builds
+// that passed UnitPixel as the third argument rendered exactly what that value
+// means as a style: FontStyleItalic - a synthetic oblique at Point-scaled size
+// - on a face whose outlines and metadata are perfectly upright.
 static Gdiplus::PrivateFontCollection* TabFaces() {
     static Gdiplus::PrivateFontCollection* pc = nullptr;
     if (!pc) {
@@ -6484,22 +6487,20 @@ static Gdiplus::PrivateFontCollection* TabFaces() {
 
 static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
     Gdiplus::PrivateFontCollection* pc = TabFaces();
-    INT n = pc->GetFamilyCount();
-    if (!n) {                                       // no face: the GDI fallback below
-        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c);
-        HFONT f = TabFont();
-        HGDIOBJ of = SelectObject(dc, f);
+    Gdiplus::FontFamily fam;                        // the collection's only family
+    INT got = 0; pc->GetFamilies(1, &fam, &got);
+    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::UnitWorld, Gdiplus::FontStyleRegular);
+    if (!got || fam.GetLastStatus() != Gdiplus::Ok || f.GetLastStatus() != Gdiplus::Ok) {
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c);   // no face: GDI's Segoe UI
+        HFONT gf = TabFont();
+        HGDIOBJ of = SelectObject(dc, gf);
         RECT rr = r;
         DrawTextW(dc, s.c_str(), -1, &rr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(dc, of);
         return;
     }
-    Gdiplus::FontFamily fam;                        // the collection's only family
-    INT got = 0; pc->GetFamilies(1, &fam, &got);
-    if (!got) return;
     Gdiplus::Graphics gs(dc);
     gs.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
-    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::UnitPixel);   // TabTitleFontSize 12 at the DPI
     Gdiplus::SolidBrush br(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
     Gdiplus::RectF rf((float)r.left, (float)r.top, (float)(r.right - r.left), (float)(r.bottom - r.top));
     Gdiplus::StringFormat sf;
