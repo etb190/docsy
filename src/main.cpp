@@ -9051,7 +9051,7 @@ static void AskMeasure() {
     for (int k = 0; k < 3; k++) {
         SIZE ts{};
         GetTextExtentPoint32W(dc, g_ask.btn[k].c_str(), (int)g_ask.btn[k].size(), &ts);
-        g_ask.bw[k] = max((int)(80 * g.dpi), ts.cx + (int)(24 * g.dpi));
+        g_ask.bw[k] = max((int)(80 * g.dpi), (int)ts.cx + (int)(24 * g.dpi));
     }
     SelectObject(dc, of);
     ReleaseDC(g.main, dc);
