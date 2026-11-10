@@ -1685,11 +1685,29 @@ static void RqShutdown() {
     if (t) { WaitForSingleObject(t, 3000); CloseHandle(t); }
 }
 
-static HBITMAP GetBmp(DocState& D, int i, int w, int h) {
+// The paint ask. An exact hit answers itself. A miss enqueues the worker render
+// and answers nothing (the frame paints a placeholder, the drain lands pixels).
+// And a wrong-SIZE entry - a zoom the worker has not caught up with - keeps
+// speaking for the page: it comes back with its true shape in bw/bh and Draw
+// stretches it into the new rect, so a zoom gesture never blanks the pages it
+// is resizing; the fresh render rides the queue the whole time. A transform
+// mismatch still drops and goes white: sideways pixels stretched into an
+// upright rect read broken, a placeholder reads pending. `exact` keeps the old
+// contract for callers that sample page pixels at the CURRENT scale (the text
+// box's tone sampler) - they must not be handed another zoom's raster.
+static HBITMAP GetBmpEx(DocState& D, int i, int w, int h, int& bw, int& bh, bool exact) {
+    bw = w; bh = h;
     auto it = D.cache.find(i);
     int rot = (D.prot.count(i) ? D.prot[i] : 0) | (D.pflip.count(i) ? D.pflip[i] << 4 : 0);
     if (it != D.cache.end()) {
         if (it->second.w == w && it->second.h == h && it->second.rot == rot) { it->second.t = ++D.tick; return it->second.b; }
+        if (!exact && !g_sync && it->second.rot == rot) {   // stale size, same transform:
+            it->second.t = ++D.tick;                        // the eye's page stays warm while
+            RqEnqueue(D, i, RJ_PAGE, w, h, rot & 3, rot >> 4);   // the right-size render flies
+            RqEnsureThread();
+            bw = it->second.w; bh = it->second.h;
+            return it->second.b;
+        }
         CacheDrop(D, i);
     }
     if (!g_sync) {                                     // live: the worker owns the render -
@@ -1702,6 +1720,10 @@ static HBITMAP GetBmp(DocState& D, int i, int w, int h) {
     D.cache[i] = Ent{ b, w, h, rot, ++D.tick };
     D.cacheBytes += (long long)w * h * 4;
     return b;
+}
+static HBITMAP GetBmp(DocState& D, int i, int w, int h) {
+    int bw, bh;
+    return GetBmpEx(D, i, w, h, bw, bh, true);
 }
 
 // The same render as Render(), decoded as a SoftwareBitmap - the input format the
@@ -2385,8 +2407,10 @@ static void SetZoomAt(double z, int ax, int ay, bool b) {
     int& sxr = D.sx; int& syr = D.sy;             // around its own viewport point, in its
     z = std::clamp(z, 0.1, 4.0);                  // own document's layout
     double ry = D.docH ? (double)(syr + ay) / D.docH : 0, rx = D.docW ? (double)(sxr + ax) / D.docW : 0;
-    if (z != D.zoom) ClearCache(D);
-    D.zoom = z; D.fitMode = 2;              // an explicit zoom leaves the fit modes
+    D.zoom = z; D.fitMode = 2;              // an explicit zoom leaves the fit modes - and keeps
+                                            // the rasters: stale-size entries still paint
+                                            // stretched while the worker catches up (Evict
+                                            // keeps their weight inside the byte budget)
     Layout(D, b);
     syr = (int)(ry * D.docH) - ay;
     if (D.docW > CardW(b)) sxr = (int)(rx * D.docW) - ax;
@@ -6633,13 +6657,22 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
             int x = xoff + cx + offx + D.px[i];
             int y = D.top[row] - D.sy + (D.rh[row] - ph) / 2;   // pages ride centred in their row
             if (y + ph < 0) continue;
-            HBITMAP b = GetBmp(D, i, pw, ph);
+            int bw, bh;
+            HBITMAP b = GetBmpEx(D, i, pw, ph, bw, bh, false);
             if (b) {
                 HGDIOBJ o = SelectObject(m, b);
                 // DocInvert (the footer moon): KillerPDF flips the document images to
                 // their negative - the page rect is opaque, so NOTSRCCOPY inverts it
                 // during the blit and the grain margins keep their tone.
-                BitBlt(dc, x, y, pw, ph, m, 0, 0, g.inv ? NOTSRCCOPY : SRCCOPY);
+                if (bw == pw && bh == ph)
+                    BitBlt(dc, x, y, pw, ph, m, 0, 0, g.inv ? NOTSRCCOPY : SRCCOPY);
+                else {                             // the worker's catch-up raster: the old
+                    SetStretchBltMode(m, HALFTONE);   // zoom still speaks for the page -
+                    SetStretchBltMode(dc, HALFTONE);  // stretched into the new rect until
+                    SetBrushOrgEx(m, 0, 0, nullptr);  // the right-size render lands (both
+                    StretchBlt(dc, x, y, pw, ph, m, 0, 0, bw, bh,   // DCs: drivers read the
+                               g.inv ? NOTSRCCOPY : SRCCOPY);       // mode from either side)
+                }
                 SelectObject(m, o);
             } else {
                 RECT pr{ x, y, x + pw, y + ph };
