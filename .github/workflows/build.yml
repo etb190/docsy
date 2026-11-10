@@ -44,6 +44,10 @@ jobs:
           "hlbar exit code: $($x3.ExitCode)" | Tee-Object -Append shot.log
           $b2 = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-split2.png","$PWD\sample.pdf",'split=on',"fileB=$PWD\sample.pdf",'zoom=35' -Wait -PassThru
           "split2 exit code: $($b2.ExitCode)" | Tee-Object -Append shot.log
+          $sv = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-save.png","$PWD\sample.pdf",'annot=demo',"save=$PWD\saved.pdf" -Wait -PassThru
+          "save exit code: $($sv.ExitCode)" | Tee-Object -Append shot.log
+          $ro = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-reopen.png","$PWD\saved.pdf" -Wait -PassThru
+          "reopen exit code: $($ro.ExitCode)" | Tee-Object -Append shot.log
           if (!(Test-Path preview.png)) { exit 1 }
       - name: Publish
         if: always()
@@ -52,7 +56,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-split2.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-split2.png preview-save.png preview-reopen.png saved.pdf build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log

@@ -9841,6 +9841,17 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                     D.annos[0].push_back(tx);
                 }
             }
+        // CI preview seed 9: save=<path> writes the CURRENT document - demo
+        // marks and all - through the real writer, no dialogs (shot mode is
+        // quiet). The release then carries a file docsy itself produced, and
+        // the reopen shot next to it proves what a reader finds inside.
+        std::wstring saveErr;
+        for (int a = 3; a < argc; a++)
+            if (!wcsncmp(argv[a], L"save=", 5)) {
+                DocState& D = DVF();
+                if (D.n && !WriteAnnotatedPdf(D, argv[a] + 5, saveErr))
+                    OutputDebugStringW((L"save seed: " + saveErr + L"\n").c_str());
+            }
         GetClientRect(g.main, &c);             // the seeds may have resized (split=on grows
         for (int k = 0; k <= DVF().n; k++) if (!SidePump()) break;   // the window like the real
         return Shot(argv[2], c.right, c.bottom);                     // toggle does) - re-read it
