@@ -6484,29 +6484,56 @@ static Gdiplus::PrivateFontCollection* TabFaces() {
     return pc;
 }
 
+// The label: the dirty bullet TabTitle prefixes gets its own ink - brand green
+// #22bb56, the tab's unsaved-changes dot - and the title after it draws in the
+// label's own color. GDI+ measures the bullet's advance so the title never
+// overlaps it; the GDI fallback measures the same way with GetTextExtentPoint32.
 static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
+    bool dot = s.size() >= 2 && s[0] == L'\x2022' && s[1] == L' ';
+    const wchar_t* txt = dot ? s.c_str() + 2 : s.c_str();   // past the bullet and its space
     Gdiplus::PrivateFontCollection* pc = TabFaces();
     Gdiplus::FontFamily fam;                        // the collection's only family
     INT got = 0; pc->GetFamilies(1, &fam, &got);
     Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     if (!got || fam.GetLastStatus() != Gdiplus::Ok || f.GetLastStatus() != Gdiplus::Ok) {
-        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, c);   // no face: GDI's Segoe UI
+        SetBkMode(dc, TRANSPARENT);                 // no face: GDI's Segoe UI
         HFONT gf = TabFont();
         HGDIOBJ of = SelectObject(dc, gf);
-        RECT rr = r;
-        DrawTextW(dc, s.c_str(), -1, &rr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT tr = r;
+        if (dot) {                                  // the green bullet, then the title
+            SIZE bs; GetTextExtentPoint32W(dc, L"\x2022", 1, &bs);
+            RECT br{ r.left, r.top, r.left + bs.cx + TABF(6), r.bottom };
+            SetTextColor(dc, RGB(0x22, 0xbb, 0x56));
+            DrawTextW(dc, L"\x2022", -1, &br, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            tr.left = br.right;
+        }
+        SetTextColor(dc, c);
+        DrawTextW(dc, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(dc, of);
         return;
     }
     Gdiplus::Graphics gs(dc);
     gs.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAlias);
     Gdiplus::SolidBrush br(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
-    Gdiplus::RectF rf((float)r.left, (float)r.top, (float)(r.right - r.left), (float)(r.bottom - r.top));
     Gdiplus::StringFormat sf;
     sf.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap | Gdiplus::StringFormatFlagsNoFitBlackBox);
     sf.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
     sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-    gs.DrawString(s.c_str(), (INT)-1, &f, rf, &sf, &br);
+    RECT tr = r;
+    if (dot) {                                      // the green bullet, then the title
+        Gdiplus::StringFormat mf(Gdiplus::StringFormat::GenericTypographic());
+        mf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+        Gdiplus::RectF rf((float)r.left, (float)r.top,
+                          (float)(r.right - r.left), (float)(r.bottom - r.top));
+        Gdiplus::RectF bb;
+        gs.MeasureString(L"\x2022", 1, &f, rf, &mf, &bb);
+        Gdiplus::SolidBrush gb(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
+        gs.DrawString(L"\x2022", 1, &f, rf, &mf, &gb);
+        tr.left += (int)std::ceil(bb.Width) + TABF(4);
+    }
+    Gdiplus::RectF rf2((float)tr.left, (float)tr.top,
+                       (float)(tr.right - tr.left), (float)(tr.bottom - tr.top));
+    gs.DrawString(txt, -1, &f, rf2, &sf, &br);
 }
 
 // The tab's title: the file name without its extension (KillerPDF's Title),
@@ -6602,10 +6629,9 @@ static int TabBandHitAt(bool b, const TabStripGeo& G, const std::vector<int>& vi
         RECT r; TabSlotRect(G, k, r);
         if (p.x >= r.left && p.x < r.right && p.y >= G.faceTop && p.y < G.faceTop + G.faceH) {
             slot = k;
-            bool active = vis[k] == Act(b);
-            int xr = r.right - TABF(2);               // the close x owns its own 24px zone
-            if (!active && p.x >= xr - TABF(24) && p.x < xr && p.y >= G.faceTop + TABF(2) && p.y < G.faceTop + G.faceH - TABF(2))
-                return 2;
+            int xr = r.right - TABF(2);               // the close x owns its own 24px zone -
+            if (p.x >= xr - TABF(24) && p.x < xr && p.y >= G.faceTop + TABF(2) && p.y < G.faceTop + G.faceH - TABF(2))
+                return 2;                             // the active tab's included: its x closes it
             return 1;
         }
     }
@@ -6652,9 +6678,10 @@ static void TabBandPaint(HDC dc, bool b) {
     for (int k = 0; k < (int)vis.size(); k++) if (vis[k] == Act(b)) { actVis = k; break; }
     int r3 = (int)(3 * g.dpi);
     // the tabs. Painted inactive-first, active last; a grabbed tab sits above
-    // everything, glued to the cursor. The active tab is the menu tier's face
-    // alone - KillerPDF's accent ring on top reads as decoration docsy's
-    // reader never asked for, and the strip is chrome, not a status light.
+    // everything, glued to the cursor. The active tab wears no fill - the
+    // field shows through it like through an inactive face, and the only
+    // accent it carries is a thin green rule along its top edge, the mark of
+    // the tab the reader is in.
     int hotK = (g.tbTabHotPane == b) ? g.tbTabHot : -1;
     int kEnd = min(G.start + G.cap, (int)vis.size());
     auto glideDx = [&](int k) -> int {           // a swapping neighbor or a released
@@ -6680,56 +6707,48 @@ static void TabBandPaint(HDC dc, bool b) {
         SelectObject(dc, op);
         DeleteObject(xp);
     };
-    for (int pass = 0; pass < 2; pass++) {          // inactive first, the active last
-        for (int k = G.start; k < kEnd; k++) {
-            int si = vis[k];
-            bool active = si == Act(b);
-            if ((pass == 0) == active) continue;
-            if (g.tbDragging && g.tbDragPane == b && k == g.tbDragIdx) continue;   // glued: pass 2
-            RECT r; TabSlotRect(G, k, r);
-            int dx = glideDx(k);
-            int fl = r.left + dx, fr = r.right + dx;
-            // the divider: an inactive tab's 1px right border, dropped on the
-            // strip's last slot while the chevron is hidden (IsLast)
-            bool isLastVis = k == kEnd - 1;
-            if (!G.chev && isLastVis) { /* the band's edge: no stray rule */ }
-            else {
-                Gdiplus::Graphics gs(dc);
-                Gdiplus::SolidBrush db(Gdiplus::Color((BYTE)255, 0x55, 0x55, 0x55));
-                gs.FillRectangle(&db, Gdiplus::RectF((float)fr - 1.f, (float)G.faceTop, 1.f, (float)G.faceH));
-            }
-            // the label, dirty dot included, ellipsized before the close x
-            RECT tr{ fl + TABF(10), G.faceTop, fr - TABF(24) - TABF(6), G.faceTop + G.faceH };
-            TabLabel(dc, TabTitle(b, si), tr, RGB(0xa3, 0xa3, 0xa3));
-            // the close x: muted, danger red under the cursor (TabCloseButton)
-            int xr = fr - TABF(2) - TABF(12), cy = G.faceTop + G.faceH / 2;
-            drawCloseX(xr, cy, hotK == k && g.tbHotBtn == 1);
-        }
-        if (pass == 0 && actVis >= G.start && actVis < kEnd &&
-            !(g.tbDragging && g.tbDragPane == b && actVis == g.tbDragIdx)) {
-            // the ACTIVE tab: the menu tier's face, rounded at the top, flush
-            // to the card - the two read as one surface (RebuildTabStrip's -1)
-            RECT r; TabSlotRect(G, actVis, r);
-            int dx = glideDx(actVis);
-            int fl = r.left + dx, fr = r.right + dx;
-            int ft = G.faceTop, fb2 = ft + G.actH;  // the active face reaches the foot
+    for (int k = G.start; k < kEnd; k++) {          // the inactive faces first
+        int si = vis[k];
+        if (si == Act(b)) continue;                 // the active tab draws below, last
+        if (g.tbDragging && g.tbDragPane == b && k == g.tbDragIdx) continue;   // glued: the ghost
+        RECT r; TabSlotRect(G, k, r);
+        int dx = glideDx(k);
+        int fl = r.left + dx, fr = r.right + dx;
+        // the divider: an inactive tab's 1px right border, dropped on the
+        // strip's last slot while the chevron is hidden (IsLast)
+        bool isLastVis = k == kEnd - 1;
+        if (!G.chev && isLastVis) { /* the band's edge: no stray rule */ }
+        else {
             Gdiplus::Graphics gs(dc);
-            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::GraphicsPath face;
-            float rr = (float)r3;
-            face.AddArc((float)fl, (float)ft, 2 * rr, 2 * rr, 180, 90);
-            face.AddArc((float)fr - 2 * rr, (float)ft, 2 * rr, 2 * rr, 270, 90);
-            face.AddLine((float)fr, (float)ft + rr, (float)fr, (float)fb2);
-            face.AddLine((float)fr, (float)fb2, (float)fl, (float)fb2);
-            face.CloseFigure();
-            Gdiplus::SolidBrush faceBr(Gdiplus::Color((BYTE)255, 0x14, 0x14, 0x14));   // #141414
-            gs.FillPath(&faceBr, &face);
-            // the label and the x on the active face
-            RECT tr{ fl + TABF(10), ft, fr - TABF(24) - TABF(6), fb2 };
-            TabLabel(dc, TabTitle(b, vis[actVis]), tr, RGB(0xe0, 0xe0, 0xe0));
-            int xr = fr - TABF(2) - TABF(12), cy = ft + G.faceH / 2;
-            drawCloseX(xr, cy, hotK == actVis && g.tbHotBtn == 1);
+            Gdiplus::SolidBrush db(Gdiplus::Color((BYTE)255, 0x55, 0x55, 0x55));
+            gs.FillRectangle(&db, Gdiplus::RectF((float)fr - 1.f, (float)G.faceTop, 1.f, (float)G.faceH));
         }
+        // the label, dirty dot included, ellipsized before the close x
+        RECT tr{ fl + TABF(10), G.faceTop, fr - TABF(24) - TABF(6), G.faceTop + G.faceH };
+        TabLabel(dc, TabTitle(b, si), tr, RGB(0xa3, 0xa3, 0xa3));
+        // the close x: muted, danger red under the cursor (TabCloseButton)
+        int xr = fr - TABF(2) - TABF(12), cy = G.faceTop + G.faceH / 2;
+        drawCloseX(xr, cy, hotK == k && g.tbHotBtn == 1);
+    }
+    if (actVis >= G.start && actVis < kEnd &&
+        !(g.tbDragging && g.tbDragPane == b && actVis == g.tbDragIdx)) {
+        // the ACTIVE tab: no face of its own - the field shows through and
+        // the brighter label carries the emphasis, KillerPDF's TextBrush
+        // over MutedText - and a thin green rule (PrimaryBrush #22bb56)
+        // runs along the top edge, the stripe the reader asked for
+        RECT r; TabSlotRect(G, actVis, r);
+        int dx = glideDx(actVis);
+        int fl = r.left + dx, fr = r.right + dx;
+        int ft = G.faceTop, fb2 = ft + G.actH;  // the label keeps the flush geometry
+        Gdiplus::Graphics gs(dc);
+        Gdiplus::SolidBrush acc(Gdiplus::Color((BYTE)255, 0x22, 0xbb, 0x56));
+        gs.FillRectangle(&acc, Gdiplus::RectF((float)fl, (float)ft,
+                                              (float)(fr - fl), (float)max(1, TABF(1))));
+        // the label and the x on the active tab
+        RECT tr{ fl + TABF(10), ft, fr - TABF(24) - TABF(6), fb2 };
+        TabLabel(dc, TabTitle(b, vis[actVis]), tr, RGB(0xe0, 0xe0, 0xe0));
+        int xr = fr - TABF(2) - TABF(12), cy = ft + G.faceH / 2;
+        drawCloseX(xr, cy, hotK == actVis && g.tbHotBtn == 1);
     }
     if (g.tbDragging && g.tbDragPane == b && g.tbDragIdx >= G.start && g.tbDragIdx < kEnd) {
         // the grabbed tab rides the cursor, clamped into its strip (Tab_DragMove)
