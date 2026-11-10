@@ -90,6 +90,14 @@ using std::min; using std::max;
 #include <wrl/client.h>
 #include <wrl/event.h>   // Microsoft::WRL::Callback: the WebView2 COM event lambdas
 #include <webview2.h>    // the WebView2 SDK - CI fetches the Microsoft.Web.WebView2 package
+#include <WebView2EnvironmentOptions.h>   // CoreWebView2EnvironmentOptions: switches extension support on
+#include <winhttp.h>     // the Chrome Web Store download
+#include <thread>
+#include <memory>
+#include <functional>
+#include <cstring>
+#include <cctype>
+#include <cstdlib>
 // WebView2's SDK header declares every interface and entry point at global scope;
 // the  prefix the first draft used is gone - the names are simply global.
 namespace wrl = Microsoft::WRL;                   // ComPtr + Callback: the event lambdas
@@ -107,6 +115,7 @@ namespace wrl = Microsoft::WRL;                   // ComPtr + Callback: the even
 #endif
 
 #pragma comment(lib, "windowsapp")
+#pragma comment(lib, "winhttp")
 #pragma comment(lib, "shcore")
 #pragma comment(lib, "gdiplus")
 #pragma comment(lib, "comdlg32")
@@ -9195,7 +9204,7 @@ static HBRUSH g_webEditBrush = nullptr;
 static RECT g_webOmni{};                   // the pill, in bar coords
 static RECT g_webFailBtn{};                // the no-engine card's button, view coords
 
-enum { WB_READER, WB_BACK, WB_FWD, WB_RELOAD, WB_NEWTAB, WB_MENU, WB_SIDE, WB_COUNT };
+enum { WB_READER, WB_BACK, WB_FWD, WB_RELOAD, WB_NEWTAB, WB_MENU, WB_SIDE, WB_EXT, WB_COUNT };
 static RECT g_wbR[WB_COUNT];
 
 static WebTab* WebTabById(unsigned long long id) {
@@ -9216,12 +9225,1081 @@ static void WebSyncOmnibox();              // module order: the omnibox helpers 
 static void WebSyncOmniboxForce();         // below their first callers
 static LRESULT CALLBACK WebEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 
+// ---------------------------------------------------------------------------
+// Extension packages: everything between a Chrome Web Store download and an
+// unpacked folder WebView2 can load, in plain C++ (no zlib, no tar, no
+// PowerShell). A .crx is a small header in front of an ordinary zip; the
+// header carries the developer's public key, and Chrome derives an
+// extension's ID from that key - so the key is written back into the
+// unpacked manifest.json, which makes the loaded extension keep its real
+// store ID (extensions that name themselves in OAuth redirects, externally
+// connectable pages or web-accessible URLs depend on it).
+// ---------------------------------------------------------------------------
+namespace crxk {
+
+static void Sha256(const unsigned char* d, size_t n, unsigned char out[32]) {
+    static const unsigned K[64] = {
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2 };
+    unsigned h[8] = { 0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19 };
+    std::vector<unsigned char> m(d, d + n);
+    m.push_back(0x80);
+    while (m.size() % 64 != 56) m.push_back(0);
+    unsigned long long bits = (unsigned long long)n * 8;
+    for (int i = 7; i >= 0; i--) m.push_back((unsigned char)(bits >> (i * 8)));
+    auto R = [](unsigned x, int k) { return (x >> k) | (x << (32 - k)); };
+    for (size_t o = 0; o < m.size(); o += 64) {
+        unsigned w[64];
+        for (int i = 0; i < 16; i++)
+            w[i] = (unsigned)m[o + i*4] << 24 | (unsigned)m[o + i*4 + 1] << 16 | (unsigned)m[o + i*4 + 2] << 8 | m[o + i*4 + 3];
+        for (int i = 16; i < 64; i++) {
+            unsigned s0 = R(w[i-15], 7) ^ R(w[i-15], 18) ^ (w[i-15] >> 3);
+            unsigned s1 = R(w[i-2], 17) ^ R(w[i-2], 19) ^ (w[i-2] >> 10);
+            w[i] = w[i-16] + s0 + w[i-7] + s1;
+        }
+        unsigned a = h[0], b = h[1], c = h[2], dd = h[3], e = h[4], f = h[5], g2 = h[6], hh = h[7];
+        for (int i = 0; i < 64; i++) {
+            unsigned S1 = R(e, 6) ^ R(e, 11) ^ R(e, 25), ch = (e & f) ^ (~e & g2);
+            unsigned t1 = hh + S1 + ch + K[i] + w[i];
+            unsigned S0 = R(a, 2) ^ R(a, 13) ^ R(a, 22), mj = (a & b) ^ (a & c) ^ (b & c);
+            unsigned t2 = S0 + mj;
+            hh = g2; g2 = f; f = e; e = dd + t1; dd = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += dd; h[4] += e; h[5] += f; h[6] += g2; h[7] += hh;
+    }
+    for (int i = 0; i < 8; i++) for (int j = 0; j < 4; j++) out[i*4 + j] = (unsigned char)(h[i] >> (24 - j * 8));
+}
+
+static std::string B64(const unsigned char* d, size_t n) {
+    static const char* T = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string r;
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = (unsigned)d[i] << 16 | (i + 1 < n ? (unsigned)d[i+1] << 8 : 0) | (i + 2 < n ? d[i+2] : 0);
+        r += T[v >> 18 & 63]; r += T[v >> 12 & 63];
+        r += i + 1 < n ? T[v >> 6 & 63] : '='; r += i + 2 < n ? T[v & 63] : '=';
+    }
+    return r;
+}
+
+// ---- raw DEFLATE (RFC 1951): canonical-Huffman decoder in the puff.c shape ----
+struct BitIn { const unsigned char* p; size_t n, pos = 0; unsigned long long buf = 0; int cnt = 0; bool err = false;
+    int Bits(int k) {
+        while (cnt < k) { if (pos >= n) { err = true; return 0; } buf |= (unsigned long long)p[pos++] << cnt; cnt += 8; }
+        int v = (int)(buf & ((1ull << k) - 1)); buf >>= k; cnt -= k; return v; } };
+struct Huff { short count[16], symbol[288]; };
+static int HuffBuild(Huff& h, const short* len, int n) {
+    for (int i = 0; i < 16; i++) h.count[i] = 0;
+    for (int i = 0; i < n; i++) h.count[len[i]]++;
+    if (h.count[0] == n) return 0;
+    int left = 1;
+    for (int l = 1; l < 16; l++) { left <<= 1; left -= h.count[l]; if (left < 0) return left; }
+    short offs[16]; offs[1] = 0;
+    for (int l = 1; l < 15; l++) offs[l + 1] = offs[l] + h.count[l];
+    for (int i = 0; i < n; i++) if (len[i]) h.symbol[offs[len[i]]++] = (short)i;
+    return left;
+}
+static int HuffDecode(BitIn& b, const Huff& h) {
+    int code = 0, first = 0, index = 0;
+    for (int l = 1; l < 16; l++) {
+        code |= b.Bits(1); if (b.err) return -1;
+        int c = h.count[l];
+        if (code - c < first) return h.symbol[index + (code - first)];
+        index += c; first += c; first <<= 1; code <<= 1;
+    }
+    return -1;
+}
+static bool Inflate(const unsigned char* src, size_t n, std::vector<unsigned char>& out, size_t limit) {
+    static const short lb[29] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
+    static const short le[29] = {0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0};
+    static const short db[30] = {1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577};
+    static const short de[30] = {0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13};
+    BitIn b{ src, n };
+    int last;
+    do {
+        last = b.Bits(1); int type = b.Bits(2);
+        if (b.err) return false;
+        if (type == 0) {
+            b.buf = 0; b.cnt = 0;
+            if (b.pos + 4 > n) return false;
+            unsigned len = src[b.pos] | src[b.pos + 1] << 8; b.pos += 4;
+            if (b.pos + len > n || out.size() + len > limit) return false;
+            out.insert(out.end(), src + b.pos, src + b.pos + len); b.pos += len;
+        } else if (type == 1 || type == 2) {
+            Huff lit, dist; short len[320];
+            if (type == 1) {
+                int i = 0;
+                for (; i < 144; i++) len[i] = 8;
+                for (; i < 256; i++) len[i] = 9;
+                for (; i < 280; i++) len[i] = 7;
+                for (; i < 288; i++) len[i] = 8;
+                HuffBuild(lit, len, 288);
+                for (i = 0; i < 30; i++) len[i] = 5;
+                HuffBuild(dist, len, 30);
+            } else {
+                int nlen = b.Bits(5) + 257, ndist = b.Bits(5) + 1, ncode = b.Bits(4) + 4;
+                if (b.err || nlen > 286 || ndist > 30) return false;
+                static const short order[19] = {16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15};
+                int i = 0;
+                for (; i < ncode; i++) len[order[i]] = (short)b.Bits(3);
+                for (; i < 19; i++) len[order[i]] = 0;
+                Huff cl; if (HuffBuild(cl, len, 19) != 0) return false;
+                i = 0;
+                while (i < nlen + ndist) {
+                    int sym = HuffDecode(b, cl); if (sym < 0) return false;
+                    if (sym < 16) len[i++] = (short)sym;
+                    else {
+                        int rep, v = 0;
+                        if (sym == 16) { if (i == 0) return false; v = len[i - 1]; rep = 3 + b.Bits(2); }
+                        else if (sym == 17) rep = 3 + b.Bits(3); else rep = 11 + b.Bits(7);
+                        if (i + rep > nlen + ndist) return false;
+                        while (rep--) len[i++] = (short)v;
+                    }
+                }
+                if (len[256] == 0) return false;
+                int e1 = HuffBuild(lit, len, nlen); if (e1 < 0 || (e1 > 0 && nlen - lit.count[0] != 1)) return false;
+                int e2 = HuffBuild(dist, len + nlen, ndist); if (e2 < 0 || (e2 > 0 && ndist - dist.count[0] != 1)) return false;
+            }
+            for (;;) {
+                int sym = HuffDecode(b, lit); if (sym < 0) return false;
+                if (sym < 256) { if (out.size() >= limit) return false; out.push_back((unsigned char)sym); }
+                else if (sym == 256) break;
+                else {
+                    sym -= 257; if (sym >= 29) return false;
+                    int l = lb[sym] + b.Bits(le[sym]);
+                    int ds = HuffDecode(b, dist); if (ds < 0 || ds >= 30) return false;
+                    size_t dd = (size_t)db[ds] + b.Bits(de[ds]);
+                    if (b.err || dd > out.size() || out.size() + l > limit) return false;
+                    for (int k = 0; k < l; k++) out.push_back(out[out.size() - dd]);
+                }
+            }
+        } else return false;
+    } while (!last);
+    return !b.err;
+}
+
+// ---- zip: central directory, stored + deflated entries ----
+struct ZipEnt { std::string name; unsigned method, csize, usize, off; };
+static unsigned U16(const unsigned char* p) { return p[0] | p[1] << 8; }
+static unsigned U32(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | (unsigned)p[3] << 24; }
+static bool ZipList(const unsigned char* d, size_t n, std::vector<ZipEnt>& v) {
+    if (n < 22) return false;
+    size_t e = n - 22; bool found = false;
+    size_t lim = n - 22 < 65557 ? n - 22 : 65557;
+    for (size_t k = 0; k <= lim; k++, e--)
+        if (U32(d + e) == 0x06054b50) { found = true; break; }
+    if (!found) return false;
+    unsigned cnt = U16(d + e + 10); size_t cd = U32(d + e + 16);
+    for (unsigned i = 0; i < cnt; i++) {
+        if (cd + 46 > n || U32(d + cd) != 0x02014b50) return false;
+        ZipEnt z; z.method = U16(d + cd + 10); z.csize = U32(d + cd + 20); z.usize = U32(d + cd + 24);
+        unsigned nl = U16(d + cd + 28), el = U16(d + cd + 30), cl = U16(d + cd + 32); z.off = U32(d + cd + 42);
+        if (cd + 46 + nl > n) return false;
+        z.name.assign((const char*)d + cd + 46, nl);
+        v.push_back(z); cd += 46 + nl + el + cl;
+    }
+    return true;
+}
+static bool ZipRead(const unsigned char* d, size_t n, const ZipEnt& z, std::vector<unsigned char>& out) {
+    if ((size_t)z.off + 30 > n || U32(d + z.off) != 0x04034b50) return false;
+    size_t s = (size_t)z.off + 30 + U16(d + z.off + 26) + U16(d + z.off + 28);
+    if (s + z.csize > n || z.usize > (256u << 20)) return false;
+    out.clear();
+    if (z.method == 0) { out.assign(d + s, d + s + z.csize); return true; }
+    if (z.method == 8) return Inflate(d + s, z.csize, out, z.usize);
+    return false;
+}
+
+// ---- the .crx header: where the zip starts, and the developer's public key ----
+static bool Varint(const unsigned char* d, size_t n, size_t& p, unsigned long long& v) {
+    v = 0; for (int s = 0; s < 64 && p < n; s += 7) { unsigned char c = d[p++]; v |= (unsigned long long)(c & 0x7f) << s; if (!(c & 0x80)) return true; }
+    return false;
+}
+struct Field { unsigned long long num; const unsigned char* p; size_t len; };
+static bool PbFields(const unsigned char* d, size_t n, std::vector<Field>& f) {
+    size_t p = 0;
+    while (p < n) {
+        unsigned long long tag, v; if (!Varint(d, n, p, tag)) return false;
+        int wt = (int)(tag & 7);
+        if (wt == 0) { if (!Varint(d, n, p, v)) return false; }
+        else if (wt == 2) { if (!Varint(d, n, p, v) || p + v > n) return false; f.push_back({ tag >> 3, d + p, (size_t)v }); p += (size_t)v; }
+        else if (wt == 1) p += 8; else if (wt == 5) p += 4; else return false;
+    }
+    return true;
+}
+static bool CrxParse(const unsigned char* d, size_t n, size_t& zipOff, std::string& key) {
+    key.clear();
+    if (n >= 4 && d[0] == 'P' && d[1] == 'K') { zipOff = 0; return true; }     // a bare zip
+    if (n < 16 || memcmp(d, "Cr24", 4) != 0) return false;
+    unsigned ver = U32(d + 4);
+    if (ver == 2) {
+        size_t pk = U32(d + 8), sg = U32(d + 12);
+        if (16 + pk + sg > n) return false;
+        key.assign((const char*)d + 16, pk); zipOff = 16 + pk + sg; return true;
+    }
+    if (ver != 3) return false;
+    size_t hl = U32(d + 8);
+    if (12 + hl > n) return false;
+    zipOff = 12 + hl;
+    std::vector<Field> top; if (!PbFields(d + 12, hl, top)) return true;       // no key: still loadable
+    std::vector<std::string> keys; std::string crxId;
+    for (auto& f : top) {
+        if (f.num == 2 || f.num == 3) {                                        // RSA / ECDSA proofs
+            std::vector<Field> in; if (!PbFields(f.p, f.len, in)) continue;
+            for (auto& g : in) if (g.num == 1) keys.emplace_back((const char*)g.p, g.len);
+        } else if (f.num == 10000) {                                           // signed_header_data
+            std::vector<Field> in; if (!PbFields(f.p, f.len, in)) continue;
+            for (auto& g : in) if (g.num == 1) crxId.assign((const char*)g.p, g.len);
+        }
+    }
+    for (auto& k : keys) {                                                     // the key the CRX id names
+        unsigned char h[32]; Sha256((const unsigned char*)k.data(), k.size(), h);
+        if (crxId.size() == 16 && memcmp(h, crxId.data(), 16) == 0) { key = k; return true; }
+    }
+    if (!keys.empty()) key = keys[0];
+    return true;
+}
+
+// the manifest gets "key" as its first top-level member (skipped when it has one)
+static bool JsonHasTopKey(const std::string& s, const char* name) {
+    int depth = 0; size_t n = s.size();
+    for (size_t i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == '"') {
+            size_t j = i + 1; std::string str;
+            while (j < n && s[j] != '"') { if (s[j] == '\\' && j + 1 < n) j++; str += s[j]; j++; }
+            if (depth == 1) { size_t k = j + 1; while (k < n && isspace((unsigned char)s[k])) k++; if (k < n && s[k] == ':' && str == name) return true; }
+            i = j;
+        } else if (c == '{' || c == '[') depth++;
+        else if (c == '}' || c == ']') depth--;
+    }
+    return false;
+}
+static std::string ManifestWithKey(const std::string& m, const std::string& keyDer) {
+    if (keyDer.empty() || JsonHasTopKey(m, "key")) return m;
+    size_t b = m.find('{'); if (b == std::string::npos) return m;
+    std::string r = m;
+    r.insert(b + 1, "\"key\":\"" + B64((const unsigned char*)keyDer.data(), keyDer.size()) + "\",");
+    return r;
+}
+// the 32-letter extension id (a-p) Chrome derives from the key
+static std::string IdFromKey(const std::string& keyDer) {
+    unsigned char h[32]; Sha256((const unsigned char*)keyDer.data(), keyDer.size(), h);
+    std::string id; for (int i = 0; i < 16; i++) { id += (char)('a' + (h[i] >> 4)); id += (char)('a' + (h[i] & 15)); }
+    return id;
+}
+
+// ---- a small JSON reader for manifest.json / messages.json (comments tolerated) ----
+struct J {
+    char t = 'n';                                   // n null, b bool, d number, s string, a array, o object
+    std::string s; double d = 0; bool b = false;
+    std::vector<J> a; std::vector<std::pair<std::string, J>> o;
+    const J* get(const char* k) const {
+        if (t != 'o') return nullptr;
+        for (auto& p : o) if (p.first == k) return &p.second;
+        return nullptr;
+    }
+    std::string str() const { return t == 's' ? s : std::string(); }
+};
+struct JP {
+    const std::string& x; size_t i = 0;
+    explicit JP(const std::string& s) : x(s) {}
+    void Ws() {
+        for (;;) {
+            while (i < x.size() && (x[i] == ' ' || x[i] == '\t' || x[i] == '\r' || x[i] == '\n')) i++;
+            if (i + 1 < x.size() && x[i] == '/' && x[i + 1] == '/') { while (i < x.size() && x[i] != '\n') i++; }
+            else if (i + 1 < x.size() && x[i] == '/' && x[i + 1] == '*') {
+                size_t e = x.find("*/", i + 2); i = e == std::string::npos ? x.size() : e + 2;
+            } else break;
+        }
+    }
+    static void Utf8(std::string& r, unsigned c) {
+        if (c < 0x80) r += (char)c;
+        else if (c < 0x800) { r += (char)(0xC0 | c >> 6); r += (char)(0x80 | (c & 63)); }
+        else if (c < 0x10000) { r += (char)(0xE0 | c >> 12); r += (char)(0x80 | (c >> 6 & 63)); r += (char)(0x80 | (c & 63)); }
+        else { r += (char)(0xF0 | c >> 18); r += (char)(0x80 | (c >> 12 & 63)); r += (char)(0x80 | (c >> 6 & 63)); r += (char)(0x80 | (c & 63)); }
+    }
+    bool Hex4(unsigned& v) {
+        if (i + 4 > x.size()) return false;
+        v = 0;
+        for (int k = 0; k < 4; k++) {
+            char c = x[i++]; v <<= 4;
+            if (c >= '0' && c <= '9') v |= c - '0'; else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10; else return false;
+        }
+        return true;
+    }
+    bool Str(std::string& r) {
+        if (i >= x.size() || x[i] != '"') return false;
+        i++;
+        while (i < x.size() && x[i] != '"') {
+            char c = x[i++];
+            if (c != '\\') { r += c; continue; }
+            if (i >= x.size()) return false;
+            char e = x[i++];
+            switch (e) {
+            case 'n': r += '\n'; break; case 't': r += '\t'; break; case 'r': r += '\r'; break;
+            case 'b': r += '\b'; break; case 'f': r += '\f'; break;
+            case 'u': {
+                unsigned u; if (!Hex4(u)) return false;
+                if (u >= 0xD800 && u < 0xDC00 && i + 1 < x.size() && x[i] == '\\' && x[i + 1] == 'u') {
+                    i += 2; unsigned lo; if (!Hex4(lo)) return false;
+                    u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00);
+                }
+                Utf8(r, u); break; }
+            default: r += e; break;
+            }
+        }
+        if (i >= x.size()) return false;
+        i++; return true;
+    }
+    bool Val(J& v, int depth) {
+        if (depth > 48) return false;
+        Ws(); if (i >= x.size()) return false;
+        char c = x[i];
+        if (c == '{') {
+            v.t = 'o'; i++; Ws();
+            if (i < x.size() && x[i] == '}') { i++; return true; }
+            for (;;) {
+                Ws(); std::string k; if (!Str(k)) return false;
+                Ws(); if (i >= x.size() || x[i] != ':') return false; i++;
+                J c2; if (!Val(c2, depth + 1)) return false;
+                v.o.emplace_back(std::move(k), std::move(c2));
+                Ws(); if (i >= x.size()) return false;
+                if (x[i] == ',') { i++; Ws(); if (i < x.size() && x[i] == '}') { i++; return true; } continue; }
+                if (x[i] == '}') { i++; return true; }
+                return false;
+            }
+        }
+        if (c == '[') {
+            v.t = 'a'; i++; Ws();
+            if (i < x.size() && x[i] == ']') { i++; return true; }
+            for (;;) {
+                J c2; if (!Val(c2, depth + 1)) return false;
+                v.a.push_back(std::move(c2));
+                Ws(); if (i >= x.size()) return false;
+                if (x[i] == ',') { i++; Ws(); if (i < x.size() && x[i] == ']') { i++; return true; } continue; }
+                if (x[i] == ']') { i++; return true; }
+                return false;
+            }
+        }
+        if (c == '"') { v.t = 's'; return Str(v.s); }
+        if (x.compare(i, 4, "true") == 0) { v.t = 'b'; v.b = true; i += 4; return true; }
+        if (x.compare(i, 5, "false") == 0) { v.t = 'b'; i += 5; return true; }
+        if (x.compare(i, 4, "null") == 0) { i += 4; return true; }
+        size_t st = i;
+        while (i < x.size() && (isdigit((unsigned char)x[i]) || x[i] == '-' || x[i] == '+' || x[i] == '.' || x[i] == 'e' || x[i] == 'E')) i++;
+        if (st == i) return false;
+        v.t = 'd'; v.d = atof(x.substr(st, i - st).c_str()); return true;
+    }
+};
+static bool JParse(const std::string& in, J& out) {
+    size_t o = in.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
+    std::string s = in.substr(o);
+    JP p(s); out = J();
+    return p.Val(out, 0);
+}
+} // namespace crxk
+
+// ---------------------------------------------------------------------------
+//  Extensions. WebView2 can run Chrome extensions (content scripts, service
+//  workers, declarative rules) from an unpacked folder, but ships no store, no
+//  toolbar and no popup UI - so Docsy supplies all three:
+//   * Chrome Web Store pages get a floating "Add to Docsy" button (the store's
+//     own button insists on Chrome). Clicking it downloads the .crx from
+//     Google's update endpoint on a worker thread, unpacks it with the code
+//     above into %LOCALAPPDATA%\Docsy\Extensions\<id>, restores the store ID
+//     and hands the folder to WebView2's AddBrowserExtension.
+//   * Installed extensions with a popup show their icon on the toolbar; a
+//     click opens the popup page (chrome-extension://<id>/<popup>) in a small
+//     borderless window that sizes itself to the page, like Chrome's does and
+//     closes when focus leaves it.
+//   * The puzzle button's menu lists every extension (open, options, turn
+//     off / on, remove) and links to the store.
+//  They load before the first page navigates, so content scripts run on it.
+// ---------------------------------------------------------------------------
+struct WebExt {
+    std::wstring id, name, version, dir, popup, options;
+    Gdiplus::Bitmap* icon = nullptr;
+    bool enabled = true;
+    wrl::ComPtr<ICoreWebView2BrowserExtension> ext;
+};
+static std::vector<WebExt> g_wx;
+static bool g_wxReady = false, g_wxBusy = false, g_wxOk = true;   // g_wxOk: the runtime can do extensions
+static wrl::ComPtr<ICoreWebView2Profile7> g_wxProf;
+static std::vector<RECT> g_wxR;            // the toolbar icons (strip coords) ...
+static std::vector<int> g_wxIdx;           // ... and the g_wx entry each belongs to
+static int g_wxHot = -1, g_wxPress = -1;
+static std::vector<std::wstring> g_wxInstalling;
+static void WebBarLayout();
+static void WebNewTab(std::wstring url, bool makeCurrent);
+
+static std::wstring WxW(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+    return w;
+}
+static std::string WxU(const std::wstring& w) {
+    if (w.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, nullptr, nullptr);
+    return s;
+}
+static std::wstring WxRoot() {
+    PWSTR la = nullptr;
+    SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la);
+    std::wstring r = (la ? std::wstring(la) : std::wstring(L".")) + L"\\Docsy\\Extensions";
+    if (la) CoTaskMemFree(la);
+    return r;
+}
+static void WxMkdirs(const std::wstring& p) {
+    for (size_t i = 3; i <= p.size(); i++)
+        if (i == p.size() || p[i] == L'\\') CreateDirectoryW(p.substr(0, i).c_str(), nullptr);
+}
+static void WxRmTree(const std::wstring& p) {
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((p + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+            std::wstring c = p + L"\\" + fd.cFileName;
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) RemoveDirectoryW(c.c_str());
+                else WxRmTree(c);
+            } else {
+                SetFileAttributesW(c.c_str(), FILE_ATTRIBUTE_NORMAL);
+                DeleteFileW(c.c_str());
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryW(p.c_str());
+}
+static bool WxReadFile(const std::wstring& p, std::string& out) {
+    HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart < (64ll << 20);
+    if (ok) {
+        out.resize((size_t)sz.QuadPart);
+        DWORD got = 0;
+        ok = sz.QuadPart == 0 || (ReadFile(h, &out[0], (DWORD)sz.QuadPart, &got, nullptr) && got == (DWORD)sz.QuadPart);
+    }
+    CloseHandle(h);
+    return ok;
+}
+static bool WxWriteFile(const std::wstring& p, const unsigned char* d, size_t n) {
+    HANDLE h = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true; size_t done = 0;
+    while (ok && done < n) {
+        DWORD w = 0, chunk = (DWORD)(n - done > (1u << 24) ? (1u << 24) : n - done);
+        ok = WriteFile(h, d + done, chunk, &w, nullptr) && w > 0;
+        done += w;
+    }
+    CloseHandle(h);
+    return ok;
+}
+static bool WxSafeName(const std::string& n) {
+    if (n.empty() || n[0] == '/' || n[0] == '\\' || n.find(':') != std::string::npos || n.find('\\') != std::string::npos) return false;
+    size_t p = 0;
+    while (p <= n.size()) {
+        size_t e = n.find('/', p); if (e == std::string::npos) e = n.size();
+        if (n.compare(p, e - p, "..") == 0) return false;
+        p = e + 1;
+    }
+    return true;
+}
+static bool WxIsExtId(const std::wstring& s) {
+    if (s.size() != 32) return false;
+    for (wchar_t c : s) if (c < L'a' || c > L'p') return false;
+    return true;
+}
+static bool WxStoreHost(const std::wstring& url, std::wstring* pathOut) {
+    size_t p = url.find(L"://"); if (p == std::wstring::npos) return false;
+    std::wstring rest = url.substr(p + 3);
+    size_t sl = rest.find(L'/'); if (sl == std::wstring::npos) return false;
+    std::wstring host = rest.substr(0, sl), path = rest.substr(sl);
+    bool store = host == L"chromewebstore.google.com" || (host == L"chrome.google.com" && path.rfind(L"/webstore", 0) == 0);
+    if (store && pathOut) *pathOut = path;
+    return store;
+}
+static std::wstring WxStoreIdOf(const std::wstring& url) {   // the extension a store detail page is about
+    std::wstring path;
+    if (!WxStoreHost(url, &path)) return L"";
+    size_t q = path.find_first_of(L"?#"); if (q != std::wstring::npos) path.resize(q);
+    size_t pos = 0;
+    while (pos < path.size()) {
+        size_t e = path.find(L'/', pos); if (e == std::wstring::npos) e = path.size();
+        std::wstring seg = path.substr(pos, e - pos);
+        if (WxIsExtId(seg)) return seg;
+        pos = e + 1;
+    }
+    return L"";
+}
+
+// ---- manifest -> name, popup, options page, toolbar icon ----
+static std::wstring WxMsg(const std::wstring& dir, const crxk::J& man, const std::string& val) {
+    if (val.size() > 8 && val.compare(0, 6, "__MSG_") == 0 && val.compare(val.size() - 2, 2, "__") == 0) {
+        std::string key = val.substr(6, val.size() - 8), loc;
+        if (const crxk::J* d = man.get("default_locale")) loc = d->str();
+        const std::string cands[4] = { loc, "en", "en_US", "en_GB" };
+        for (auto& c : cands) {
+            if (c.empty()) continue;
+            std::string txt; crxk::J m;
+            if (!WxReadFile(dir + L"\\_locales\\" + WxW(c) + L"\\messages.json", txt) || !crxk::JParse(txt, m)) continue;
+            for (auto& kv : m.o) {
+                if (kv.first.size() != key.size()) continue;
+                bool same = true;
+                for (size_t i = 0; i < key.size(); i++) if (tolower((unsigned char)kv.first[i]) != tolower((unsigned char)key[i])) same = false;
+                if (!same) continue;
+                if (const crxk::J* mm = kv.second.get("message")) if (!mm->str().empty()) return WxW(mm->str());
+            }
+        }
+    }
+    return WxW(val);
+}
+static std::wstring WxPickIcon(const crxk::J* v) {          // a path, or a size->path map: the best for ~18dp
+    if (!v) return L"";
+    if (v->t == 's') return WxW(v->s);
+    if (v->t != 'o') return L"";
+    std::string best; int bestSz = 0; bool haveBig = false;
+    for (auto& kv : v->o) {
+        if (kv.second.t != 's') continue;
+        int sz = atoi(kv.first.c_str());
+        int want = (int)(18 * g.dpi + 0.5);
+        bool big = sz >= want;
+        if (best.empty() || (big && (!haveBig || sz < bestSz)) || (!big && !haveBig && sz > bestSz)) {
+            best = kv.second.s; bestSz = sz; haveBig = big;
+        }
+    }
+    return WxW(best);
+}
+static Gdiplus::Bitmap* WxLoadIcon(const std::wstring& path) {   // decoded into memory: no file lock left behind
+    Gdiplus::Bitmap* src = Gdiplus::Bitmap::FromFile(path.c_str());
+    if (!src) return nullptr;
+    if (src->GetLastStatus() != Gdiplus::Ok || src->GetWidth() == 0 || src->GetHeight() == 0) { delete src; return nullptr; }
+    UINT w = src->GetWidth(), h = src->GetHeight();
+    Gdiplus::Bitmap* c = new Gdiplus::Bitmap((INT)w, (INT)h, PixelFormat32bppPARGB);
+    { Gdiplus::Graphics gs(c); gs.SetCompositingMode(Gdiplus::CompositingModeSourceCopy); gs.DrawImage(src, 0, 0, (INT)w, (INT)h); }
+    delete src;
+    return c;
+}
+static bool WxLoadInfo(WebExt& e) {
+    std::string txt; crxk::J m;
+    if (!WxReadFile(e.dir + L"\\manifest.json", txt) || !crxk::JParse(txt, m) || m.t != 'o') return false;
+    if (const crxk::J* n = m.get("name")) e.name = WxMsg(e.dir, m, n->str());
+    if (e.name.empty()) e.name = e.id;
+    if (const crxk::J* v = m.get("version")) e.version = WxW(v->str());
+    const crxk::J* act = m.get("action"); if (!act) act = m.get("browser_action");
+    e.popup.clear(); e.options.clear();
+    if (act) if (const crxk::J* p = act->get("default_popup")) e.popup = WxW(p->str());
+    if (const crxk::J* ou = m.get("options_ui")) { if (const crxk::J* p = ou->get("page")) e.options = WxW(p->str()); }
+    if (e.options.empty()) if (const crxk::J* op = m.get("options_page")) e.options = WxW(op->str());
+    std::wstring ip = act ? WxPickIcon(act->get("default_icon")) : L"";
+    if (ip.empty()) ip = WxPickIcon(m.get("icons"));
+    if (e.icon) { delete e.icon; e.icon = nullptr; }
+    if (!ip.empty()) {
+        while (!ip.empty() && ip[0] == L'/') ip.erase(0, 1);
+        for (auto& c : ip) if (c == L'/') c = L'\\';
+        if (ip.find(L"..") == std::wstring::npos) e.icon = WxLoadIcon(e.dir + L"\\" + ip);
+    }
+    return true;
+}
+static std::wstring WxExtUrl(const WebExt& e, const std::wstring& page) {
+    std::wstring p = page;
+    while (!p.empty() && p[0] == L'/') p.erase(0, 1);
+    return L"chrome-extension://" + e.id + L"/" + p;
+}
+static int WxFind(const std::wstring& id) {
+    for (int i = 0; i < (int)g_wx.size(); i++) if (g_wx[i].id == id) return i;
+    return -1;
+}
+
+// ---- the profile, the existing extensions, loading before the first page ----
+static wrl::ComPtr<ICoreWebView2Profile7> WxProfile() {
+    if (g_wxProf) return g_wxProf;
+    for (auto& t : g_wt) {
+        if (!t.web) continue;
+        wrl::ComPtr<ICoreWebView2_13> w13; wrl::ComPtr<ICoreWebView2Profile> p;
+        if (SUCCEEDED(t.web.As(&w13)) && w13 && SUCCEEDED(w13->get_Profile(&p)) && p) {
+            wrl::ComPtr<ICoreWebView2Profile7> p7;
+            if (SUCCEEDED(p.As(&p7)) && p7) { g_wxProf = p7; break; }
+        }
+    }
+    return g_wxProf;
+}
+static void WxAddFolder(const std::wstring& dir, std::function<void(HRESULT, ICoreWebView2BrowserExtension*)> done) {
+    wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
+    if (!p) { done(E_NOINTERFACE, nullptr); return; }
+    HRESULT hr = p->AddBrowserExtension(dir.c_str(),
+        Microsoft::WRL::Callback<ICoreWebView2ProfileAddBrowserExtensionCompletedHandler>(
+            [done](HRESULT r, ICoreWebView2BrowserExtension* ext) -> HRESULT { done(r, ext); return S_OK; }).Get());
+    if (FAILED(hr)) done(hr, nullptr);
+}
+static void WxNotifyTabs();
+static void WxFinishInit() {
+    g_wxReady = true; g_wxBusy = false;
+    for (auto& t : g_wt)
+        if (t.web && !t.pending.empty()) { t.web->Navigate(t.pending.c_str()); t.pending.clear(); }
+    if (g_webOn) WebBarLayout();
+    WebRepaintChrome();
+}
+static void WxInit() {
+    if (g_wxReady || g_wxBusy) return;
+    wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
+    if (!p) { g_wxOk = false; WxFinishInit(); return; }
+    g_wxBusy = true;
+    HRESULT hr0 = p->GetBrowserExtensions(
+        Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
+            [](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
+                std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>> have;
+                UINT n = 0;
+                if (SUCCEEDED(hr) && list && SUCCEEDED(list->get_Count(&n)))
+                    for (UINT i = 0; i < n; i++) {
+                        wrl::ComPtr<ICoreWebView2BrowserExtension> e;
+                        if (SUCCEEDED(list->GetValueAtIndex(i, &e)) && e) have.push_back(e);
+                    }
+                // our folders are the source of truth for names, icons and popups
+                std::wstring root = WxRoot();
+                WIN32_FIND_DATAW fd;
+                HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &fd);
+                if (h != INVALID_HANDLE_VALUE) {
+                    do {
+                        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+                        WebExt e; e.id = fd.cFileName; e.dir = root + L"\\" + fd.cFileName;
+                        if (WxLoadInfo(e)) g_wx.push_back(std::move(e));
+                    } while (FindNextFileW(h, &fd));
+                    FindClose(h);
+                }
+                auto left = std::make_shared<int>(0);
+                std::vector<int> toAdd;
+                for (int i = 0; i < (int)g_wx.size(); i++) {
+                    bool found = false;
+                    for (auto& e : have) {
+                        LPWSTR rid = nullptr;
+                        if (SUCCEEDED(e->get_Id(&rid)) && rid) {
+                            if (g_wx[i].id == rid) {
+                                g_wx[i].ext = e; found = true;
+                                BOOL en = TRUE; if (SUCCEEDED(e->get_IsEnabled(&en))) g_wx[i].enabled = en != FALSE;
+                            }
+                            CoTaskMemFree(rid);
+                        }
+                    }
+                    if (!found) toAdd.push_back(i);
+                }
+                if (toAdd.empty()) { WxFinishInit(); return S_OK; }
+                *left = (int)toAdd.size();
+                for (int i : toAdd) {
+                    std::wstring id = g_wx[i].id, dir = g_wx[i].dir;
+                    WxAddFolder(dir, [id, left](HRESULT r, ICoreWebView2BrowserExtension* ext) {
+                        int k = WxFind(id);
+                        if (k >= 0) {
+                            if (SUCCEEDED(r) && ext) {
+                                g_wx[k].ext = ext;
+                                LPWSTR rid = nullptr;
+                                if (SUCCEEDED(ext->get_Id(&rid)) && rid) { g_wx[k].id = rid; CoTaskMemFree(rid); }
+                            } else g_wx[k].enabled = false;     // it would not load: keep it listed, off
+                        }
+                        if (--*left == 0) WxFinishInit();
+                    });
+                }
+                return S_OK;
+            }).Get());
+    if (FAILED(hr0)) { g_wxBusy = false; g_wxOk = false; WxFinishInit(); }
+}
+
+// ---- installing from the Chrome Web Store ----
+struct WxJob { std::wstring id, dir, err; bool ok = false; };
+static bool WxHttpGet(const std::wstring& url, const std::wstring& ua, std::vector<unsigned char>& out, std::wstring& err) {
+    wchar_t host[256] = L"", path[2048] = L"", extra[4096] = L"";
+    URL_COMPONENTS uc{}; uc.dwStructSize = sizeof uc;
+    uc.lpszHostName = host; uc.dwHostNameLength = 256;
+    uc.lpszUrlPath = path; uc.dwUrlPathLength = 2048;
+    uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 4096;
+    if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) { err = L"Bad download address."; return false; }
+    HINTERNET s = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) { err = L"No network session."; return false; }
+    HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
+    HINTERNET r = nullptr;
+    bool ok = false;
+    if (c) {
+        std::wstring full = std::wstring(path) + extra;
+        r = WinHttpOpenRequest(c, L"GET", full.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                               uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+    }
+    if (r) {
+        DWORD redir = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+        WinHttpSetOption(r, WINHTTP_OPTION_REDIRECT_POLICY, &redir, sizeof redir);
+        WinHttpSetTimeouts(r, 10000, 10000, 30000, 60000);
+        if (WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr)) {
+            DWORD code = 0, sz = sizeof code;
+            WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
+            if (code == 200) {
+                ok = true;
+                for (;;) {
+                    DWORD avail = 0;
+                    if (!WinHttpQueryDataAvailable(r, &avail)) { ok = false; break; }
+                    if (avail == 0) break;
+                    size_t at = out.size();
+                    if (at + avail > (300u << 20)) { ok = false; break; }
+                    out.resize(at + avail);
+                    DWORD got = 0;
+                    if (!WinHttpReadData(r, out.data() + at, avail, &got)) { ok = false; break; }
+                    out.resize(at + got);
+                }
+                if (!ok) err = L"The download was interrupted.";
+            } else err = code == 204 || code == 404 ? L"The Chrome Web Store has no download for this extension."
+                                                    : L"The Chrome Web Store answered " + std::to_wstring(code) + L".";
+        } else err = L"Could not reach the Chrome Web Store.";
+    } else err = L"Could not reach the Chrome Web Store.";
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    WinHttpCloseHandle(s);
+    return ok;
+}
+static void WxFetch(WxJob& j, const std::wstring& ver, const std::wstring& root) {   // worker thread
+    std::wstring url = L"https://clients2.google.com/service/update2/crx?response=redirect&os=win&arch=x64&os_arch=x86_64"
+                       L"&nacl_arch=x86-64&prod=chromecrx&prodchannel=stable&prodversion=" + ver +
+                       L"&lang=en-US&acceptformat=crx2,crx3&x=id%3D" + j.id + L"%26installsource%3Dondemand%26uc";
+    std::wstring ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + ver + L" Safari/537.36";
+    std::vector<unsigned char> d;
+    if (!WxHttpGet(url, ua, d, j.err)) { if (j.err.empty()) j.err = L"Download failed."; return; }
+    if (d.size() < 64) { j.err = L"The Chrome Web Store has no download for this extension."; return; }
+    size_t zo = 0; std::string key;
+    if (!crxk::CrxParse(d.data(), d.size(), zo, key)) { j.err = L"That is not a valid extension package."; return; }
+    std::vector<crxk::ZipEnt> zl;
+    if (!crxk::ZipList(d.data() + zo, d.size() - zo, zl)) { j.err = L"The extension package is damaged."; return; }
+    std::wstring dir = root + L"\\" + j.id;
+    WxRmTree(dir); WxMkdirs(dir);
+    bool man = false;
+    for (auto& z : zl) {
+        if (z.name.empty() || z.name.back() == '/') continue;
+        if (!WxSafeName(z.name) || z.name.compare(0, 10, "_metadata/") == 0) continue;
+        std::vector<unsigned char> body;
+        if (!crxk::ZipRead(d.data() + zo, d.size() - zo, z, body)) { j.err = L"The extension package is damaged."; WxRmTree(dir); return; }
+        std::wstring rel = WxW(z.name);
+        for (auto& c : rel) if (c == L'/') c = L'\\';
+        std::wstring full = dir + L"\\" + rel;
+        WxMkdirs(full.substr(0, full.find_last_of(L'\\')));
+        if (z.name == "manifest.json") {
+            std::string t((const char*)body.data(), body.size());
+            t = crxk::ManifestWithKey(t, key);                     // the store id survives the unpack
+            body.assign(t.begin(), t.end()); man = true;
+        }
+        if (!WxWriteFile(full, body.data(), body.size())) { j.err = L"Could not write the extension to disk."; WxRmTree(dir); return; }
+    }
+    if (!man) { j.err = L"The package has no manifest."; WxRmTree(dir); return; }
+    j.dir = dir; j.ok = true;
+}
+static std::wstring WxJsStr(const std::wstring& s) {
+    std::wstring r = L"\"";
+    for (wchar_t c : s) {
+        if (c == L'"' || c == L'\\') { r += L'\\'; r += c; }
+        else if (c == L'\n' || c == L'\r') r += L' ';
+        else r += c;
+    }
+    return r + L"\"";
+}
+static void WxPushState(ICoreWebView2* w) {             // the store button's state: which ids are installed
+    if (!w) return;
+    std::wstring js = L"window.__docsySet&&window.__docsySet([";
+    for (size_t i = 0; i < g_wx.size(); i++) { if (i) js += L","; js += WxJsStr(g_wx[i].id); }
+    js += L"])";
+    w->ExecuteScript(js.c_str(), nullptr);
+}
+static void WxNotifyTabs() { for (auto& t : g_wt) if (t.web) WxPushState(t.web.Get()); }
+static void WxNotifyFail(const std::wstring& msg) {
+    std::wstring js = L"window.__docsyFail&&window.__docsyFail(" + WxJsStr(msg) + L")";
+    for (auto& t : g_wt) if (t.web) t.web->ExecuteScript(js.c_str(), nullptr);
+}
+static void WxInstall(const std::wstring& id) {
+    if (!WxIsExtId(id)) return;
+    if (!g_wxOk) {
+        WxNotifyFail(L"This WebView2 runtime is too old for extensions.");
+        MessageBoxW(g.main, L"Extensions need a newer WebView2 runtime. Update Microsoft Edge / WebView2 and try again.",
+                    L"Docsy", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (WxFind(id) >= 0) { WxNotifyTabs(); return; }
+    for (auto& s : g_wxInstalling) if (s == id) return;
+    g_wxInstalling.push_back(id);
+    std::wstring ver = g_webVer.empty() ? std::wstring(L"131.0.0.0") : g_webVer;
+    std::wstring root = WxRoot();
+    HWND main = g.main;
+    std::thread([id, ver, root, main]() {
+        WxJob* j = new WxJob; j->id = id;
+        WxFetch(*j, ver, root);
+        if (!PostMessageW(main, WM_APP + 5, 0, (LPARAM)j)) delete j;
+    }).detach();
+}
+static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the UI thread
+    std::unique_ptr<WxJob> j(job);
+    for (size_t i = 0; i < g_wxInstalling.size(); i++) if (g_wxInstalling[i] == j->id) { g_wxInstalling.erase(g_wxInstalling.begin() + i); break; }
+    if (!j->ok) { WxNotifyFail(j->err); return; }
+    std::wstring id = j->id, dir = j->dir;
+    WxAddFolder(dir, [id, dir](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
+        if (FAILED(hr) || !ext) { WxNotifyFail(L"WebView2 could not load this extension."); WxRmTree(dir); return; }
+        int old = WxFind(id);
+        if (old >= 0) { if (g_wx[old].icon) delete g_wx[old].icon; g_wx.erase(g_wx.begin() + old); }
+        WebExt e; e.id = id; e.dir = dir; e.ext = ext;
+        LPWSTR rid = nullptr;
+        if (SUCCEEDED(ext->get_Id(&rid)) && rid) { e.id = rid; CoTaskMemFree(rid); }
+        BOOL en = TRUE; if (SUCCEEDED(ext->get_IsEnabled(&en))) e.enabled = en != FALSE;
+        WxLoadInfo(e);
+        g_wx.push_back(std::move(e));
+        std::sort(g_wx.begin(), g_wx.end(), [](const WebExt& a, const WebExt& b) { return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
+        if (g_webOn) WebBarLayout();
+        WebRepaintChrome();
+        WxNotifyTabs();
+    });
+}
+static void WxRemove(const std::wstring& id) {
+    int i = WxFind(id); if (i < 0) return;
+    wrl::ComPtr<ICoreWebView2BrowserExtension> ext = g_wx[i].ext;
+    auto fin = [id]() {
+        int k = WxFind(id); if (k < 0) return;
+        std::wstring dir = g_wx[k].dir;
+        if (g_wx[k].icon) { delete g_wx[k].icon; g_wx[k].icon = nullptr; }
+        g_wx.erase(g_wx.begin() + k);
+        WxRmTree(dir);
+        if (g_webOn) WebBarLayout();
+        WebRepaintChrome();
+        WxNotifyTabs();
+    };
+    if (!ext) { fin(); return; }
+    HRESULT hr = ext->Remove(Microsoft::WRL::Callback<ICoreWebView2BrowserExtensionRemoveCompletedHandler>(
+        [fin](HRESULT) -> HRESULT { fin(); return S_OK; }).Get());
+    if (FAILED(hr)) fin();
+}
+static void WxSetEnabled(const std::wstring& id, bool on) {
+    int i = WxFind(id); if (i < 0 || !g_wx[i].ext) return;
+    g_wx[i].ext->Enable(on ? TRUE : FALSE, Microsoft::WRL::Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>(
+        [id, on](HRESULT hr) -> HRESULT {
+            int k = WxFind(id);
+            if (SUCCEEDED(hr) && k >= 0) { g_wx[k].enabled = on; if (g_webOn) WebBarLayout(); WebRepaintChrome(); }
+            return S_OK;
+        }).Get());
+}
+
+// the store page's floating button: the store's own insists on Chrome, so this one sits over it
+static const wchar_t* const kWxStoreScript = LR"JS((function(){
+  var h=location.hostname;
+  if(window.top!==window)return;
+  if(!(h==='chromewebstore.google.com'||(h==='chrome.google.com'&&location.pathname.indexOf('/webstore')===0)))return;
+  var have=[],btn=null,busy=null,failed=false;
+  function cur(){var m=location.pathname.match(/\/detail\/(?:[^\/]+\/)?([a-p]{32})(?:[\/?#]|$)/);return m?m[1]:null;}
+  function paint(){
+    var id=cur();
+    if(!id){if(btn){btn.remove();btn=null;}return;}
+    if(!btn){
+      btn=document.createElement('button');btn.type='button';
+      btn.style.cssText='position:fixed;top:76px;right:28px;z-index:2147483647;padding:11px 20px;border:0;border-radius:999px;font:600 14px/1 "Segoe UI",system-ui,sans-serif;color:#fff;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+      btn.addEventListener('click',function(){
+        var i=cur();if(!i||have.indexOf(i)>=0||busy)return;
+        failed=false;busy=i;paint();
+        try{window.chrome.webview.postMessage('docsy-install:'+i);}catch(e){busy=null;failed=true;paint();}
+      });
+      (document.body||document.documentElement).appendChild(btn);
+    }
+    var done=have.indexOf(id)>=0,work=busy===id;
+    btn.textContent=done?'Added to Docsy \u2713':work?'Adding\u2026':failed?'Couldn\u2019t add \u2014 try again':'Add to Docsy';
+    btn.style.background=done?'#3a3a3c':failed?'#c0392b':'#22bb56';
+    btn.style.cursor=(done||work)?'default':'pointer';
+  }
+  window.__docsySet=function(l){have=l||[];busy=null;failed=false;paint();};
+  window.__docsyFail=function(){busy=null;failed=true;paint();};
+  setInterval(paint,500);
+  document.addEventListener('DOMContentLoaded',paint);
+})();)JS";
+
+// ---- the popup window ----
+static struct WxPopState {
+    HWND h = nullptr;
+    wrl::ComPtr<ICoreWebView2Controller> ctr;
+    wrl::ComPtr<ICoreWebView2> web;
+    int anchorR = 0, anchorB = 0, cssW = 300, cssH = 100;
+    std::wstring extId;
+} g_wp;
+static std::wstring g_wpLastExt; static ULONGLONG g_wpLastClose = 0;
+
+static void WxPopClose() {
+    HWND h = g_wp.h;
+    if (!h) return;
+    g_wp.h = nullptr;                                   // first: nothing re-enters
+    KillTimer(h, 1);
+    g_wpLastExt = g_wp.extId; g_wpLastClose = GetTickCount64();
+    if (g_wp.ctr) g_wp.ctr->Close();
+    g_wp.ctr.Reset(); g_wp.web.Reset();
+    DestroyWindow(h);
+}
+static void WxPopResize(int cw, int ch) {
+    if (!g_wp.h) return;
+    cw = std::clamp(cw, 25, 800); ch = std::clamp(ch, 25, 600);   // Chrome's own limits
+    if (cw == g_wp.cssW && ch == g_wp.cssH) return;
+    g_wp.cssW = cw; g_wp.cssH = ch;
+    int w = (int)std::lround(cw * g.dpi), hh = (int)std::lround(ch * g.dpi);
+    MONITORINFO mi{ sizeof mi };
+    GetMonitorInfoW(MonitorFromWindow(g_wp.h, MONITOR_DEFAULTTONEAREST), &mi);
+    RECT wa = mi.rcWork;
+    int x = std::clamp(g_wp.anchorR - w, (int)wa.left, std::max((int)wa.left, (int)wa.right - w));
+    int y = g_wp.anchorB;
+    if (y + hh > wa.bottom) hh = std::max(50, (int)wa.bottom - y);
+    SetWindowPos(g_wp.h, nullptr, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+static LRESULT CALLBACK WxPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_ERASEBKGND: return 1;
+    case WM_SIZE:
+        if (g_wp.h == h && g_wp.ctr) { RECT rc; GetClientRect(h, &rc); g_wp.ctr->put_Bounds(rc); }
+        return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE && g_wp.h == h) PostMessageW(h, WM_CLOSE, 0, 0);   // focus left: it goes, like Chrome's
+        return 0;
+    case WM_TIMER:
+        if (wp == 1 && g_wp.h == h && g_wp.web) {         // the page's size, polled: popups grow as they render
+            g_wp.web->ExecuteScript(
+                L"(function(){var d=document.documentElement,b=document.body;"
+                L"return [Math.ceil(Math.max(d.scrollWidth,b?b.scrollWidth:0)),Math.ceil(Math.max(d.scrollHeight,b?b.scrollHeight:0))];})()",
+                Microsoft::WRL::Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+                    [h](HRESULT hr, LPCWSTR json) -> HRESULT {
+                        if (FAILED(hr) || !json || g_wp.h != h) return S_OK;
+                        int w = 0, hh = 0;
+                        if (swscanf_s(json, L"[%d,%d]", &w, &hh) == 2) WxPopResize(w, hh);
+                        return S_OK;
+                    }).Get());
+        }
+        return 0;
+    case WM_CLOSE: if (g_wp.h == h) WxPopClose(); else DestroyWindow(h); return 0;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+static void WxOpenPopup(int ei, RECT anchor) {            // anchor: the icon, screen coords
+    if (ei < 0 || ei >= (int)g_wx.size() || !g_wvEnv) return;
+    const WebExt& e = g_wx[ei];
+    if (e.popup.empty()) return;
+    if (g_wp.h) { bool same = g_wp.extId == e.id; WxPopClose(); if (same) return; }
+    else if (g_wpLastExt == e.id && GetTickCount64() - g_wpLastClose < 400) return;   // the click that dismissed it
+    g_wp.extId = e.id;
+    g_wp.cssW = 300; g_wp.cssH = 100;
+    g_wp.anchorR = anchor.right; g_wp.anchorB = anchor.bottom + (int)(4 * g.dpi);
+    int w = (int)std::lround(300 * g.dpi), hh = (int)std::lround(100 * g.dpi);
+    MONITORINFO mi{ sizeof mi };
+    GetMonitorInfoW(MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST), &mi);
+    int x = std::clamp(g_wp.anchorR - w, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - w));
+    HWND hw = CreateWindowExW(WS_EX_TOOLWINDOW, L"DocsyExtPopup", L"", WS_POPUP, x, g_wp.anchorB, w, hh, g.main, nullptr, g.hinst, nullptr);
+    if (!hw) return;
+    g_wp.h = hw;
+    ShowWindow(hw, SW_SHOW);
+    std::wstring url = WxExtUrl(e, e.popup);
+    g_wvEnv->CreateCoreWebView2Controller(hw,
+        Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+            [hw, url](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
+                if (FAILED(hr) || !c || g_wp.h != hw) { if (c) c->Close(); if (g_wp.h == hw) WxPopClose(); return S_OK; }
+                g_wp.ctr = c;
+                c->get_CoreWebView2(&g_wp.web);
+                RECT rc; GetClientRect(hw, &rc); c->put_Bounds(rc); c->put_IsVisible(TRUE);
+                EventRegistrationToken tk;
+                g_wp.web->add_NewWindowRequested(                     // a link out of a popup opens as a tab
+                    Microsoft::WRL::Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+                        [hw](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* a) -> HRESULT {
+                            a->put_Handled(TRUE);
+                            LPWSTR u = nullptr;
+                            if (SUCCEEDED(a->get_Uri(&u)) && u) { std::wstring s = u; CoTaskMemFree(u); WebNewTab(s, true); }
+                            PostMessageW(hw, WM_CLOSE, 0, 0);
+                            return S_OK;
+                        }).Get(), &tk);
+                g_wp.web->add_WindowCloseRequested(                   // window.close() in the popup
+                    Microsoft::WRL::Callback<ICoreWebView2WindowCloseRequestedEventHandler>(
+                        [hw](ICoreWebView2*, IUnknown*) -> HRESULT { PostMessageW(hw, WM_CLOSE, 0, 0); return S_OK; }).Get(), &tk);
+                g_wp.web->Navigate(url.c_str());
+                SetTimer(hw, 1, 250, nullptr);
+                return S_OK;
+            }).Get());
+}
+
+// ---- toolbar geometry + hits ----
+static int WxHit(POINT p) {
+    for (size_t k = 0; k < g_wxR.size(); k++)
+        if (p.x >= g_wxR[k].left && p.x < g_wxR[k].right && p.y >= g_wxR[k].top && p.y < g_wxR[k].bottom) return (int)k;
+    return -1;
+}
+static void WxOpenPopupFor(int k) {
+    if (k < 0 || k >= (int)g_wxR.size() || !g_wstrip) return;
+    RECT r = g_wxR[k];
+    POINT a{ r.left, r.top }, b{ r.right, r.bottom };
+    ClientToScreen(g_wstrip, &a); ClientToScreen(g_wstrip, &b);
+    WxOpenPopup(g_wxIdx[k], RECT{ a.x, a.y, b.x, b.y });
+}
+static void WxOpenOptions(int ei) {
+    if (ei < 0 || ei >= (int)g_wx.size() || g_wx[ei].options.empty()) return;
+    WebNewTab(WxExtUrl(g_wx[ei], g_wx[ei].options), true);
+}
+
+static void WxMenu() {
+    if (!g_wstrip) return;
+    POINT pt{ g_wbR[WB_EXT].left, g_wbR[WB_EXT].bottom };
+    ClientToScreen(g_wstrip, &pt);
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+    WebTab* t = WebCur();
+    std::wstring page = t ? WxStoreIdOf(t->url) : L"";
+    if (!page.empty() && WxFind(page) < 0) {
+        AppendMenuW(m, MF_STRING, 2, L"Add this extension to Docsy");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    }
+    if (g_wx.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"No extensions installed");
+    for (size_t i = 0; i < g_wx.size(); i++) {
+        const WebExt& e = g_wx[i];
+        HMENU sub = CreatePopupMenu();
+        UINT base = 1000 + (UINT)i * 10;
+        if (!e.popup.empty()) AppendMenuW(sub, MF_STRING | (e.enabled ? 0 : MF_GRAYED), base, L"Open");
+        if (!e.options.empty()) AppendMenuW(sub, MF_STRING | (e.enabled ? 0 : MF_GRAYED), base + 2, L"Options");
+        AppendMenuW(sub, MF_STRING | (e.ext ? 0 : MF_GRAYED), base + 1, e.enabled ? L"Turn off" : L"Turn on");
+        AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(sub, MF_STRING, base + 3, L"Remove from Docsy");
+        std::wstring label;
+        for (wchar_t c : e.name) { label += c; if (c == L'&') label += c; }
+        if (!e.enabled) label += L"  (off)";
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, label.c_str());
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, 1, L"Get extensions from the Chrome Web Store");
+    SetForegroundWindow(g.main);
+    int c = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.main, nullptr);
+    DestroyMenu(m);
+    if (c == 1) { WebNewTab(L"https://chromewebstore.google.com/category/extensions", true); return; }
+    if (c == 2) { WxInstall(page); return; }
+    if (c >= 1000) {
+        int i = (c - 1000) / 10, k = (c - 1000) % 10;
+        if (i < 0 || i >= (int)g_wx.size()) return;
+        std::wstring id = g_wx[i].id;
+        if (k == 0) {
+            RECT r = g_wbR[WB_EXT];
+            POINT a{ r.left, r.top }, b{ r.right, r.bottom };
+            ClientToScreen(g_wstrip, &a); ClientToScreen(g_wstrip, &b);
+            WxOpenPopup(i, RECT{ a.x, a.y, b.x, b.y });
+        } else if (k == 1) WxSetEnabled(id, !g_wx[i].enabled);
+        else if (k == 2) WxOpenOptions(i);
+        else if (k == 3) WxRemove(id);
+    }
+}
+
+
 static bool WebBtnEnabled(int id) {
     WebTab* t = WebCur();
     switch (id) {
     case WB_BACK: return t && t->canBack;
     case WB_FWD: return t && t->canFwd;
-    case WB_RELOAD: case WB_READER: case WB_NEWTAB: case WB_MENU: case WB_SIDE: return true;
+    case WB_RELOAD: case WB_READER: case WB_NEWTAB: case WB_MENU: case WB_SIDE: case WB_EXT: return true;
     }
     return false;
 }
@@ -9382,7 +10460,7 @@ static void WebStripPaint(HDC dc, int w, int h) {
     SetBkMode(dc, TRANSPARENT);
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr
+        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8"
     };                                                 // reload rides the field, the sidebar icon is drawn
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
@@ -9397,6 +10475,28 @@ static void WebStripPaint(HDC dc, int w, int h) {
         SetTextColor(dc, ink);
         RECT rc = g_wbR[i];
         DrawTextW(dc, gl[i], -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    for (size_t k = 0; k < g_wxR.size() && k < g_wxIdx.size(); k++) {   // the extensions' toolbar icons
+        const WebExt& e = g_wx[g_wxIdx[k]];
+        RECT r = g_wxR[k];
+        bool hot = (int)k == g_wxHot, pr = hot && g_wxPress == (int)k;
+        if (hot || pr) WebTile(dc, r, pr ? wvb::Pressed : wvb::Hover);
+        int is = (int)std::lround(18 * g.dpi);
+        int ix = (int)(r.left + r.right - is) / 2, iy = (int)(r.top + r.bottom - is) / 2;
+        Gdiplus::Graphics gx(dc);
+        gx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        if (e.icon) {
+            gx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            gx.DrawImage(e.icon, ix, iy, is, is);
+        } else {                                       // no icon: the first letter in a disc
+            Gdiplus::SolidBrush db(Gdiplus::Color(255, 0x55, 0x55, 0x58));
+            gx.FillEllipse(&db, ix, iy, is, is);
+            RECT lr{ ix, iy, ix + is, iy + is };
+            wchar_t ch[2] = { e.name.empty() ? L'?' : (wchar_t)towupper(e.name[0]), 0 };
+            SelectObject(dc, g_webEditFont ? g_webEditFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+            SetTextColor(dc, wvb::Ink);
+            DrawTextW(dc, ch, 1, &lr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
     }
     // the address field: a capsule
     float capR = (float)((g_webOmni.bottom - g_webOmni.top) / 2) / (float)g.dpi;
@@ -9508,23 +10608,27 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        int hot = WebNavHit(p);
-        if (hot != g.tbTabHot) {
-            g.tbTabHot = hot;
-            if (hot >= 0) TrackLeave(h);
+        int hot = WebNavHit(p), xh = WxHit(p);
+        if (hot != g.tbTabHot || xh != g_wxHot) {
+            g.tbTabHot = hot; g_wxHot = xh;
+            if (hot >= 0 || xh >= 0) TrackLeave(h);
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.tbTabHot != -1) { g.tbTabHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (g.tbTabHot != -1 || g_wxHot != -1) { g.tbTabHot = -1; g_wxHot = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        int hit = WebNavHit(p);
+        int hit = WebNavHit(p), xh = WxHit(p);
         if (hit >= 0) {                            // capture held: the toolbar's press story
             SetCapture(h);
             g.tbPressed = hit;
+            InvalidateRect(h, nullptr, FALSE);
+        } else if (xh >= 0) {                      // an extension's icon: same press story
+            SetCapture(h);
+            g_wxPress = xh;
             InvalidateRect(h, nullptr, FALSE);
         } else if (PtInRect(&g_webOmni, p) && g_wedit && !g_webFail) {
             SetFocus(g_wedit);                     // a click on the pill focuses the URL
@@ -9533,6 +10637,14 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_LBUTTONUP: {
+        if (g_wxPress >= 0) {
+            int pr = g_wxPress; g_wxPress = -1;
+            if (GetCapture() == h) ReleaseCapture();
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            InvalidateRect(h, nullptr, FALSE);
+            if (WxHit(p) == pr) WxOpenPopupFor(pr);
+            return 0;
+        }
         int was = g.tbPressed;
         if (was >= 0) {
             g.tbPressed = -1;
@@ -9550,7 +10662,7 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CAPTURECHANGED:
-        if (g.tbPressed >= 0) { g.tbPressed = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (g.tbPressed >= 0 || g_wxPress >= 0) { g.tbPressed = -1; g_wxPress = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_CTLCOLOREDIT:                          // the omnibox edit is this window's child
         return (LRESULT)WebEditColors((HDC)wp, (HWND)lp);
@@ -9559,7 +10671,8 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             int hit = WebNavHit(p);
             bool pill = PtInRect(&g_webOmni, p);
-            SetCursor(LoadCursorW(nullptr, (hit >= 0 && hit != WB_RELOAD) ? IDC_HAND : (pill ? IDC_IBEAM : IDC_ARROW)));
+            bool xi = WxHit(p) >= 0;
+            SetCursor(LoadCursorW(nullptr, ((hit >= 0 && hit != WB_RELOAD) || xi) ? IDC_HAND : (pill ? IDC_IBEAM : IDC_ARROW)));
             return TRUE;
         }
         break;
@@ -9584,7 +10697,24 @@ static void WebBarLayout() {
     g_wbR[WB_MENU] = { mx - d, cy, mx, cy + d };
     mx -= pitch; g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d };
     g_wbR[WB_READER] = { 0, 0, 0, 0 };             // the PDF button lives on the top toolbar now
-    int lo = (int)g_wbR[WB_FWD].right + TABF(18), hi = (int)g_wbR[WB_NEWTAB].left - TABF(18);
+    int leftEdge = (int)g_wbR[WB_NEWTAB].left;     // the puzzle button, then each extension's icon, leftwards
+    g_wxR.clear(); g_wxIdx.clear();
+    if (g_wxOk) {
+        mx -= pitch;
+        g_wbR[WB_EXT] = { mx - d, cy, mx, cy + d };
+        leftEdge = (int)g_wbR[WB_EXT].left;
+        std::vector<int> vis;
+        for (int i = 0; i < (int)g_wx.size() && vis.size() < 5; i++)
+            if (g_wx[i].enabled && !g_wx[i].popup.empty()) vis.push_back(i);
+        int n = (int)vis.size();
+        for (int k = 0; k < n; k++) {
+            int right = mx - pitch - (n - 1 - k) * pitch;
+            g_wxR.push_back(RECT{ right - d, cy, right, cy + d });
+            g_wxIdx.push_back(vis[k]);
+        }
+        if (n) leftEdge = (int)g_wxR[0].left;
+    } else g_wbR[WB_EXT] = { 0, 0, 0, 0 };
+    int lo = (int)g_wbR[WB_FWD].right + TABF(18), hi = leftEdge - TABF(18);
     int pw = max(10, min(hi - lo, TABF(560)));     // the capsule: centered in the window, capped
     int pl = std::clamp((int)r.right / 2 - pw / 2, lo, max(lo, hi - pw));
     g_webOmni = { pl, py, pl + pw, py + ph };
@@ -9733,6 +10863,7 @@ static void WebBarClick(int id) {
     WebTab* t = WebCur();
     switch (id) {
     case WB_READER: WebToggle(false); return;
+    case WB_EXT: WxMenu(); return;
     case WB_SIDE:
         g_webSide = !g_webSide;
         if (g.side) ShowWindow(g.side, g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE);
@@ -9938,6 +11069,21 @@ static void WebEnsureController(int i) {
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
                     c2->put_DefaultBackgroundColor({ 255, 0x1c, 0x1c, 0x1c });   // the card's dark,
                                                                                     // not Chromium's white
+                t->web->AddScriptToExecuteOnDocumentCreated(kWxStoreScript, nullptr);   // the store's "Add to Docsy"
+                {   EventRegistrationToken tkm;
+                    t->web->add_WebMessageReceived(
+                        Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                            [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* a) -> HRESULT {
+                                LPWSTR src = nullptr; std::wstring from;
+                                if (SUCCEEDED(a->get_Source(&src)) && src) { from = src; CoTaskMemFree(src); }
+                                if (!WxStoreHost(from, nullptr)) return S_OK;      // only the store may ask
+                                LPWSTR msg = nullptr;
+                                if (SUCCEEDED(a->TryGetWebMessageAsString(&msg)) && msg) {
+                                    std::wstring m = msg; CoTaskMemFree(msg);
+                                    if (m.rfind(L"docsy-install:", 0) == 0) WxInstall(m.substr(14));
+                                }
+                                return S_OK;
+                            }).Get(), &tkm); }
                 t->web->add_NavigationStarting(
                     Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
                         [id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*) -> HRESULT {
@@ -9953,6 +11099,7 @@ static void WebEnsureController(int i) {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
                             t->loading = false;
+                            WxPushState(t->web.Get());                 // the store button learns what is installed
                             t->captureDue = GetTickCount64() + 1200;   // let the page settle, then
                             WebEnsurePump();                           // the rail gets its thumb
                             WebHistorySync(id);
@@ -9994,8 +11141,10 @@ static void WebEnsureController(int i) {
                                  && g_wt[g_wtCur].id == id ? TRUE : FALSE);
                 WebPlace(); WebRepaintChrome();
                 if (t && !t->pending.empty()) {    // a tab born before its engine navigates
-                    t->web->Navigate(t->pending.c_str());   // the moment it exists
-                    t->pending.clear();
+                    if (g_wxReady) {                        // the moment it exists - once the extensions
+                        t->web->Navigate(t->pending.c_str());   // are in, so content scripts hit page one
+                        t->pending.clear();
+                    } else WxInit();
                 }
                 return S_OK;
             }).Get());
@@ -10018,7 +11167,10 @@ static void WebEnsureEnv() {
     std::wstring udf = (la ? std::wstring(la) : std::wstring(L".")) + L"\\Docsy\\WebView2";
     if (la) CoTaskMemFree(la);
     g_wvEnv = nullptr;
-    CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), nullptr,
+    auto envOpts = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();   // extensions on
+    wrl::ComPtr<ICoreWebView2EnvironmentOptions6> envOpts6;
+    if (envOpts && SUCCEEDED(envOpts.As(&envOpts6)) && envOpts6) envOpts6->put_AreBrowserExtensionsEnabled(TRUE);
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), envOpts.Get(),
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
                 if (FAILED(hr) || !env) { g_webFail = true; WebRepaintChrome(); return S_OK; }
@@ -10126,6 +11278,7 @@ static void WebToggle(bool on) {
         g_wtoolHot = g_wtoolDown = false;
         for (auto& w : g_wt) if (w.ctr) w.ctr->put_IsVisible(FALSE);
         if (g_wedit) { ShowWindow(g_wedit, SW_HIDE); SetFocus(g.main); }
+        WxPopClose();
     }
     LayoutMain();                                  // the strip band appears or collapses
     WebBarLayout();
@@ -10136,6 +11289,9 @@ static void WebToggle(bool on) {
 }
 
 static void WebShutdown() {
+    WxPopClose();
+    for (auto& e : g_wx) { if (e.icon) { delete e.icon; e.icon = nullptr; } e.ext.Reset(); }
+    g_wx.clear(); g_wxProf.Reset();
     for (auto& t : g_wt) {
         if (t.ctr) t.ctr->Close();
         t.ctr.Reset(); t.web.Reset();
@@ -13141,6 +14297,7 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;                                 // (buffered, so an unchanged band reblits
                                                // identically and cannot strobe)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
+    case WM_APP + 5: WxInstallDone((WxJob*)lp); return 0;   // an extension download finished
     case WM_APP + 3: {                        // the drop queue's drain: one document per
         if (!g_dropQ.empty()) {               // message, so the window paints between loads
             std::wstring p = std::move(g_dropQ.front());
@@ -13499,6 +14656,14 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     wtc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wtc.lpszClassName = L"DocsyWebTool";
     RegisterClassExW(&wtc);
+
+    WNDCLASSEXW xpc{ sizeof xpc };                  // an extension's popup window
+    xpc.style = CS_DROPSHADOW;
+    xpc.lpfnWndProc = WxPopProc; xpc.hInstance = hi;
+    xpc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    xpc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    xpc.lpszClassName = L"DocsyExtPopup";
+    RegisterClassExW(&xpc);
 
     WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Safari toolbar (top): the
     wbc.style = CS_DBLCLKS;                         // logo, back/forward, the search pill,
