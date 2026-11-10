@@ -248,9 +248,17 @@ static void SnapClean(DocState& D) {
     D.savedProt = D.prot;
     D.savedPflip = D.pflip;
 }
+static bool FRectEq(const FRect& a, const FRect& b) {
+    return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+static bool FVecEq(const std::vector<FRect>& a, const std::vector<FRect>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) if (!FRectEq(a[i], b[i])) return false;
+    return true;
+}
 static bool AnnotEq(const Annot& a, const Annot& b) {
     return a.type == b.type && a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h
-        && a.lines == b.lines && a.ix == b.ix && a.iy == b.iy
+        && FVecEq(a.lines, b.lines) && a.ix == b.ix && a.iy == b.iy
         && a.width == b.width && a.fsize == b.fsize && a.color == b.color
         && a.alpha == b.alpha && a.text == b.text && a.fill == b.fill
         && a.fillA == b.fillA && a.font == b.font && a.bold == b.bold
