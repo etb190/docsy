@@ -1,5 +1,5 @@
 import sys
-n = 3
+n = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 objs = [None] * (3 + 2 * n)
 kids = " ".join(f"{4 + 2 * i} 0 R" for i in range(n))
 objs[0] = "<< /Type /Catalog /Pages 2 0 R >>"

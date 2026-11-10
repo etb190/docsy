@@ -2402,7 +2402,10 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
     for (int i = 0; i < D.n && !failed; i++) {
         std::vector<BYTE> jpg;
         if (!pageJpeg(i, jpg)) { failed = true; break; }
-        float wpt = D.pw[i] * 2.0f, hpt = D.ph[i] * 2.0f;   // the 2x raster's DIP size, PDF points
+        // Windows.Data.Pdf's Size() is DIPs (96/inch); the page box wants PDF
+        // points (72/inch) - x0.75 lands the saved page at its true print size
+        // (the old x2 wrote DIPs as points and bloated every page by a third)
+        float wpt = D.pw[i] * 0.75f, hpt = D.ph[i] * 0.75f;
         char hb2[256];
         pageOff[i] = pos;
         snprintf(hb2, 256, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents %d 0 R /Resources << /XObject << /Im %d 0 R >> >> >>\nendobj\n",

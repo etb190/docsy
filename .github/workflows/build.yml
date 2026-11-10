@@ -48,6 +48,16 @@ jobs:
           "save exit code: $($sv.ExitCode)" | Tee-Object -Append shot.log
           $ro = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-reopen.png","$PWD\saved.pdf" -Wait -PassThru
           "reopen exit code: $($ro.ExitCode)" | Tee-Object -Append shot.log
+          python ci/make_sample.py big.pdf 30
+          $bg = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-big.png","$PWD\big.pdf",'annot=demo',"save=$PWD\saved-big.pdf" -Wait -PassThru
+          "big save exit code: $($bg.ExitCode)" | Tee-Object -Append shot.log
+          $bro = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-big-reopen.png","$PWD\saved-big.pdf" -Wait -PassThru
+          "big reopen exit code: $($bro.ExitCode)" | Tee-Object -Append shot.log
+          $lock = [System.IO.File]::Open("$PWD\saved.pdf",'Open','Read','Read')
+          $lk = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-locked.png","$PWD\sample.pdf",'annot=demo',"save=$PWD\saved.pdf" -Wait -PassThru
+          "locked save exit code: $($lk.ExitCode)" | Tee-Object -Append shot.log
+          $lock.Close()
+          "saved.pdf still good: $((Get-Item "$PWD\saved.pdf").Length -gt 100000)" | Tee-Object -Append shot.log
           if (!(Test-Path preview.png)) { exit 1 }
       - name: Publish
         if: always()
@@ -56,7 +66,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-split2.png preview-save.png preview-reopen.png saved.pdf build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-split2.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log
