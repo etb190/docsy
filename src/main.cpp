@@ -1055,6 +1055,7 @@ static void WebFailCard(HDC dc, int w, int h);   // the no-engine card in the vi
 static void WebViewClick(POINT p);        // the fail card's download button
 static void WebRepaintChrome();           // nav + tabs + footer + rail in one call
 static void WebCardRect(RECT& c);         // the rounded card the webview rides in
+static void WebCardPaint(HDC dc, int w, int h);   // the card's field, face and ring
 
 // Radon's own palette (radon-browser's Cube.UI dark theme): one Mica sheet
 // under the nav row and the tab row, the #282828 search pill, the #1c1c1c
@@ -7750,28 +7751,9 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         if (g_webOn) {                       // the browser owns the card: the view paints the
-            RECT vr{ 0, 0, g.cw, g.ch };     // shared field, the rounded card's face and
-            FillRect(dc, &vr, GrainBrush(1));   // ring; the controller HWND renders the page,
-            RECT c; WebCardRect(c);          // or the no-engine card when the runtime is missing
-            Gdiplus::Graphics gs(dc);
-            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            float rr = 8.0f * (float)g.dpi;
-            Gdiplus::GraphicsPath cp;
-            cp.AddArc((Gdiplus::REAL)c.left, (Gdiplus::REAL)c.top, 2 * rr, 2 * rr, 180, 90);
-            cp.AddArc((Gdiplus::REAL)(c.right - 2 * rr), (Gdiplus::REAL)c.top, 2 * rr, 2 * rr, 270, 90);
-            cp.AddArc((Gdiplus::REAL)(c.right - 2 * rr), (Gdiplus::REAL)(c.bottom - 2 * rr), 2 * rr, 2 * rr, 0, 90);
-            cp.AddArc((Gdiplus::REAL)c.left, (Gdiplus::REAL)(c.bottom - 2 * rr), 2 * rr, 2 * rr, 90, 90);
-            cp.CloseFigure();
-            Gdiplus::SolidBrush face(Gdiplus::Color(255, GetRValue(wvb::Card),
-                                                    GetGValue(wvb::Card), GetBValue(wvb::Card)));
-            gs.FillPath(&face, &cp);         // the face shows through the corner notches
-            Gdiplus::Pen ring(Gdiplus::Color(255, GetRValue(wvb::Border),
-                                             GetGValue(wvb::Border), GetBValue(wvb::Border)),
-                              1.0f);
-            gs.DrawPath(&ring, &cp);         // Radon's MicaBorder ring
-            if (g_webFail) WebFailCard(dc, g.cw, g.ch);
-            EndPaint(h, &ps);
-            return 0;
+            WebCardPaint(dc, g.cw, g.ch);    // shared field, the rounded card's face and
+            EndPaint(h, &ps);                // ring; the controller HWND renders the page,
+            return 0;                        // or the no-engine card when the runtime is missing
         }
         if (g.cw > 0 && g.ch > 0) {
             EnsureBack(dc, g.cw, g.ch);
@@ -9894,6 +9876,32 @@ static void WebCardRect(RECT& c) {
     int m = (int)(4 * g.dpi);
     int x = PaneX0(false) + CardX(false), cw2 = CardW(false);
     c = { x + m, m, x + cw2 - m, g.ch - m };
+}
+
+// the content card's whole paint - field, rounded #1c1c1c face, MicaBorder
+// ring, and the no-engine card when the runtime is missing. One body for the
+// live view's WM_PAINT and the shot composite, so the two can never drift.
+static void WebCardPaint(HDC dc, int w, int h) {
+    RECT vr{ 0, 0, w, h };
+    FillRect(dc, &vr, GrainBrush(1));
+    RECT c; WebCardRect(c);
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    float rr = 8.0f * (float)g.dpi;
+    Gdiplus::GraphicsPath cp;
+    cp.AddArc((Gdiplus::REAL)c.left, (Gdiplus::REAL)c.top, 2 * rr, 2 * rr, 180, 90);
+    cp.AddArc((Gdiplus::REAL)(c.right - 2 * rr), (Gdiplus::REAL)c.top, 2 * rr, 2 * rr, 270, 90);
+    cp.AddArc((Gdiplus::REAL)(c.right - 2 * rr), (Gdiplus::REAL)(c.bottom - 2 * rr), 2 * rr, 2 * rr, 0, 90);
+    cp.AddArc((Gdiplus::REAL)c.left, (Gdiplus::REAL)(c.bottom - 2 * rr), 2 * rr, 2 * rr, 90, 90);
+    cp.CloseFigure();
+    Gdiplus::SolidBrush face(Gdiplus::Color(255, GetRValue(wvb::Card),
+                                            GetGValue(wvb::Card), GetBValue(wvb::Card)));
+    gs.FillPath(&face, &cp);         // the face shows through the corner notches
+    Gdiplus::Pen ring(Gdiplus::Color(255, GetRValue(wvb::Border),
+                                     GetGValue(wvb::Border), GetBValue(wvb::Border)),
+                      1.0f);
+    gs.DrawPath(&ring, &cp);         // Radon's MicaBorder ring
+    if (g_webFail) WebFailCard(dc, w, h);
 }
 
 static void WebPlace() {
@@ -13084,18 +13092,21 @@ static int Shot(const wchar_t* out, int w, int h) {
     HBITMAP b = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
     if (!b) return 4;
     HGDIOBJ old = SelectObject(dc, b);
-    int sw = (g.sideOn && DVF().n && !g.full) ? sd.w : 0;
-    int rw = RW();                                  // the rail's column rides the shot too
-    int cap = CAP(), tb = TBH(), sh = SBH();
-    int ch = max(1, h - cap - tb - sh);
+    int sw = g_webOn ? sd.w : ((g.sideOn && DVF().n && !g.full) ? sd.w : 0);   // web: the rail
+    int rw = RW();                                  // always shows the OPEN WEB TABS
+    int cap = CAP(), sh = SBH();
+    int tb = g_webOn ? (int)(40 * g.dpi) : TBH();   // browser mode: the tab row's band
+    int ws_ = WEBSTRIPH();                          // the nav row rides between caption and tabs
+    int ch = max(1, h - cap - ws_ - tb - sh);
     // the children render above the caption row and below it, so composite them shifted
     if (sw) {
         HDC m1 = CreateCompatibleDC(dc);
         HBITMAP b1 = CreateCompatibleBitmap(dc, sw, ch);
         HGDIOBJ o1 = SelectObject(m1, b1);
-        SetBrushOrgEx(m1, 0, -(cap + tb), nullptr);      // the pane's grain phase, as on screen
-        SideDraw(m1, sw, ch, 0);
-        BitBlt(dc, 0, cap + tb, sw, ch, m1, 0, 0, SRCCOPY);
+        SetBrushOrgEx(m1, 0, -(cap + ws_ + tb), nullptr);   // the pane's grain phase, as on screen
+        if (g_webOn) WebSideDraw(m1, sw, ch);               // the OPEN WEB TABS rail
+        else SideDraw(m1, sw, ch, 0);
+        BitBlt(dc, 0, cap + ws_ + tb, sw, ch, m1, 0, 0, SRCCOPY);
         SelectObject(m1, o1); DeleteObject(b1); DeleteDC(m1);
     }
     {
@@ -13103,9 +13114,11 @@ static int Shot(const wchar_t* out, int w, int h) {
         int vw = max(1, w - sw - rw);
         HBITMAP b2 = CreateCompatibleBitmap(dc, vw, ch);
         HGDIOBJ o2 = SelectObject(m2, b2);
-        SetBrushOrgEx(m2, -sw - rw, -(cap + tb), nullptr);
-        g_grainPX = -sw - rw; g_grainPY = -(cap + tb);   // the view's grain phase, as on screen
-        if (g.split) {                                  // the split: two per-pane passes, the
+        SetBrushOrgEx(m2, -sw - rw, -(cap + ws_ + tb), nullptr);
+        g_grainPX = -sw - rw; g_grainPY = -(cap + ws_ + tb);   // the view's grain phase, as on screen
+        if (g_webOn) {
+            WebCardPaint(m2, vw, ch);       // the browser's card: field, rounded face, ring
+        } else if (g.split) {               // the split: two per-pane passes, the
             int wA = PaneW(false), xB = PaneX0(true), wB = PaneW(true);   // same paint the live
             for (int pass = 0; pass < 2; pass++) {      // view runs - focused pane LAST
                 bool drawB = g.splitA ? pass == 0 : pass == 1;
@@ -13143,16 +13156,16 @@ static int Shot(const wchar_t* out, int w, int h) {
         if (fd.open) {                                  // the floating Find bar, over its pixels -
             FindDraw(m2, FdRect().left, FdRect().top);  // the same FdRect the live view paints,
         }                                               // so the shot IS the app's composite
-        BitBlt(dc, sw + rw, cap + tb, vw, ch, m2, 0, 0, SRCCOPY);
+        BitBlt(dc, sw + rw, cap + ws_ + tb, vw, ch, m2, 0, 0, SRCCOPY);
         SelectObject(m2, o2); DeleteObject(b2); DeleteDC(m2);
     }
     if (rw > 0) {                                       // the rail strip between sidebar and view
         HDC m5 = CreateCompatibleDC(dc);
         HBITMAP b5 = CreateCompatibleBitmap(dc, rw, ch);
         HGDIOBJ o5 = SelectObject(m5, b5);
-        SetBrushOrgEx(m5, -sw, -(cap + tb), nullptr);
+        SetBrushOrgEx(m5, -sw, -(cap + ws_ + tb), nullptr);
         RailDraw(m5, rw, ch);
-        BitBlt(dc, sw, cap + tb, rw, ch, m5, 0, 0, SRCCOPY);
+        BitBlt(dc, sw, cap + ws_ + tb, rw, ch, m5, 0, 0, SRCCOPY);
         SelectObject(m5, o5); DeleteObject(b5); DeleteDC(m5);
     }
     if (InfoIsOpen() || g_idlgShots) {                  // the Document Info dialog composites
@@ -13179,19 +13192,28 @@ static int Shot(const wchar_t* out, int w, int h) {
         HDC m3 = CreateCompatibleDC(dc);
         HBITMAP b3 = CreateCompatibleBitmap(dc, w, sh);
         HGDIOBJ o3 = SelectObject(m3, b3);
-        SetBrushOrgEx(m3, 0, -(cap + tb + ch), nullptr);
+        SetBrushOrgEx(m3, 0, -(cap + ws_ + tb + ch), nullptr);
         StatusDraw(m3, w, sh);
-        BitBlt(dc, 0, cap + tb + ch, w, sh, m3, 0, 0, SRCCOPY);
+        BitBlt(dc, 0, cap + ws_ + tb + ch, w, sh, m3, 0, 0, SRCCOPY);
         SelectObject(m3, o3); DeleteObject(b3); DeleteDC(m3);
     }
-    if (!g.full && tb > 0) {                   // the toolbar strip under the caption
-        HDC m4 = CreateCompatibleDC(dc);
+    if (!g.full && tb > 0) {                   // the row under the caption: reader tools,
+        HDC m4 = CreateCompatibleDC(dc);       // or - one nav band lower - the tab row
         HBITMAP b4 = CreateCompatibleBitmap(dc, w, tb);
         HGDIOBJ o4 = SelectObject(m4, b4);
-        SetBrushOrgEx(m4, 0, -cap, nullptr);
+        SetBrushOrgEx(m4, 0, -(cap + ws_), nullptr);
         BarDraw(m4, w, tb);
-        BitBlt(dc, 0, cap, w, tb, m4, 0, 0, SRCCOPY);
+        BitBlt(dc, 0, cap + ws_, w, tb, m4, 0, 0, SRCCOPY);
         SelectObject(m4, o4); DeleteObject(b4); DeleteDC(m4);
+    }
+    if (!g.full && ws_ > 0) {                  // the browser's Radon nav row, topmost
+        HDC m8 = CreateCompatibleDC(dc);
+        HBITMAP b8 = CreateCompatibleBitmap(dc, w, ws_);
+        HGDIOBJ o8 = SelectObject(m8, b8);
+        SetBrushOrgEx(m8, 0, -cap, nullptr);
+        WebStripPaint(m8, w, ws_);
+        BitBlt(dc, 0, cap, w, ws_, m8, 0, 0, SRCCOPY);
+        SelectObject(m8, o8); DeleteObject(b8); DeleteDC(m8);
     }
     DrawCaptionBar(dc, w);
     GdiFlush();
@@ -13498,6 +13520,34 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 g_ask.def = 2;
                 AskMeasure();
                 g_askShots = true;
+            }
+        // CI preview seed 11: web=1 dresses the window in the browser mode's
+        // chrome and nothing else - the Radon nav row, the Fluent tab row with
+        // the accent pill on the front tab, and the empty rounded content card.
+        // The two web tabs carry titles but NO controller, so no engine is
+        // created, nothing loads and no network is touched - the frame is as
+        // deterministic as the reader's own (WebToggle itself is barred in shot
+        // mode for exactly that reason: a real tab builds the environment).
+        for (int a = 3; a < argc; a++)
+            if (!wcscmp(argv[a], L"web=1")) {
+                WebTab t1; t1.id = g_wtIds++;
+                t1.url = L"https://duckduckgo.com/"; t1.title = L"Radon Browser";
+                WebTab t2; t2.id = g_wtIds++;
+                t2.url = L"https://github.com/imscythra/radon-browser";
+                t2.title = L"GitHub - imscythra/radon-browser: Radon Browser";
+                g_wt.push_back(std::move(t1)); g_wt.push_back(std::move(t2));
+                g_wtCur = 0;
+                g_webOn = true;
+                if (g_wstrip) ShowWindow(g_wstrip, SW_SHOWNOACTIVATE);
+                LayoutMain();
+                WebBarLayout();
+                if (g_wedit) SetWindowTextW(g_wedit, L"");   // the edit's pixels are not part of
+                                                             // the composite: an empty pill paints
+                                                             // Radon's centered placeholder instead
+                WebSideLayout(); WebSideSync();
+                WebRepaintChrome();
+                if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+                UpdateTitle();
             }
         GetClientRect(g.main, &c);             // the seeds may have resized (split=on grows
         for (int k = 0; k <= DVF().n; k++) if (!SidePump()) break;   // the window like the real

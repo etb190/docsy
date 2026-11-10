@@ -56,6 +56,8 @@ jobs:
           Copy-Item "$PWD\sample.pdf" "$PWD\sample-b.pdf"
           $tb = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-tabs.png","$PWD\sample.pdf",'annot=demo',"tab2=$PWD\sample-b.pdf" -Wait -PassThru
           "tabs exit code: $($tb.ExitCode)" | Tee-Object -Append shot.log
+          $wv = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-web.png","$PWD\sample.pdf",'web=1' -Wait -PassThru
+          "web exit code: $($wv.ExitCode)" | Tee-Object -Append shot.log
           $sv = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-save.png","$PWD\sample.pdf",'annot=demo',"save=$PWD\saved.pdf" -Wait -PassThru
           "save exit code: $($sv.ExitCode)" | Tee-Object -Append shot.log
           $ro = Start-Process .\docsy.exe -ArgumentList '--shot',"$PWD\preview-reopen.png","$PWD\saved.pdf" -Wait -PassThru
@@ -78,7 +80,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log

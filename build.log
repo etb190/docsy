@@ -1,0 +1,16 @@
+main.cpp
+src\main.cpp(3295): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(3299): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(4492): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(4773): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(4863): warning C4805: '!=': unsafe mix of type 'bool' and type 'int' in operation
+src\main.cpp(7263): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(7266): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(7271): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(7291): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(7312): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(7331): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(7358): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+src\main.cpp(7385): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+Generating code
+Finished generating code
