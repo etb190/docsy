@@ -2171,11 +2171,11 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         CloseHandle(fh);                                 // the disk file is nobody's hostage now
         if (got != bytes.size()) throw std::runtime_error("read");
         InMemoryRandomAccessStream st;
-        DataWriter w(st);
-        w.WriteBytes(winrt::array_view<const BYTE>(bytes.data(), bytes.data() + bytes.size()));
-        w.StoreAsync().get();
-        w.FlushAsync().get();
-        w.DetachStream();                                // the writer lets go; the doc keeps the stream
+        DataWriter dw(st);
+        dw.WriteBytes(winrt::array_view<const BYTE>(bytes.data(), bytes.data() + bytes.size()));
+        dw.StoreAsync().get();
+        dw.FlushAsync().get();
+        dw.DetachStream();                               // the writer lets go; the doc keeps the stream
         st.Seek(0);
         auto d = PdfDocument::LoadFromStreamAsync(st).get();
         uint32_t n = d.PageCount();
