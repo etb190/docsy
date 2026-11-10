@@ -702,14 +702,9 @@ static void DwmApply(HWND h) {
     }
 }
 
-// Every chrome face rides bold now - the caption bar, the toolbar captions and
-// glyphs, the status row, the find bar, both dialogs, the bars' labels: the
-// `bold` argument stays only so the call sites keep reading the same, but the
-// weight is the app's own, not the caller's.
 static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
-    (void)bold;
     if (!slot)
-        slot = CreateFontW(-(int)std::lround(px * g.dpi), 0, 0, 0, FW_BOLD,
+        slot = CreateFontW(-(int)std::lround(px * g.dpi), 0, 0, 0, bold ? FW_BOLD : FW_NORMAL,
                            0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
     return slot;
@@ -1442,7 +1437,7 @@ static void ClearCache(DocState& D) {
 
 static HFONT UiFont() {
     if (!g_uifont) {
-        g_uifont = CreateFontW(-MulDiv(9, (int)(g.dpi * 96), 72), 0, 0, 0, FW_BOLD, 0, 0, 0,
+        g_uifont = CreateFontW(-MulDiv(9, (int)(g.dpi * 96), 72), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     }
@@ -3166,7 +3161,7 @@ static void RoundRectFill(HDC dc, int x, int y, int w, int h, int r, bool hot) {
 
 static HFONT SideFont() {   // the page label: BrandSansFont ("Killer Sans") at FontSize 14
     if (!g_sidefont)
-        g_sidefont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_BOLD, 0, 0, 0,
+        g_sidefont = CreateFontW(-(int)(14 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans");
     return g_sidefont;
@@ -4783,7 +4778,7 @@ static void AbCheckGlyph(HDC dc, const RECT& box) {
             { L"Segoe UI", L'\u2713' }, { L"Segoe UI Symbol", L'\u2713' },
             { L"Segoe MDL2 Assets", L'\uE73E' } };
         for (const auto& t : tries) {
-            HFONT tf = CreateFontW(-(int)std::lround(10 * g.dpi), 0, 0, 0, FW_BOLD, 0, 0, 0,
+            HFONT tf = CreateFontW(-(int)std::lround(10 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                    ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, t.face);
             HGDIOBJ of = SelectObject(dc, tf);
@@ -6282,7 +6277,7 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
         int cy = h / 2;
         if (g.logo) DrawIconEx(dc, xoff + (cw - sz) / 2, cy - sz - (int)(6 * g.dpi), g.logo, sz, sz, 0, nullptr, DI_NORMAL);
         SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(200, 200, 205));
-        SelectObject(dc, UiFont());
+        SelectObject(dc, GetStockObject(DEFAULT_GUI_FONT));
         RECT tr{ xoff, cy + (int)(8 * g.dpi), xoff + cw, h };
         DrawTextW(dc, L"Docsy  -  Ctrl+O or drop a PDF here", -1, &tr, DT_CENTER | DT_TOP | DT_SINGLELINE);
         if (clip) { SelectClipRgn(dc, nullptr); DeleteObject(clip); }
@@ -6523,7 +6518,7 @@ static void TabLabel(HDC dc, const std::wstring& s, const RECT& r, COLORREF c) {
     Gdiplus::PrivateFontCollection* pc = TabFaces();
     Gdiplus::FontFamily fam;                        // the collection's only family
     INT got = 0; pc->GetFamilies(1, &fam, &got);
-    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+    Gdiplus::Font f(&fam, (float)(12 * g.dpi), Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
     if (!got || fam.GetLastStatus() != Gdiplus::Ok || f.GetLastStatus() != Gdiplus::Ok) {
         SetBkMode(dc, TRANSPARENT);                 // no face: GDI's Segoe UI
         HFONT gf = TabFont();
@@ -8753,7 +8748,7 @@ static HFONT FdFontEdit()  { return CaptionFont(g_fntEdit,  13, false, L"Killer 
 static HFONT FdFontOpt()   { return CaptionFont(g_fntOpt,   12, false, L"Killer Sans UI"); }
 static HFONT FdFontAb()    {            // "ab": KillerPDF's underlined Whole Word glyph
     if (!g_fntAb)
-        g_fntAb = CreateFontW(-FdD(12), 0, 0, 0, FW_BOLD, 0, TRUE, 0,
+        g_fntAb = CreateFontW(-FdD(12), 0, 0, 0, FW_NORMAL, 0, TRUE, 0,
                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Killer Sans UI");
     return g_fntAb;
