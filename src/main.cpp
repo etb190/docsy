@@ -2519,7 +2519,7 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         dw.FlushAsync().get();
         dw.DetachStream();                               // the writer lets go; the doc keeps the stream
         st.Seek(0);
-        winrt::Windows::Data::Pdf::PdfDocument d;
+        winrt::Windows::Data::Pdf::PdfDocument d{ nullptr };   // the projection has no default ctor
         {   // the load queues behind the render gate too: the worker may be inside a page render
             // of ANOTHER document right now, and the engine's loader rides the same machinery
             std::lock_guard<std::mutex> lk(g_renderM);
