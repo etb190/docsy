@@ -11218,12 +11218,14 @@ static int Shot(const wchar_t* out, int w, int h) {
                     Draw(m2, wB, ch, xB, g.dB, rg);
                     DeleteObject(rg);
                     PaintPaneBars(m2, g.dB, true, g.dB.vHot || g.dB.vDrag, g.dB.hHot || g.dB.hDrag);
+                    TabBandPaint(m2, true);
                 } else {
                     RECT pr{ 0, 0, wA, ch };
                     HRGN rg = CreateRectRgn(pr.left, pr.top, pr.right, pr.bottom);
                     Draw(m2, wA, ch, 0, g.d, rg);
                     DeleteObject(rg);
                     PaintPaneBars(m2, g.d, false, g.d.vHot || g.d.vDrag, g.d.hHot || g.d.hDrag);
+                    TabBandPaint(m2, false);
                 }
             }
             RECT band{ g.splitX + 1, 0, min(vw, g.splitX + SplitHalf()), ch };
@@ -11234,7 +11236,9 @@ static int Shot(const wchar_t* out, int w, int h) {
         } else {
             Draw(m2, vw, ch, 0, g.d);
             PaintViewBars(m2, vw, ch, 0);
+            TabBandPaint(m2, false);
         }
+        TabDragPaint(m2);                               // the cross-pane drag's ghost + caret
         if (g.barOn) {                                  // the floating settings bar rides the shot
             RECT br3 = AnnBarRect();                    // like the live composite paints it
             AnnBarDraw(m2, br3.left, br3.top);
