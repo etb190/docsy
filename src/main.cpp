@@ -1637,6 +1637,14 @@ static void RqEnqueue(DocState& D, int i, int kind, int w, int h, int rot, int f
     g_rq.push_back(RJob{ D.id, i, kind, w, h, rot, flip, winrt::make_agile(D.doc), ++g_rqSeq });
     g_rqCv.notify_one();
 }
+static void RqPurgeThumbs(int docId, int first, int last) {
+    std::lock_guard<std::mutex> lk(g_rqM);
+    for (size_t k = 0; k < g_rq.size(); k++) {          // thumb jobs for another document - the
+        if (g_rq[k].kind != RJ_THUMB) continue;         // strip switched - or for pages the scroll
+        if (g_rq[k].docId == docId && g_rq[k].page >= first - 1 && g_rq[k].page <= last + 1) continue;
+        g_rq[k] = g_rq.back(); g_rq.pop_back(); k--;    // left behind: neither will ever be looked at,
+    }                                                   // so the worker must not spend renders on them
+}
 static DWORD WINAPI RqWorker(LPVOID) {
     try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
     for (;;) {
@@ -1645,9 +1653,13 @@ static DWORD WINAPI RqWorker(LPVOID) {
             std::unique_lock<std::mutex> lk(g_rqM);
             g_rqCv.wait(lk, [] { return g_rqQuit || !g_rq.empty(); });
             if (g_rqQuit) break;
-            size_t best = 0;                            // the most recently asked job: what
-            for (size_t k = 1; k < g_rq.size(); k++)    // the eye is on wins the worker
-                if (g_rq[k].seq > g_rq[best].seq) best = k;
+            size_t best = 0; bool have = false;         // PAGES before thumbs: every open and tab
+            unsigned long long bs = 0;                  // switch asks the strip's fifteen thumbs a
+            for (size_t k = 0; k < g_rq.size(); k++)    // tick after the pages, and pure recency then
+                if (g_rq[k].kind == RJ_PAGE && (!have || g_rq[k].seq > bs)) { best = k; bs = g_rq[k].seq; have = true; }
+            if (!have)                                  // held the eye's page hostage behind the whole
+                for (size_t k = 0; k < g_rq.size(); k++)// card shelf - seconds of white pages on every
+                    if (!have || g_rq[k].seq > bs) { best = k; bs = g_rq[k].seq; have = true; }
             j = g_rq[best];
             g_rq[best] = g_rq.back(); g_rq.pop_back();
         }
@@ -1761,7 +1773,9 @@ static void Evict(DocState& D, int lo, int hi) {
 
 static int PageIn(const std::vector<int>& top, int n, int y) {
     if (n <= 0 || top.empty()) return 0;
-    auto it = std::upper_bound(top.begin(), top.begin() + n, y);
+    if (n > (int)top.size() - 1) n = (int)top.size() - 1;   // a stale layout (the focused document
+    if (n <= 0) return 0;                                   // switched under it) must not walk off
+    auto it = std::upper_bound(top.begin(), top.begin() + n, y);   // the array it still describes
     return std::clamp((int)(it - top.begin()) - 1, 0, n - 1);
 }
 
@@ -2465,7 +2479,9 @@ static void FocusPane(bool b) {
     g.splitA = !b;
     for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);   // the sidebar's thumbs
     sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0;              // belong to the focused
-    sd.cw = 0; sd.ch = 0;                                                // pane's document now
+                                                    // pane's document now - and cw/ch stay:
+                                                    // zeroing them early-returned the SideLayout
+                                                    // below and dead-pumped the strip
     SideLayout();
     UpdateTitle();
     SideSync();
@@ -2503,7 +2519,12 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         dw.FlushAsync().get();
         dw.DetachStream();                               // the writer lets go; the doc keeps the stream
         st.Seek(0);
-        auto d = PdfDocument::LoadFromStreamAsync(st).get();
+        winrt::Windows::Data::Pdf::PdfDocument d;
+        {   // the load queues behind the render gate too: the worker may be inside a page render
+            // of ANOTHER document right now, and the engine's loader rides the same machinery
+            std::lock_guard<std::mutex> lk(g_renderM);
+            d = PdfDocument::LoadFromStreamAsync(st).get();
+        }
         uint32_t n = d.PageCount();
         if (!n) throw std::runtime_error("empty");
         std::vector<float> w(n, 612.f), h(n, 792.f);
@@ -2542,6 +2563,12 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
             if (g.side) ShowWindow(g.side, SW_SHOWNOACTIVATE);
         }
         LayoutMain();
+        if (g.view) InvalidateRect(g.view, nullptr, FALSE);   // the new document is the card now:
+                                                              // WS_CLIPCHILDREN keeps the main
+                                                              // window's repaint out of the view,
+                                                              // and the band's arrival reflowed the
+                                                              // pages - the card must not wait for a
+                                                              // WM_SIZE or the render drain to show
         InvalidateRect(g.main, nullptr, FALSE);
         if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);   // the Find Text button undims (Opacity 0.4 -> 1)
         RailRepaint();                                      // Pages/Info undim, the Pages light lands
@@ -2818,6 +2845,7 @@ static int SW() {                                                     // sidebar
 }
 static int STH(int i) {                 // sidebar thumb height: the FOCUSED pane's pages,
     DocState& D = DVF();                // the sidebar is a window-level surface like KillerPDF's
+    if (i < 0 || i >= D.n) return 1;    // a stale index (the document switched mid-flight) reads nothing
     return max(1, (int)std::lround(sd.tw * D.ph[i] / max(1.f, D.pw[i])));
 }
 static int SidePageAt(int y) { return PageIn(sd.top, DVF().n, y); }
@@ -2902,7 +2930,8 @@ static bool SidePump() {
         return true;
     }
     int missing = 0;
-    for (int i = max(0, first - 1); i <= min(D.n - 1, last + 1); i++) {
+    RqPurgeThumbs(D.id, first, last);       // the strip's stale asks die here: another document's
+    for (int i = max(0, first - 1); i <= min(D.n - 1, last + 1); i++) {   // thumbs, pages the scroll left
         if (sd.th.find(i) != sd.th.end()) continue;
         missing++;
         RqEnqueue(D, i, RJ_THUMB, sd.tw, STH(i), 0, 0);
@@ -2922,7 +2951,7 @@ static void SideSync() {
     int c = D.cur;
     if (c == sd.cur) return;
     sd.cur = c;
-    if (c >= 0 && sd.docH > 0 && GetTickCount64() >= sd.hold) {
+    if (c >= 0 && (size_t)c + 1 < sd.top.size() && sd.docH > 0 && GetTickCount64() >= sd.hold) {
         int y0 = sd.top[c] - (int)(8 * g.dpi);                        // the item band's edges
         int y1 = sd.top[c] + STH(c) + (int)(28 * g.dpi);
         if (y1 > sd.scroll + sd.ch) SideScrollTo(y0 - (int)(4 * g.dpi));          // off the bottom: card at the top
@@ -3113,7 +3142,10 @@ static void TabChrome(bool b) {
     }
     for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
     sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.tw = 0;
-    sd.cw = 0; sd.ch = 0;
+    // sd.cw/sd.ch stay: zeroing them made the SideLayout below early-return on
+    // cw <= 0, which killed the thumbnail pump, froze the strip on the outgoing
+    // document's pixels and left sd.top describing the OTHER document - the
+    // next paint then indexed the focused document against it
     SideLayout();
     UpdateTitle();
     SideSync();
@@ -9895,7 +9927,8 @@ static void ToggleSplit() {
             // the sidebar exactly where it was - KillerPDF's close does not
             // touch it either.
             for (auto& kv : sd.th) if (kv.second.b) DeleteObject(kv.second.b);
-            sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0; sd.cw = 0; sd.ch = 0;
+            sd.th.clear(); sd.thBytes = 0; sd.scroll = 0; sd.cur = -1; sd.hold = 0;   // cw/ch stay - zeroing
+                                                                                      // them dead-returns SideLayout
         }
         SideLayout();
         UpdateTitle();
