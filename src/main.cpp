@@ -2390,7 +2390,12 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
     emit("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
     long long pagesOff = pos;
     std::string kids;
-    for (int i = 0; i < D.n; i++) kids += std::to_string(3 + i * 2) + " 0 R ";
+    // object numbering: catalog 1, pages 2, then THREE objects per page -
+    // page 3+3i, contents 4+3i, image 5+3i. The old 2-per-page stride made
+    // page i's number (3+2i) collide with page i-1's image (5+2(i-1)): two
+    // "N 0 obj" bodies, an xref that pointed the Kids at image XObjects, and
+    // a document whose pages rendered white everywhere but page one.
+    for (int i = 0; i < D.n; i++) kids += std::to_string(3 + i * 3) + " 0 R ";
     emit("2 0 obj\n<< /Type /Pages /Kids [ " + kids + "] /Count " + std::to_string(D.n) + " >>\nendobj\n");
     std::vector<long long> pageOff(D.n), contOff(D.n), imgOff(D.n);
     bool failed = false;
@@ -2401,13 +2406,13 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         char hb2[256];
         pageOff[i] = pos;
         snprintf(hb2, 256, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents %d 0 R /Resources << /XObject << /Im %d 0 R >> >> >>\nendobj\n",
-                 3 + i * 2, wpt, hpt, 4 + i * 2, 5 + i * 2);
+                 3 + i * 3, wpt, hpt, 4 + i * 3, 5 + i * 3);
         emit(hb2);
         contOff[i] = pos;
         std::string cs = "q\n" + std::to_string(wpt).substr(0, 8) + " 0 0 " + std::to_string(hpt).substr(0, 8) + " 0 0 cm\n/Im Do\nQ\n";
-        emit(std::to_string(4 + i * 2) + " 0 obj\n<< /Length " + std::to_string(cs.size()) + " >>\nstream\n" + cs + "endstream\nendobj\n");
+        emit(std::to_string(4 + i * 3) + " 0 obj\n<< /Length " + std::to_string(cs.size()) + " >>\nstream\n" + cs + "endstream\nendobj\n");
         imgOff[i] = pos;
-        std::string ih = std::to_string(5 + i * 2) + " 0 obj\n<< /Type /XObject /Subtype /Image /Width " +
+        std::string ih = std::to_string(5 + i * 3) + " 0 obj\n<< /Type /XObject /Subtype /Image /Width " +
             std::to_string(std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400)) +
             " /Height " + std::to_string(max(1, (int)std::lround((float)std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400) * D.ph[i] / max(1.f, D.pw[i])))) +
             " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + std::to_string(jpg.size()) + " >>\nstream\n";
@@ -2423,12 +2428,12 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         return false;
     }
     long long xref = pos;
-    std::string xr = "xref\n0 " + std::to_string(3 + D.n * 2) + "\n0000000000 65535 f \n";
+    std::string xr = "xref\n0 " + std::to_string(3 + D.n * 3) + "\n0000000000 65535 f \n";
     auto off10 = [](long long v) { char b[16]; snprintf(b, 16, "%010lld", v); return std::string(b); };
     xr += off10(catOff) + " 00000 n \n" + off10(pagesOff) + " 00000 n \n";
     for (int i = 0; i < D.n; i++)
         xr += off10(pageOff[i]) + " 00000 n \n" + off10(contOff[i]) + " 00000 n \n" + off10(imgOff[i]) + " 00000 n \n";
-    xr += "trailer\n<< /Size " + std::to_string(3 + D.n * 2) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+    xr += "trailer\n<< /Size " + std::to_string(3 + D.n * 3) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
     emit(xr);
     CloseHandle(f);
     if (!MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
