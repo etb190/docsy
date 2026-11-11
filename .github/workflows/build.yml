@@ -29,13 +29,23 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $bt = "$env:RUNNER_TEMP\wv2setup.exe"
-          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2124701' -OutFile $bt
-          Start-Process $bt -ArgumentList '/silent','/install' -Wait
-          "webview2 runtime: $((Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv)" | Out-File extlog.txt
-          $mv3 = Start-Process .\docsy.exe -ArgumentList '--exttest','ddkjiahejlhfcafbddmgiahcphecmpfh','out=exttest-ubolite.txt' -Wait -PassThru
+          $key = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          $have = (Get-ItemProperty $key -ErrorAction SilentlyContinue).pv
+          "webview2 runtime (registry): $have" | Out-File extlog.txt
+          if (-not $have) {
+            $bt = "$env:RUNNER_TEMP\wv2setup.exe"
+            Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2124701' -OutFile $bt
+            $p = Start-Process $bt -ArgumentList '/silent','/install' -PassThru
+            if (-not $p.WaitForExit(240000)) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; "bootstrapper: timed out and was killed" | Out-File -Append extlog.txt }
+            $have = (Get-ItemProperty $key -ErrorAction SilentlyContinue).pv
+            "webview2 runtime (after install): $have" | Out-File -Append extlog.txt
+          }
+          if (-not (Test-Path .\docsy.exe)) { "docsy.exe missing - the build failed; no self-test" | Out-File -Append extlog.txt; exit 1 }
+          $mv3 = Start-Process .\docsy.exe -ArgumentList '--exttest','ddkjiahejlhfcafbddmgiahcphecmpfh','out=exttest-ubolite.txt' -PassThru
+          if (-not $mv3.WaitForExit(180000)) { Stop-Process -Id $mv3.Id -Force -ErrorAction SilentlyContinue; "ubolite: killed at 180s" | Out-File -Append extlog.txt }
           "uBlock Origin Lite (mv3) exit: $($mv3.ExitCode)" | Out-File -Append extlog.txt
-          $mv2 = Start-Process .\docsy.exe -ArgumentList '--exttest','dhdgffkkebhmkfjojejmpbldmpobfkfo','out=exttest-tampermonkey.txt' -Wait -PassThru
+          $mv2 = Start-Process .\docsy.exe -ArgumentList '--exttest','dhdgffkkebhmkfjojejmpbldmpobfkfo','out=exttest-tampermonkey.txt' -PassThru
+          if (-not $mv2.WaitForExit(180000)) { Stop-Process -Id $mv2.Id -Force -ErrorAction SilentlyContinue; "tampermonkey: killed at 180s" | Out-File -Append extlog.txt }
           "Tampermonkey (mv2) exit: $($mv2.ExitCode)" | Out-File -Append extlog.txt
           foreach ($f in 'exttest-ubolite.txt','exttest-tampermonkey.txt') { if (Test-Path $f) { "----- $f -----" | Out-File -Append extlog.txt; Get-Content $f | Out-File -Append extlog.txt } }
           if ($mv3.ExitCode -ne 0) { exit 1 }
