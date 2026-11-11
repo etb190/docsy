@@ -9624,7 +9624,7 @@ static bool JParse(const std::string& in, J& out) {
 //  They load before the first page navigates, so content scripts run on it.
 // ---------------------------------------------------------------------------
 struct WebExt {
-    std::wstring id, name, version, dir, popup, options;
+    std::wstring id, storeId, name, version, dir, popup, options;   // storeId: the Web Store id it was fetched under
     Gdiplus::Bitmap* icon = nullptr;
     bool enabled = true;
     wrl::ComPtr<ICoreWebView2BrowserExtension> ext;
@@ -9820,7 +9820,7 @@ static std::wstring WxExtUrl(const WebExt& e, const std::wstring& page) {
     return L"chrome-extension://" + e.id + L"/" + p;
 }
 static int WxFind(const std::wstring& id) {
-    for (int i = 0; i < (int)g_wx.size(); i++) if (g_wx[i].id == id) return i;
+    for (int i = 0; i < (int)g_wx.size(); i++) if (g_wx[i].id == id || (!g_wx[i].storeId.empty() && g_wx[i].storeId == id)) return i;
     return -1;
 }
 
@@ -9875,7 +9875,7 @@ static void WxInit() {
                 if (h != INVALID_HANDLE_VALUE) {
                     do {
                         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
-                        WebExt e; e.id = fd.cFileName; e.dir = root + L"\\" + fd.cFileName;
+                        WebExt e; e.id = fd.cFileName; e.storeId = e.id; e.dir = root + L"\\" + fd.cFileName;
                         if (WxLoadInfo(e)) g_wx.push_back(std::move(e));
                     } while (FindNextFileW(h, &fd));
                     FindClose(h);
@@ -9966,13 +9966,31 @@ static bool WxHttpGet(const std::wstring& url, const std::wstring& ua, std::vect
     WinHttpCloseHandle(s);
     return ok;
 }
-static void WxFetch(WxJob& j, const std::wstring& ver, const std::wstring& root) {   // worker thread
-    std::wstring url = L"https://clients2.google.com/service/update2/crx?response=redirect&os=win&arch=x64&os_arch=x86_64"
-                       L"&nacl_arch=x86-64&prod=chromecrx&prodchannel=stable&prodversion=" + ver +
-                       L"&lang=en-US&acceptformat=crx2,crx3&x=id%3D" + j.id + L"%26installsource%3Dondemand%26uc";
-    std::wstring ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + ver + L" Safari/537.36";
+static std::wstring WxCleanVer(const std::wstring& v) {     // "131.0.2903.112 beta" -> "131.0.2903.112"
+    std::wstring r;
+    for (wchar_t c : v) { if ((c >= L'0' && c <= L'9') || c == L'.') r += c; else break; }
+    int dots = 0; for (wchar_t c : r) if (c == L'.') dots++;
+    if (dots != 3 || r.front() == L'.' || r.back() == L'.') return L"131.0.0.0";
+    return r;
+}
+static void WxFetch(WxJob& j, const std::wstring& rawVer, const std::wstring& root) {   // worker thread
+    std::wstring ver = WxCleanVer(rawVer);
     std::vector<unsigned char> d;
-    if (!WxHttpGet(url, ua, d, j.err)) { if (j.err.empty()) j.err = L"Download failed."; return; }
+    // the update service answers by the Chrome version it is told: the runtime's own first, then a
+    // plain stable one - a 204/403 for one is often a 200 for the other
+    const std::wstring tries[2] = { ver, L"131.0.0.0" };
+    for (int a = 0; a < 2; a++) {
+        if (a == 1 && tries[1] == tries[0]) break;
+        std::wstring url = L"https://clients2.google.com/service/update2/crx?response=redirect&os=win&arch=x64&os_arch=x86_64"
+                           L"&nacl_arch=x86-64&prod=chromecrx&prodchannel=stable&prodversion=" + tries[a] +
+                           L"&lang=en-US&acceptformat=crx3&x=id%3D" + j.id + L"%26installsource%3Dondemand%26uc";
+        std::wstring ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" + tries[a] + L" Safari/537.36";
+        d.clear(); j.err.clear();
+        if (WxHttpGet(url, ua, d, j.err) && d.size() >= 64) break;
+        if (j.err.empty()) j.err = L"The Chrome Web Store has no download for this extension.";
+        d.clear();
+    }
+    if (d.empty()) return;
     if (d.size() < 64) { j.err = L"The Chrome Web Store has no download for this extension."; return; }
     size_t zo = 0; std::string key;
     if (!crxk::CrxParse(d.data(), d.size(), zo, key)) { j.err = L"That is not a valid extension package."; return; }
@@ -10012,7 +10030,11 @@ static std::wstring WxJsStr(const std::wstring& s) {
 static void WxPushState(ICoreWebView2* w) {             // the store button's state: which ids are installed
     if (!w) return;
     std::wstring js = L"window.__docsySet&&window.__docsySet([";
-    for (size_t i = 0; i < g_wx.size(); i++) { if (i) js += L","; js += WxJsStr(g_wx[i].id); }
+    bool first = true;
+    for (size_t i = 0; i < g_wx.size(); i++) {          // the id WebView2 reports and the id the store knows
+        if (!first) js += L","; first = false; js += WxJsStr(g_wx[i].id);
+        if (!g_wx[i].storeId.empty() && g_wx[i].storeId != g_wx[i].id) js += L"," + WxJsStr(g_wx[i].storeId);
+    }
     js += L"])";
     w->ExecuteScript(js.c_str(), nullptr);
 }
@@ -10056,7 +10078,7 @@ static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the U
                 swprintf_s(why, L"This extension unpacked wrong (0x%08lX). Try again.",
                            (unsigned long)hr);
             else
-                swprintf_s(why, L"WebView2 could not load this extension (0x%08lX).",
+                swprintf_s(why, L"WebView2 refused this extension (0x%08lX) - it may be an old Manifest V2 one.",
                            (unsigned long)hr);
             WxNotifyFail(why);
             WxRmTree(dir);
@@ -10064,7 +10086,7 @@ static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the U
         }
         int old = WxFind(id);
         if (old >= 0) { if (g_wx[old].icon) delete g_wx[old].icon; g_wx.erase(g_wx.begin() + old); }
-        WebExt e; e.id = id; e.dir = dir; e.ext = ext;
+        WebExt e; e.id = id; e.storeId = id; e.dir = dir; e.ext = ext;
         LPWSTR rid = nullptr;
         if (SUCCEEDED(ext->get_Id(&rid)) && rid) { e.id = rid; CoTaskMemFree(rid); }
         BOOL en = TRUE; if (SUCCEEDED(ext->get_IsEnabled(&en))) e.enabled = en != FALSE;
@@ -10109,7 +10131,7 @@ static const wchar_t* const kWxStoreScript = LR"JS((function(){
   var h=location.hostname;
   if(window.top!==window)return;
   if(!(h==='chromewebstore.google.com'||(h==='chrome.google.com'&&location.pathname.indexOf('/webstore')===0)))return;
-  var have=[],btn=null,busy=null,failed=false;
+  var have=[],btn=null,busy=null,failed=false,why='';
   function cur(){var m=location.pathname.match(/\/detail\/(?:[^\/]+\/)?([a-p]{32})(?:[\/?#]|$)/);return m?m[1]:null;}
   function paint(){
     var id=cur();
@@ -10125,12 +10147,13 @@ static const wchar_t* const kWxStoreScript = LR"JS((function(){
       (document.body||document.documentElement).appendChild(btn);
     }
     var done=have.indexOf(id)>=0,work=busy===id;
-    btn.textContent=done?'Added to Docsy \u2713':work?'Adding\u2026':failed?'Couldn\u2019t add \u2014 try again':'Add to Docsy';
+    btn.textContent=done?'Added to Docsy \u2713':work?'Adding\u2026':failed?('Couldn\u2019t add'+(why?': '+(why.length>90?why.slice(0,87)+'\u2026':why):'')+' \u2014 click to retry'):'Add to Docsy';
+    btn.title=failed?why:'';btn.style.maxWidth='420px';btn.style.textAlign='left';btn.style.lineHeight='1.3';
     btn.style.background=done?'#3a3a3c':failed?'#c0392b':'#22bb56';
     btn.style.cursor=(done||work)?'default':'pointer';
   }
   window.__docsySet=function(l){have=l||[];busy=null;failed=false;paint();};
-  window.__docsyFail=function(m){busy=null;failed=true;if(m)btn.title=String(m);paint();};
+  window.__docsyFail=function(m){busy=null;failed=true;why=m?String(m):'';paint();};
   setInterval(paint,500);
   document.addEventListener('DOMContentLoaded',paint);
   // the store's own "Add to Chrome" dead-ends here (no chrome.webstore in a
