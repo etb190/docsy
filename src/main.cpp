@@ -1085,6 +1085,9 @@ static void WebSideMove(HWND h, const POINT& p);
 static void WebSideUp(HWND h, const POINT& p);
 static void WebSideLeave();
 static bool WebSidePump();
+static int  WebSideAt(int y);             // the web tab under a rail y (the hand cursor)
+static void DrawRailShadow(HDC dc, int w, int h, int ins2 = -1);   // the card's left halo,
+                                          // the reader rail's painter - the web rail borrows it
 static void WebPlace();                   // bounds the visible controller into the card
 static void WebResizeDeb();               // a resize re-captures the visible thumb
 static bool WebKey(WPARAM wp, bool ctrl, bool shift);   // true: swallowed
@@ -1099,7 +1102,8 @@ static HBRUSH WebEditColors(HDC dc, HWND ctl);   // WM_CTLCOLOREDIT
 static void WebFailCard(HDC dc, int w, int h);   // the no-engine card in the view
 static void WebViewClick(POINT p);        // the fail card's download button
 static void WebRepaintChrome();           // nav + tabs + footer + rail in one call
-static void WebCardRect(RECT& c);         // the rounded card the webview rides in
+static void WebCardRect(RECT& c, int w, int h);   // the card's rect: the webview rides inset
+                                          // in the view, gutters around it for the shadow
 static void WebCardPaint(HDC dc, int w, int h);   // the card's field, face and ring
 
 // the sidebar's web state - the same fields sd carries, pointed at the tabs.
@@ -1594,7 +1598,8 @@ static void WebToolDraw(HDC dc, int w, int h) {
     RECT gr{ b.left, y0, b.right, y0 + gh };
     RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
     SetBkMode(dc, TRANSPARENT);
-    const wchar_t* glyph = L"\uE8A5";                  // the document page
+    const wchar_t* glyph = L"\uE8F1";                  // the library shelf - the reading room,
+                                                       // not one more document among the tabs'
     SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
     SetTextColor(dc, RGB(16, 16, 16));
     RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
@@ -4019,6 +4024,13 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            if (g_webOn) {                 // the web rail's cards take the hand: a rail card
+                                           // switches tabs, the same affordance the page
+                                           // thumbs get when the reader rides the window
+                bool over = p.x < sd.cw - SBar() && ws.docH > 0 && WebSideAt(p.y + ws.scroll) >= 0;
+                SetCursor(LoadCursorW(nullptr, over ? IDC_HAND : IDC_ARROW));
+                return TRUE;
+            }
             bool edge = g.sideOn && DVF().n && sd.cw > 0 && p.x >= sd.cw - 1;
             SetCursor(LoadCursorW(nullptr, edge ? IDC_SIZEWE : IDC_ARROW));
             return TRUE;
@@ -9184,6 +9196,10 @@ struct WebTab {
     wrl::ComPtr<ICoreWebView2> web;
     double zoom = 1.0;
     bool loading = false, canBack = false, canFwd = false;
+    bool shown = false;                    // the first frame has landed: a controller whose
+                                           // engine has yet to composite stays invisible, so
+                                           // a fresh tab shows the card's backdrop, never the
+                                           // black glass the bare surface reads as
     bool capturing = false, capturePending = false;
     unsigned long long captureDue = 0;
     std::wstring pending;                  // the URL a brand-new tab opens once its
@@ -10805,6 +10821,17 @@ static void WebStripPaint(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     HBRUSH bg = CreateSolidBrush(wvb::StripBg);
     FillRect(dc, &bar, bg); DeleteObject(bg);          // one flat sheet, no grain
+    {   // the sheet's foot fade: the reader's TabStripFade recipe - transparent to
+        // 45%, #59000000 at the foot, the whole gradient at BarShadowOpacity 0.38 -
+        // the lifted chrome's shadow over the page it rides above. The card's pixels
+        // are the webview's own, so the shadow lives on the sheet's bottom rows.
+        Gdiplus::Graphics gfade(dc);
+        Gdiplus::Color c0((BYTE)0, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::Color c1((BYTE)0x22, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::RectF fadeR(0.f, h * 0.45f, (float)w, h * 0.55f);
+        Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
+        gfade.FillRectangle(&fadeBr, fadeR);
+    }
     RECT edge{ 0, h - 1, w, h };                       // the hairline under the toolbar
     HBRUSH eb = CreateSolidBrush(wvb::Edge);
     FillRect(dc, &edge, eb); DeleteObject(eb);
@@ -10926,7 +10953,9 @@ static void WebStripSpin() {
     bool any = false;
     for (auto& t : g_wt) if (t.loading) any = true;
     if (!g_wstrip) return;
-    if (any) SetTimer(g_wstrip, 3, 90, nullptr);
+    if (any) SetTimer(g_wstrip, 3, 16, nullptr);   // 60fps: the sweep is time-based, so the
+                                                   // timer only sets the frame rate - 90ms
+                                                   // read as a thing jumping under the bar
     else KillTimer(g_wstrip, 3);
 }
 
@@ -10951,9 +10980,10 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
-        if (wp == 3) {                             // the spinner animates in the tab row's
-            InvalidateRect(h, nullptr, FALSE);     // favicon slot, so both rows repaint
-            if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);
+        if (wp == 3) {                             // the loading line sweeps the pill's foot:
+            if (!IsRectEmpty(&g_webOmni))          // only the pill repaints - the toolbar's
+                InvalidateRect(h, &g_webOmni, FALSE);   // buttons hold still at 60fps, and
+            if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);   // the tabs' spinners ride the band
             return 0;
         }
         break;
@@ -11045,26 +11075,26 @@ static void WebBarLayout() {
     x += pitch + TABF(10); g_wbR[WB_BACK] = { x, cy, x + d, cy + d };
     x += pitch; g_wbR[WB_FWD] = { x, cy, x + d, cy + d };
     int mx = (int)r.right - TABF(10);
-    g_wbR[WB_MENU] = { mx - d, cy, mx, cy + d };
-    mx -= pitch; g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d };
+    g_wbR[WB_MENU] = { 0, 0, 0, 0 };               // the 3-dot is gone: the toolbar keeps only
+    g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d }; // the + and, left of it, each extension's icon
+    mx -= pitch;
     g_wbR[WB_READER] = { 0, 0, 0, 0 };             // the PDF button lives on the top toolbar now
-    int leftEdge = (int)g_wbR[WB_NEWTAB].left;     // the puzzle button, then each extension's icon, leftwards
-    g_wxR.clear(); g_wxIdx.clear();
-    if (g_wxOk) {
-        mx -= pitch;
-        g_wbR[WB_EXT] = { mx - d, cy, mx, cy + d };
-        leftEdge = (int)g_wbR[WB_EXT].left;
+    int leftEdge = (int)g_wbR[WB_NEWTAB].left;
+    g_wbR[WB_EXT] = { 0, 0, 0, 0 };                // the puzzle button is gone too - extensions
+    g_wxR.clear(); g_wxIdx.clear();                // work from their own icons, and the pill
+    if (g_wxOk) {                                  // gains the room they used to bracket
         std::vector<int> vis;
         for (int i = 0; i < (int)g_wx.size() && vis.size() < 5; i++)
             if (g_wx[i].enabled && !g_wx[i].popup.empty()) vis.push_back(i);
         int n = (int)vis.size();
+        int right0 = (int)g_wbR[WB_NEWTAB].left - (pitch - d);   // the row's own 2dp gap
         for (int k = 0; k < n; k++) {
-            int right = mx - pitch - (n - 1 - k) * pitch;
+            int right = right0 - (n - 1 - k) * pitch;
             g_wxR.push_back(RECT{ right - d, cy, right, cy + d });
             g_wxIdx.push_back(vis[k]);
         }
         if (n) leftEdge = (int)g_wxR[0].left;
-    } else g_wbR[WB_EXT] = { 0, 0, 0, 0 };
+    }
     int lo = (int)g_wbR[WB_FWD].right + TABF(18), hi = leftEdge - TABF(18);
     int pw = max(10, min(hi - lo, TABF(560)));     // the capsule: centered in the window, capped
     int pl = std::clamp((int)r.right / 2 - pw / 2, lo, max(lo, hi - pw));
@@ -11161,6 +11191,15 @@ static void WebBarDraw(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     HBRUSH bb = CreateSolidBrush(wvb::Band);
     FillRect(dc, &bar, bb); DeleteObject(bb);
+    {   // the band's foot fade: the reader band's own TabStripFade, over the card
+        // tucked under this row - the last of the chrome's shadow before the page
+        Gdiplus::Graphics gfade(dc);
+        Gdiplus::Color c0((BYTE)0, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::Color c1((BYTE)0x22, (BYTE)0, (BYTE)0, (BYTE)0);
+        Gdiplus::RectF fadeR(0.f, h * 0.45f, (float)w, h * 0.55f);
+        Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
+        gfade.FillRectangle(&fadeBr, fadeR);
+    }
     RECT edge{ 0, h - 1, w, h };                       // the hairline above the page
     HBRUSH eb = CreateSolidBrush(wvb::Edge);
     FillRect(dc, &edge, eb); DeleteObject(eb);
@@ -11179,9 +11218,16 @@ static void WebBarDraw(HDC dc, int w, int h) {
             HBRUSH fbr = CreateSolidBrush(wvb::StripBg);
             FillRect(dc, &face, fbr); DeleteObject(fbr);
         } else {
-            if (i == ws.sHot && !g_webFail)            // the hovered face: a faint tile
-                WebTileC(dc, RECT{ fl + TABF(3), ft + TABF(2), fr - TABF(4), fb - TABF(1) },
-                         Gdiplus::Color(18, 255, 255, 255), 5.0f);
+            if (i == ws.sHot && !g_webFail) {      // the hovered face: no floating tile - the
+                                                   // tab itself turns one step lighter, the
+                                                   // band's own color warmed, and that is all
+                COLORREF bc = wvb::Band;
+                HBRUSH hb = CreateSolidBrush(RGB(min(255, GetRValue(bc) + 14),
+                                                 min(255, GetGValue(bc) + 14),
+                                                 min(255, GetBValue(bc) + 14)));
+                RECT face{ fl, 0, fr, h - 1 };
+                FillRect(dc, &face, hb); DeleteObject(hb);
+            }
             if (k != G.vis - 1 && i + 1 != g_wtCur) {  // the divider, none beside the open tab
                 Gdiplus::SolidBrush db(Gdiplus::Color(255, 0x55, 0x55, 0x55));
                 gs.FillRectangle(&db, Gdiplus::RectF((float)fr - 1.f, (float)ft, 1.f, (float)G.faceH));
@@ -11390,7 +11436,8 @@ static void WebThumbDecode(int id, IStream* st) {
 
 static void WebShowCurrent() {
     for (int i = 0; i < (int)g_wt.size(); i++)
-        if (g_wt[i].ctr) g_wt[i].ctr->put_IsVisible(i == g_wtCur ? TRUE : FALSE);
+        if (g_wt[i].ctr)   // a tab whose first frame never landed stays hidden: its surface
+            g_wt[i].ctr->put_IsVisible((i == g_wtCur && g_wt[i].shown) ? TRUE : FALSE);   // is still black glass
     WebPlace();
 }
 
@@ -11482,6 +11529,13 @@ static void WebEnsureController(int i) {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
                             t->loading = false;
+                            if (!t->shown) {           // the engine's first frame exists now: the
+                                t->shown = true;       // card comes off the backdrop - this is the
+                                if (g_webOn && g_wtCur >= 0 && g_wtCur < (int)g_wt.size()
+                                    && &g_wt[g_wtCur] == t && t->ctr)
+                                    t->ctr->put_IsVisible(TRUE);
+                                if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+                            }
                             WxPushState(t->web.Get());                 // the store button learns what is installed
                             t->captureDue = GetTickCount64() + 1200;   // let the page settle, then
                             WebEnsurePump();                           // the rail gets its thumb
@@ -11520,8 +11574,12 @@ static void WebEnsureController(int i) {
                             WebHistorySync(id);
                             return S_OK;
                         }).Get(), &t->tkHist);
-                c->put_IsVisible(g_webOn && g_wtCur >= 0 && g_wtCur < (int)g_wt.size()
-                                 && g_wt[g_wtCur].id == id ? TRUE : FALSE);
+                c->put_IsVisible(FALSE);           // the surface stays dark until its first frame:
+                                                   // a fresh controller's HWND reads as pure black
+                                                   // glass before Chromium composites into it, which
+                                                   // is the blackscreen on open and on a new tab -
+                                                   // the card's backdrop shows instead, and the
+                                                   // first NavigationCompleted raises the view
                 WebPlace(); WebRepaintChrome();
                 if (t && !t->pending.empty()) {    // a tab born before its engine navigates
                     if (g_wxReady) {                        // the moment it exists - once the extensions
@@ -11641,26 +11699,125 @@ static void WebSwitchTo(int i) {
     WebRepaintChrome();
 }
 
-// the page: edge to edge under the bars - no card, no margin, no ring. The
-// webview takes the view's whole client area.
-static void WebCardRect(RECT& c) {
-    c = { 0, 0, g.cw, g.ch };
+// the page: KillerPDF's floating card. The webview rides inset in the view -
+// its top tucks under the strip the way the reader's card tucks under the tab
+// band, an 8dp gutter runs down the right (the window gutter), the foot keeps
+// 16dp (the shadow's room, the rows the reader's footer used to own), and the
+// left edge either butts the thumbnails container - its halo falls on it, the
+// rail's story - or, with the rail closed, keeps the same 8dp gutter. The
+// gutters are where the card's PaneShadow shows.
+static int WebGutL() { return g_webSide ? 0 : (int)(8 * g.dpi); }
+
+static void WebCardRect(RECT& c, int w, int h) {
+    int L = WebGutL();
+    int R = max(L + 10, w - (int)(8 * g.dpi));
+    int B = max(10, h - (int)(16 * g.dpi));
+    c = { L, 0, R, B };
 }
 
-// the view's whole paint in browser mode: a flat fill behind the page while it
-// loads, and the no-engine card when the runtime is missing. One body for the
-// live view's WM_PAINT and the shot composite, so the two can never drift.
+// the view's whole paint in browser mode: KillerPDF's backdrop - the shared
+// chrome grain as the field, the card's PaneShadow falling into the gutters
+// (black, BlurRadius 16, ShadowDepth 5, Direction 270, Opacity 0.6, the same
+// blurred silhouette CardShadowStrip bakes for the reader's panes, evaluated
+// over the three strips where the gutters are - the middle dies under the
+// webview's own pixels) - plus the no-engine card when the runtime is missing
+// and the New Tab word while the engine's first frame is still on its way, so
+// an open and a fresh tab show the card's own room, never black glass. One
+// body for the live view's WM_PAINT and the shot composite, so the two can
+// never drift.
+static HBITMAP g_wcbm = nullptr; static HDC g_wcdc = nullptr;
+static int g_wcw = 0, g_wch = 0, g_wcside = -1; static double g_wcdpi = 0;
+
 static void WebCardPaint(HDC dc, int w, int h) {
     RECT vr{ 0, 0, w, h };
-    HBRUSH pb = CreateSolidBrush(wvb::Page);
-    FillRect(dc, &vr, pb); DeleteObject(pb);
-    if (g_webFail) WebFailCard(dc, w, h);
+    if (!g_wcbm || g_wcw != w || g_wch != h || g_wcdpi != g.dpi || g_wcside != (int)g_webSide) {
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
+        BYTE* bits = nullptr;
+        HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&bits, nullptr, 0);
+        if (bm && bits) {
+            HDC bdc = CreateCompatibleDC(dc);
+            HGDIOBJ ob = SelectObject(bdc, bm);
+            POINT po{ 0, 0 };                                 // the grain phase: the live view's
+            if (WindowFromDC(dc) == g.view)                   // window offset - the shot composite
+                MapWindowPoints(g.view, g.main, &po, 1);      // phases itself into the globals
+            else { po.x = g_grainPX; po.y = g_grainPY; }
+            SetBrushOrgEx(bdc, po.x, po.y, nullptr);
+            RECT fr{ 0, 0, w, h };
+            FillRect(bdc, &fr, GrainBrush(1));                // the one dark chrome field
+            int L = WebGutL();
+            int R = max(L + 10, w - (int)(8 * g.dpi));
+            int B = max(10, h - (int)(16 * g.dpi));
+            const double sig = 8.0 * g.dpi, depth = 5.0 * g.dpi;   // BlurRadius 16, ShadowDepth 5
+            int rad = max(2, (int)(6 * g.dpi));
+            float sx0 = (float)L, sy0 = (float)depth, sx1 = (float)R, sy1 = (float)B + (float)depth;
+            // the silhouette: the card pushed straight down, the reader's own recipe
+            const int LUTN = 236;
+            static float lut[LUTN]; static double lutSig = 0;
+            if (lutSig != sig) {
+                for (int i = 0; i < LUTN; i++) {
+                    double d2 = -3.0 * sig + (6.0 * sig) * i / (LUTN - 1);
+                    lut[i] = (float)(0.6 * Phi(-d2 / sig));
+                }
+                lutSig = sig;
+            }
+            for (int side = 0; side < 3; side++) {            // three disjoint strips: the right
+                int x0, x1, y0, y1;                           // falloff, the left one when the
+                if (side == 0) {                              // gutter exists, and the foot - the
+                    x0 = max(0, R - 4); x1 = w; y0 = 0; y1 = h;    // corners wrap through the SDF
+                } else if (side == 1) {
+                    if (L <= 0) continue;                     // open rail: the halo falls on it,
+                    x0 = 0; x1 = min(w, L + 4); y0 = 0; y1 = h;    // DrawRailShadow's, not this one's
+                } else {
+                    x0 = (L > 0) ? min(w, L + 4) : 0;   // open rail: the left column is the
+                                                        // card's own - the strip starts at 0
+                    x1 = max(x0, min(w, R - 4));
+                    y0 = max(0, B - 4); y1 = h;
+                }
+                for (int y = y0; y < y1; y++) {
+                    BYTE* row = bits + (size_t)y * w * 4;
+                    for (int x = x0; x < x1; x++) {
+                        float d = SdRoundRect(x + 0.5f, y + 0.5f, sx0, sy0, sx1, sy1, (float)rad);
+                        int i = (int)((d / sig + 3.0) * (LUTN - 1) / 6.0);
+                        int a = i < 0 ? (int)(0.6 * 255 + 0.5f) : (i >= LUTN ? 0 : (int)(lut[i] * 255 + 0.5f));
+                        if (a <= 0) continue;
+                        BYTE* p = row + (size_t)x * 4;
+                        int inv = 255 - a;
+                        p[0] = (BYTE)((p[0] * inv) >> 8);
+                        p[1] = (BYTE)((p[1] * inv) >> 8);
+                        p[2] = (BYTE)((p[2] * inv) >> 8);
+                    }
+                }
+            }
+            SelectObject(bdc, ob);
+            DeleteDC(bdc);
+            if (g_wcbm) DeleteObject(g_wcbm);
+            if (g_wcdc) DeleteDC(g_wcdc);
+            g_wcbm = bm;
+            g_wcdc = CreateCompatibleDC(dc);
+            SelectObject(g_wcdc, bm);
+            g_wcw = w; g_wch = h; g_wcdpi = g.dpi; g_wcside = (int)g_webSide;
+        }
+    }
+    if (g_wcbm) BitBlt(dc, 0, 0, w, h, g_wcdc, 0, 0, SRCCOPY);
+    else {
+        HBRUSH pb = CreateSolidBrush(wvb::Page);
+        FillRect(dc, &vr, pb); DeleteObject(pb);
+    }
+    if (g_webFail) { WebFailCard(dc, w, h); return; }
+    WebTab* t = WebCur();
+    if (t && !t->shown) {                        // the engine's first frame has not landed: the
+        SetBkMode(dc, TRANSPARENT);              // card says what it is instead of black glass
+        SelectObject(dc, CaptionFont(g_tbcap, 15, false, L"Killer Sans"));
+        SetTextColor(dc, wvb::InkDim);
+        RECT tr{ 0, h / 2 - (int)(12 * g.dpi), w, h / 2 + (int)(12 * g.dpi) };
+        DrawTextW(dc, L"New Tab", -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
 }
 
 static void WebPlace() {
     WebTab* t = WebCur();
     if (!g.view || !t || !t->ctr) return;
-    RECT c; WebCardRect(c);
+    RECT c; WebCardRect(c, g.cw, g.ch);
     RECT b = c;
     if (b.right <= b.left || b.bottom <= b.top) return;
     t->ctr->put_Bounds(b);
@@ -11715,6 +11872,9 @@ static void WebShutdown() {
     }
     g_wt.clear(); g_wtCur = -1;
     g_wvEnv.Reset();
+    if (g_wcbm) { DeleteObject(g_wcbm); g_wcbm = nullptr; }   // the card's baked backdrop
+    if (g_wcdc) { DeleteDC(g_wcdc); g_wcdc = nullptr; }
+    g_wcw = g_wch = 0; g_wcside = -1;
 }
 
 // ---- the sidebar: the reader's page rail, showing the web tabs ----
@@ -11824,6 +11984,10 @@ static void WebSideDraw(HDC dc, int w, int h) {
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, w - SBar() + (SBar() - bw) / 2, tp, bw, tl, (int)(3 * g.dpi), hot);
     }
+    if (g_webOn)                                   // the card's left halo lands here, over the
+        DrawRailShadow(dc, w, h, 0);               // thumbs the way the reader's rail receives
+                                                   // its share - the shadow's pane paints last,
+                                                   // KillerPDF's own z-order
 }
 
 static bool WebSidePump() { return false; }        // thumbs arrive through CapturePreview
@@ -12898,12 +13062,14 @@ static void RailIcon(HDC dc, int id, const RECT& rc, COLORREF c, bool shadow = t
 static HBITMAP g_rshbm = nullptr; static HDC g_rshdc = nullptr;
 static int g_rshw = 0, g_rshh = 0, g_rshins = -1; static double g_rshdpi = 0;
 
-static void DrawRailShadow(HDC dc, int w, int h) {
+static void DrawRailShadow(HDC dc, int w, int h, int ins2) {
     if (w <= 0 || h <= 0) return;
     int sw = min(w, (int)(20 * g.dpi) + 2);   // the visible reach: ~2.5 sigma, past this
                                               // the falloff is under one percent of ink
-    int ins = max(0, BandInset(false) - 1);   // the card's top row: the halo fades in where
-                                              // the card starts, under the band when one shows
+    int ins = ins2 >= 0 ? ins2                // an explicit card-top row: the browser's rail
+              : max(0, BandInset(false) - 1); // borrows the painter with its own geometry
+                                              // (the card's top row: the halo fades in where
+                                              // the card starts, under the band when one shows)
     if (!g_rshbm || g_rshw != sw || g_rshh != h || g_rshdpi != g.dpi || g_rshins != ins) {
         BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), sw, -h, 1, 32, BI_RGB };
         BYTE* px = nullptr;
