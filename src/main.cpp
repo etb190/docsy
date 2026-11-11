@@ -63,6 +63,7 @@
 #include <unknwn.h>
 #include <objidl.h>
 #include <shellapi.h>
+#include <tlhelp32.h>   // Toolhelp32: is another docsy.exe (pid) sharing the profile's engine?
 #include <shcore.h>
 #include <shlobj_core.h>
 #include <commdlg.h>
@@ -121,6 +122,7 @@ namespace wrl = Microsoft::WRL;                   // ComPtr + Callback: the even
 #pragma comment(lib, "gdiplus")
 #pragma comment(lib, "comdlg32")
 #pragma comment(lib, "shell32")
+#pragma comment(lib, "advapi32")   // RegOpenKeyExW/RegEnumValueW: the policy audit
 #pragma comment(lib, "user32")
 #pragma comment(lib, "gdi32")
 #pragma comment(lib, "ole32")
@@ -9637,6 +9639,18 @@ static std::vector<RECT> g_wxR;            // the toolbar icons (strip coords) .
 static std::vector<int> g_wxIdx;           // ... and the g_wx entry each belongs to
 static int g_wxHot = -1, g_wxPress = -1;
 static std::vector<std::wstring> g_wxInstalling;
+// one-shot engine restart: a browser process can come up refusing extension
+// operations outright - another docsy.exe's engine owning the profile, inherited
+// WEBVIEW2_* environment variables, a stale experiment payload, a runtime regression -
+// and a cold relaunch is the only thing that re-reads all of it. The first
+// INVALID_STATE schedules one; the install replays on the fresh engine.
+static bool g_wxRestarted = false;                 // once per session, never a loop
+static std::wstring g_wxRetryDir, g_wxRetryId;     // the install the old engine refused
+static UINT_PTR g_wxRestartTimer = 0;
+static void WebEnsureEnv();
+static void WxEngineRestart();
+static void WxFinishInstall(const std::wstring& id, const std::wstring& dir, HRESULT hr, ICoreWebView2BrowserExtension* ext);
+static const wchar_t* WxHrName(HRESULT hr);
 static void WebBarLayout();
 static void WebNewTab(std::wstring url, bool makeCurrent);
 
@@ -9712,6 +9726,70 @@ static void WxLogf(const wchar_t* fmt, ...) {
     if (GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fa) &&
         (((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) > (512ll << 10))
         MoveFileExW(p.c_str(), (p + L".old").c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+// ---- the machine's own overrides. four WEBVIEW2_* environment variables beat
+// every option this app passes (documented loader behavior): an inherited
+// WEBVIEW2_USER_DATA_FOLDER silently points the engine at a foreign profile and
+// WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS appends foreign switches - either reads
+// exactly like "every extension install fails with ERROR_INVALID_STATE". They
+// are reported once, then cleared: docsy owns its own engine configuration. ----
+static void WxCleanWebViewEnvVars() {
+    static const wchar_t* const names[] = {
+        L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", L"WEBVIEW2_USER_DATA_FOLDER",
+        L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", L"WEBVIEW2_RELEASE_CHANNEL_PREFERENCE" };
+    for (const wchar_t* n : names) {
+        DWORD need = GetEnvironmentVariableW(n, nullptr, 0);
+        if (!need) {
+            if (GetLastError() != ERROR_ENVVAR_NOT_FOUND)
+                WxLogf(L"env: %s is set but empty - clearing it", n), SetEnvironmentVariableW(n, nullptr);
+            continue;
+        }
+        std::wstring v(need, L'\0');
+        need = GetEnvironmentVariableW(n, &v[0], need);
+        v.resize(need);
+        WxLogf(L"env: %s = '%s' was inherited - cleared (it overrides the app's own options)", n, v.c_str());
+        SetEnvironmentVariableW(n, nullptr);
+    }
+}
+// a second docsy.exe builds a second engine on the SAME profile: whichever
+// process launched the browser process first decides its extension state, so
+// an old window left running reads as "installs always fail" in the new one
+static void WxLogOtherDocsy() {
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (s == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe{ sizeof pe };
+    DWORD me = GetCurrentProcessId();
+    if (Process32FirstW(s, &pe)) do {
+        if (!_wcsicmp(pe.szExeFile, L"docsy.exe") && pe.th32ProcessID != me)
+            WxLogf(L"env: another docsy.exe (pid %lu) is running - its engine may own the profile",
+                   (unsigned long)pe.th32ProcessID);
+    } while (Process32NextW(s, &pe));
+    CloseHandle(s);
+}
+// machine-wide Edge/WebView2 policies are the third voice that can refuse every
+// install before our options are ever read; only the interesting names are kept
+static void WxLogPolicyKey(HKEY root, const wchar_t* rootName, const wchar_t* sub) {
+    HKEY k;
+    if (RegOpenKeyExW(root, sub, 0, KEY_READ, &k) != ERROR_SUCCESS) return;
+    DWORD vals = 0, mx = 0;
+    wchar_t nm[192]; DWORD nsz = 192;
+    if (RegQueryInfoKeyW(k, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                         &vals, &mx, nullptr, nullptr, nullptr) == ERROR_SUCCESS && vals && mx < 192)
+        for (DWORD i = 0; i < vals; i++) {
+            nsz = 192;
+            if (RegEnumValueW(k, i, nm, &nsz, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS &&
+                (wcsstr(nm, L"Extension") || wcsstr(nm, L"Experiment")))
+                WxLogf(L"policy: %s\\%s\\%s is set", rootName, sub, nm);
+        }
+    RegCloseKey(k);
+}
+static void WxLogPolicies() {
+    static const wchar_t* const subs[] = {
+        L"Software\\Policies\\Microsoft\\Edge\\WebView2", L"Software\\Policies\\Microsoft\\Edge" };
+    for (const wchar_t* s : subs) {
+        WxLogPolicyKey(HKEY_LOCAL_MACHINE, L"HKLM", s);
+        WxLogPolicyKey(HKEY_CURRENT_USER, L"HKCU", s);
+    }
 }
 static bool WxReadFile(const std::wstring& p, std::string& out) {
     HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -9912,7 +9990,11 @@ static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
                 }
                 return S_OK;
             }).Get());
-    if (FAILED(hr)) WxAddFolder(dir, done);
+    if (FAILED(hr)) {
+        WxLogf(L"add: pre-list GetBrowserExtensions refused synchronously 0x%08lX %s",
+               (unsigned long)hr, WxHrName(hr));
+        WxAddFolder(dir, done);
+    }
 }
 static void WxNotifyTabs();
 static void WxFinishInit() {
@@ -9921,6 +10003,13 @@ static void WxFinishInit() {
         if (t.web && !t.pending.empty()) { t.web->Navigate(t.pending.c_str()); t.pending.clear(); }
     if (g_webOn) WebBarLayout();
     WebRepaintChrome();
+    if (!g_wxRetryId.empty()) {                    // the engine that refused this install is
+        std::wstring dir = g_wxRetryDir, id = g_wxRetryId;   // gone; the fresh one retries it
+        g_wxRetryDir.clear(); g_wxRetryId.clear();
+        WxAddFolderFresh(dir, id, [id, dir](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
+            WxFinishInstall(id, dir, hr, ext);
+        });
+    }
 }
 static void WxInit() {
     if (g_wxReady || g_wxBusy) return;
@@ -9930,7 +10019,8 @@ static void WxInit() {
     HRESULT hr0 = p->GetBrowserExtensions(
         Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
             [](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
-                std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>> have;
+                g_wxOk = SUCCEEDED(hr);        // the fresh engine's own verdict - a restart
+                std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>> have;   // resets this
                 UINT n = 0;
                 if (SUCCEEDED(hr) && list && SUCCEEDED(list->get_Count(&n)))
                     for (UINT i = 0; i < n; i++) {
@@ -9965,6 +10055,9 @@ static void WxInit() {
                     }
                     if (!found) toAdd.push_back(i);
                 }
+                WxLogf(L"init: GetBrowserExtensions answered 0x%08lX, %u extension(s) registered",
+                       (unsigned long)hr, (unsigned)have.size());
+                if (FAILED(hr)) WxLogf(L"init: the listing itself failed - the engine has no working extension subsystem");
                 WxLogf(L"init: %u installed, %zu folder(s), %zu to re-add", (unsigned)have.size(), g_wx.size(), toAdd.size());
                 if (toAdd.empty()) { WxFinishInit(); return S_OK; }
                 *left = (int)toAdd.size();
@@ -9985,7 +10078,48 @@ static void WxInit() {
                 }
                 return S_OK;
             }).Get());
-    if (FAILED(hr0)) { WxLogf(L"init: GetBrowserExtensions refused 0x%08lX", (unsigned long)hr0); g_wxBusy = false; g_wxOk = false; WxFinishInit(); }
+    if (FAILED(hr0)) {
+        WxLogf(L"init: GetBrowserExtensions refused synchronously 0x%08lX %s",
+               (unsigned long)hr0, WxHrName(hr0));
+        g_wxBusy = false; g_wxOk = false;
+        if (hr0 == HRESULT_FROM_WIN32(ERROR_INVALID_STATE) && !g_wxRestarted)
+            WxEngineRestart();                     // the whole engine refused: relaunch it once
+        else WxFinishInit();
+        return;
+    }
+}
+
+// the engine cold-restart: release every controller and the environment, let the
+// browser process exit, then rebuild it all on the same profile. The old engine's
+// extension subsystem died with whatever it was born into - inherited switches, a
+// profile engine owned by an older instance, a bad experiment payload - and only
+// a fresh launch re-reads any of it. The first controller re-runs WxInit;
+// WxFinishInit replays an install the old engine refused. Once per session.
+static void CALLBACK WxEngineRestartTimer(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    if (id != g_wxRestartTimer) return;
+    g_wxRestartTimer = 0;
+    WxLogf(L"env: the old engine is gone - building the new one");
+    WebEnsureEnv();                        // its completion builds the controllers again
+}
+static void WxEngineRestart() {
+    if (g_wxRestarted) return;
+    g_wxRestarted = true;
+    WxLogf(L"env: engine restart - releasing every controller and the environment");
+    g_wxProf.Reset();
+    g_wxReady = false; g_wxBusy = false;
+    for (auto& e : g_wx) if (e.icon) { delete e.icon; e.icon = nullptr; }
+    g_wx.clear();                          // WxInit rebuilds the list from the folders
+    for (auto& t : g_wt) {
+        if (t.ctr) t.ctr->Close();
+        t.ctr.Reset(); t.web.Reset();
+        if (t.pending.empty() && !t.url.empty()) t.pending = t.url;   // every live tab re-opens
+        t.capturing = false; t.capturePending = false; t.captureDue = 0;
+    }
+    g_wvEnv.Reset();                       // the last host let go: the browser process exits
+    UINT_PTR t = SetTimer(nullptr, 0, 1000, WxEngineRestartTimer);   // ...then the fresh one builds
+    if (t) g_wxRestartTimer = t;
+    else WebEnsureEnv();                   // no timer: rebuild immediately, best effort
 }
 
 // ---- installing from the Chrome Web Store ----
@@ -10151,48 +10285,65 @@ static void WxInstall(const std::wstring& id) {
         if (!PostMessageW(main, WM_APP + 5, 0, (LPARAM)j)) delete j;
     }).detach();
 }
+// the shared tail of every install road (a store click, a .crx download, the
+// self-test, a retry after an engine restart): the add answered - land it
+static void WxFinishInstall(const std::wstring& id, const std::wstring& dir, HRESULT hr, ICoreWebView2BrowserExtension* ext) {
+    WxLogf(L"install: AddBrowserExtension -> 0x%08lX", (unsigned long)hr);
+    if (FAILED(hr) || !ext) {                          // the reason travels with the failure:
+        if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE) && !g_wxRestarted) {
+            // the engine refused profile extension ops outright: every cause this can
+            // have lives in the browser process, so the fix is a new one - the unpacked
+            // folder stays, and WxFinishInit replays the add on the fresh engine
+            WxLogf(L"install: INVALID_STATE - scheduling the one-shot engine restart; the install replays itself");
+            g_wxRetryDir = dir; g_wxRetryId = id;
+            // deferred one pump turn: this can be running inside a WebView2 completion
+            // frame, and the engine must not be released re-entrantly - the message
+            // unwinds every frame before WxEngineRestart touches anything
+            PostMessageW(g.main, WM_APP + 7, 0, 0);
+            return;
+        }
+        wchar_t why[512];                              // the toast spells out which one it hit
+        if (hr == E_NOINTERFACE)
+            swprintf_s(why, L"This WebView2 runtime has no extension API - update Microsoft Edge (WebView2 Runtime) and restart Docsy.");
+        else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED))
+            swprintf_s(why, L"The engine came up with extensions off. Restart Docsy once; if it still fails, the WebView2 runtime or a machine policy is blocking extensions (0x%08lX).",
+                       (unsigned long)hr);
+        else if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE))
+            swprintf_s(why, L"The engine refused extension operations even on a fresh browser process (0x%08lX). A machine policy, an inherited WEBVIEW2_* environment variable or this runtime build is the cause - Extensions menu > Copy diagnostics carries the trail.",
+                       (unsigned long)hr);
+        else if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
+            swprintf_s(why, L"The extension unpacked into a folder WebView2 rejects (0x%08lX). Try again.",
+                       (unsigned long)hr);
+        else if (hr == E_ACCESSDENIED)
+            swprintf_s(why, L"The package carries a reserved system file name (0x%08lX).",
+                       (unsigned long)hr);
+        else
+            swprintf_s(why, L"WebView2 refused this extension (0x%08lX). Extensions menu > Copy diagnostics carries the full trail, and its test extensions separate a Manifest V2 cutoff from a broken install.",
+                       (unsigned long)hr);
+        WxNotifyFail(why);
+        WxRmTree(dir);
+        return;
+    }
+    int old = WxFind(id);
+    if (old >= 0) { if (g_wx[old].icon) delete g_wx[old].icon; g_wx.erase(g_wx.begin() + old); }
+    WebExt e; e.id = id; e.storeId = id; e.dir = dir; e.ext = ext;
+    LPWSTR rid = nullptr;
+    if (SUCCEEDED(ext->get_Id(&rid)) && rid) { e.id = rid; CoTaskMemFree(rid); }
+    BOOL en = TRUE; if (SUCCEEDED(ext->get_IsEnabled(&en))) e.enabled = en != FALSE;
+    WxLoadInfo(e);
+    g_wx.push_back(std::move(e));
+    std::sort(g_wx.begin(), g_wx.end(), [](const WebExt& a, const WebExt& b) { return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
+    if (g_webOn) WebBarLayout();
+    WebRepaintChrome();
+    WxNotifyTabs();
+}
 static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the UI thread
     std::unique_ptr<WxJob> j(job);
     for (size_t i = 0; i < g_wxInstalling.size(); i++) if (g_wxInstalling[i] == j->id) { g_wxInstalling.erase(g_wxInstalling.begin() + i); break; }
     if (!j->ok) { WxLogf(L"install: failed before load: %s", j->err.c_str()); WxNotifyFail(j->err); return; }
     std::wstring id = j->id, dir = j->dir;
     WxAddFolderFresh(dir, id, [id, dir](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
-        WxLogf(L"install: AddBrowserExtension -> 0x%08lX", (unsigned long)hr);
-        if (FAILED(hr) || !ext) {                          // the reason travels with the failure:
-            wchar_t why[220];                              // the toast spells out which one it hit
-            if (hr == E_NOINTERFACE)
-                swprintf_s(why, L"This WebView2 runtime has no extension API - update Microsoft Edge (WebView2 Runtime) and restart Docsy.");
-            else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED))
-                swprintf_s(why, L"The engine came up with extensions off. Restart Docsy once; if it still fails, the WebView2 runtime or a machine policy is blocking extensions (0x%08lX).",
-                           (unsigned long)hr);
-            else if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE))
-                swprintf_s(why, L"WebView2's extension store is in a bad state (0x%08lX). Close every Docsy window and try again.",
-                           (unsigned long)hr);
-            else if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
-                swprintf_s(why, L"The extension unpacked into a folder WebView2 rejects (0x%08lX). Try again.",
-                           (unsigned long)hr);
-            else if (hr == E_ACCESSDENIED)
-                swprintf_s(why, L"The package carries a reserved system file name (0x%08lX).",
-                           (unsigned long)hr);
-            else
-                swprintf_s(why, L"WebView2 refused this extension (0x%08lX). Extensions menu > Copy diagnostics carries the full trail, and its test extensions separate a Manifest V2 cutoff from a broken install.",
-                           (unsigned long)hr);
-            WxNotifyFail(why);
-            WxRmTree(dir);
-            return;
-        }
-        int old = WxFind(id);
-        if (old >= 0) { if (g_wx[old].icon) delete g_wx[old].icon; g_wx.erase(g_wx.begin() + old); }
-        WebExt e; e.id = id; e.storeId = id; e.dir = dir; e.ext = ext;
-        LPWSTR rid = nullptr;
-        if (SUCCEEDED(ext->get_Id(&rid)) && rid) { e.id = rid; CoTaskMemFree(rid); }
-        BOOL en = TRUE; if (SUCCEEDED(ext->get_IsEnabled(&en))) e.enabled = en != FALSE;
-        WxLoadInfo(e);
-        g_wx.push_back(std::move(e));
-        std::sort(g_wx.begin(), g_wx.end(), [](const WebExt& a, const WebExt& b) { return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
-        if (g_webOn) WebBarLayout();
-        WebRepaintChrome();
-        WxNotifyTabs();
+        WxFinishInstall(id, dir, hr, ext);
     });
 }
 static void WxRemove(const std::wstring& id) {
@@ -11376,9 +11527,11 @@ static void WebEnsureController(int i) {
                     if (g_wxReady) {                        // the moment it exists - once the extensions
                         t->web->Navigate(t->pending.c_str());   // are in, so content scripts hit page one
                         t->pending.clear();
-                    } else WxInit();
+                    }
                 }
-                return S_OK;
+                WxInit();                          // once per session, pending or not: the listing
+                return S_OK;                       // is the evidence - a refusal here condemns the
+                                                   // whole engine, not just one install
             }).Get());
 }
 
@@ -11386,6 +11539,7 @@ static void WebEnsureEnv() {
     if (g_wvEnv || g_webFail) return;
     if (!g_webChecked) {
         g_webChecked = true;
+        WxCleanWebViewEnvVars();       // inherited WEBVIEW2_* variables beat every option below
         LPWSTR ver = nullptr;
         if (SUCCEEDED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver)) && ver) {
             g_webVer = ver;
@@ -11394,6 +11548,8 @@ static void WebEnsureEnv() {
         }
     }
     if (!g_webAvail) { g_webFail = true; WebRepaintChrome(); if (g.view) InvalidateRect(g.view, nullptr, FALSE); return; }
+    WxLogOtherDocsy();                 // a second docsy.exe may have built this profile's engine
+    WxLogPolicies();                   // Extension*/Experiment* policies refuse installs machine-wide
     PWSTR la = nullptr;
     SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la);
     std::wstring udf = (la ? std::wstring(la) : std::wstring(L".")) + L"\\Docsy\\WebView2";
@@ -11421,11 +11577,11 @@ static void WebEnsureEnv() {
     // apart, so the first extension-capable run rebuilds the profile once;
     // installed extensions live outside the profile and are re-added from
     // their folders on startup, so nothing the user keeps is lost.
-    if (extOn && GetFileAttributesW((udf + L"\\.docsy-ext-on").c_str()) == INVALID_FILE_ATTRIBUTES) {
-        WxLogf(L"env: profile predates extension support - rebuilding it once so installs stop failing");
+    if (extOn && GetFileAttributesW((udf + L"\\.docsy-ext-on-2").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        WxLogf(L"env: profile predates the cleaned extension environment - rebuilding it once so installs stop failing");
         WxRmTree(udf);
         WxMkdirs(udf);
-        HANDLE mf = CreateFileW((udf + L"\\.docsy-ext-on").c_str(), GENERIC_WRITE, 0, nullptr,
+        HANDLE mf = CreateFileW((udf + L"\\.docsy-ext-on-2").c_str(), GENERIC_WRITE, 0, nullptr,
                                 CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr);
         if (mf != INVALID_HANDLE_VALUE) CloseHandle(mf);
     }
@@ -14558,6 +14714,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                                                // identically and cannot strobe)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
     case WM_APP + 5: WxInstallDone((WxJob*)lp); return 0;   // an extension download finished
+    case WM_APP + 7: WxEngineRestart(); return 0;   // the deferred engine restart: a fresh
+                                                    // browser process for extension operations
     case WM_APP + 3: {                        // the drop queue's drain: one document per
         if (!g_dropQ.empty()) {               // message, so the window paints between loads
             std::wstring p = std::move(g_dropQ.front());
@@ -14881,7 +15039,7 @@ static const wchar_t* WxHrName(HRESULT hr) {
     if (hr == E_FAIL) return L"E_FAIL - the engine refused the package (often the Manifest V2 cutoff)";
     if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)) return L"ERROR_NOT_SUPPORTED - the engine came up with extensions off";
     if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) return L"ERROR_FILE_NOT_FOUND - manifest.json missing or invalid";
-    if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) return L"ERROR_INVALID_STATE - the profile carries stale state, or it is open in another Docsy window";
+    if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) return L"ERROR_INVALID_STATE - the browser process refused extension ops (another instance's engine, machine policy, inherited WEBVIEW2_* env vars, or this runtime build); one engine restart runs automatically";
     return L"";
 }
 static void WxTestRep(const wchar_t* fmt, ...) {
@@ -14986,6 +15144,9 @@ static int WxExtTestMain(const std::wstring& spec, const std::wstring& out) {
     WxTestRep(L"Docsy extension self-test  %04u-%02u-%02u %02u:%02u:%02u",
               st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     WxTestRep(L"target: %s", g_xt.id.empty() ? L"(diagnose only)" : g_xt.id.c_str());
+    WxCleanWebViewEnvVars();
+    WxLogOtherDocsy();
+    WxLogPolicies();
     LPWSTR ver = nullptr;
     if (SUCCEEDED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver)) && ver) {
         g_webVer = ver; CoTaskMemFree(ver);
