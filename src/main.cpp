@@ -11409,12 +11409,11 @@ static void WebEnsureEnv() {
     // store offers is still MV2 - Tampermonkey, uBlock Origin, Dark Reader. These
     // two switches hold the old manifest alive; unknown or already-flipped features
     // are ignored harmlessly by the runtime, so this costs nothing when not needed.
-    wrl::ComPtr<ICoreWebView2EnvironmentOptions2> envOpts2;
-    if (envOpts && SUCCEEDED(envOpts.As(&envOpts2)) && envOpts2) {
-        envOpts2->put_AdditionalBrowserArguments(
+    wrl::ComPtr<ICoreWebView2EnvironmentOptions> envOptsBase;      // the arguments ride
+    if (envOpts && SUCCEEDED(envOpts.As(&envOptsBase)) && envOptsBase)   // the base interface
+        envOptsBase->put_AdditionalBrowserArguments(
             L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled");
-        WxLogf(L"env: mv2 keep-alive arguments set");
-    }
+    WxLogf(L"env: mv2 keep-alive arguments set");
     // extension installs only work in a profile that was born with them on: a
     // user data folder provisioned by an older build - extensions off - keeps
     // that state forever, and every AddBrowserExtension fails inside it, no
@@ -15002,9 +15001,9 @@ static int WxExtTestMain(const std::wstring& spec, const std::wstring& out) {
         wrl::ComPtr<ICoreWebView2EnvironmentOptions6> o6;
         if (envOpts && SUCCEEDED(envOpts.As(&o6)) && o6)
             extOn = SUCCEEDED(o6->put_AreBrowserExtensionsEnabled(TRUE));
-        wrl::ComPtr<ICoreWebView2EnvironmentOptions2> o2;
-        if (envOpts && SUCCEEDED(envOpts.As(&o2)) && o2)
-            o2->put_AdditionalBrowserArguments(
+        wrl::ComPtr<ICoreWebView2EnvironmentOptions> oBase;         // the base interface carries
+        if (envOpts && SUCCEEDED(envOpts.As(&oBase)) && oBase)      // the additional arguments
+            oBase->put_AdditionalBrowserArguments(
                 L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled");
         WxTestRep(L"extensions flag: %s, mv2 keep-alive arguments set", extOn ? L"on" : L"COULD NOT SET");
         HRESULT hrE = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), envOpts.Get(),
