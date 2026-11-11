@@ -20,7 +20,7 @@ jobs:
           if not exist wv2\build\native\x64\WebView2LoaderStatic.lib exit 1
       - name: Build
         shell: cmd
-        run: rc /nologo /fo src\docsy.res src\docsy.rc && cl /nologo /std:c++20 /EHsc /O1 /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /I"wv2\build\native\include" /Fe:docsy.exe src\main.cpp src\docsy.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /FILEALIGN:512 /NODEFAULTLIB:libucrt.lib /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest /LIBPATH:"wv2\build\native\x64" WebView2LoaderStatic.lib advapi32.lib ucrt.lib > build.log 2>&1
+        run: rc /nologo /fo src\docsy.res src\docsy.rc && cl /nologo /std:c++20 /EHsc /O1 /GS- /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /I"wv2\build\native\include" /Fe:docsy.exe src\main.cpp src\docsy.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /FILEALIGN:512 /NODEFAULTLIB:libucrt.lib /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest /LIBPATH:"wv2\build\native\x64" WebView2LoaderStatic.lib advapi32.lib ucrt.lib > build.log 2>&1
       - name: Show build log
         if: always()
         shell: bash
