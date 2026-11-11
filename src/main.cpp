@@ -9845,6 +9845,43 @@ static void WxAddFolder(const std::wstring& dir, std::function<void(HRESULT, ICo
             [done](HRESULT r, ICoreWebView2BrowserExtension* ext) -> HRESULT { done(r, ext); return S_OK; }).Get());
     if (FAILED(hr)) done(hr, nullptr);
 }
+// a registration left by an earlier attempt (the profile remembers extensions across runs, and a
+// failed install can leave one behind) makes AddBrowserExtension answer ERROR_INVALID_STATE: so any
+// extension already registered under this id is removed first, then the folder is added fresh
+static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
+                             std::function<void(HRESULT, ICoreWebView2BrowserExtension*)> done) {
+    wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
+    if (!p) { done(E_NOINTERFACE, nullptr); return; }
+    HRESULT hr = p->GetBrowserExtensions(
+        Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
+            [dir, id, done](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
+                auto stale = std::make_shared<std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>>>();
+                UINT n = 0;
+                if (SUCCEEDED(hr) && list && SUCCEEDED(list->get_Count(&n)))
+                    for (UINT i = 0; i < n; i++) {
+                        wrl::ComPtr<ICoreWebView2BrowserExtension> e;
+                        if (FAILED(list->GetValueAtIndex(i, &e)) || !e) continue;
+                        LPWSTR rid = nullptr;
+                        if (SUCCEEDED(e->get_Id(&rid)) && rid) {
+                            if (id == rid) stale->push_back(e);
+                            CoTaskMemFree(rid);
+                        }
+                    }
+                if (stale->empty()) { WxAddFolder(dir, done); return S_OK; }
+                auto left = std::make_shared<int>((int)stale->size());
+                for (auto& e : *stale) {
+                    HRESULT rh = e->Remove(
+                        Microsoft::WRL::Callback<ICoreWebView2BrowserExtensionRemoveCompletedHandler>(
+                            [left, stale, dir, done](HRESULT) -> HRESULT {
+                                if (--*left == 0) WxAddFolder(dir, done);
+                                return S_OK;
+                            }).Get());
+                    if (FAILED(rh) && --*left == 0) WxAddFolder(dir, done);
+                }
+                return S_OK;
+            }).Get());
+    if (FAILED(hr)) WxAddFolder(dir, done);
+}
 static void WxNotifyTabs();
 static void WxFinishInit() {
     g_wxReady = true; g_wxBusy = false;
@@ -10068,17 +10105,20 @@ static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the U
     for (size_t i = 0; i < g_wxInstalling.size(); i++) if (g_wxInstalling[i] == j->id) { g_wxInstalling.erase(g_wxInstalling.begin() + i); break; }
     if (!j->ok) { WxNotifyFail(j->err); return; }
     std::wstring id = j->id, dir = j->dir;
-    WxAddFolder(dir, [id, dir](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
+    WxAddFolderFresh(dir, id, [id, dir](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
         if (FAILED(hr) || !ext) {                          // the reason travels with the failure:
             wchar_t why[160];                              // policy, old runtime, bad manifest - the
             if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED))   // toast should say which one it hit
                 swprintf_s(why, L"Extensions are turned off on this machine (0x%08lX).",
                            (unsigned long)hr);
+            else if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE))
+                swprintf_s(why, L"WebView2's extension store is in a bad state (0x%08lX). Close every Docsy window and try again.",
+                           (unsigned long)hr);
             else if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
                 swprintf_s(why, L"This extension unpacked wrong (0x%08lX). Try again.",
                            (unsigned long)hr);
             else
-                swprintf_s(why, L"WebView2 refused this extension (0x%08lX) - it may be an old Manifest V2 one.",
+                swprintf_s(why, L"WebView2 refused this extension (0x%08lX).",
                            (unsigned long)hr);
             WxNotifyFail(why);
             WxRmTree(dir);
