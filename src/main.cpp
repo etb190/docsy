@@ -1102,8 +1102,8 @@ static HBRUSH WebEditColors(HDC dc, HWND ctl);   // WM_CTLCOLOREDIT
 static void WebFailCard(HDC dc, int w, int h);   // the no-engine card in the view
 static void WebViewClick(POINT p);        // the fail card's download button
 static void WebRepaintChrome();           // nav + tabs + footer + rail in one call
-static void WebCardRect(RECT& c, int w, int h);   // the card's rect: the webview rides inset
-                                          // in the view, gutters around it for the shadow
+static void WebCardRect(RECT& c, int w, int h);   // the card's rect: the reader's own container,
+                                          // margins and all - the webview rides inside it
 static void WebCardPaint(HDC dc, int w, int h);   // the card's field, face and ring
 
 // the sidebar's web state - the same fields sd carries, pointed at the tabs.
@@ -1473,7 +1473,7 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             bool cl = false;
             int hit = WebTabRowHit(p, r.right, r.bottom, cl);
             if (hit >= 0 && hit < 1000 && cl) WebCloseTabAt(hit);
-            else if (hit >= 1000) WebNewTab(L"https://duckduckgo.com/", true);
+            else if (hit >= 1000) WebNewTab(L"https://www.google.com/", true);
             return 0;
         }
         int was = g.tbPressed;
@@ -1509,7 +1509,7 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             RECT r; GetClientRect(h, &r);
             bool cl = false;
             int hit = WebTabRowHit(p, r.right, r.bottom, cl);
-            if (hit < 0) WebNewTab(L"https://duckduckgo.com/", true);
+            if (hit < 0) WebNewTab(L"https://www.google.com/", true);
             return 0;
         }
         break;
@@ -10691,7 +10691,7 @@ static HFONT WebGlyphFont(int px) {                // Segoe MDL2 at px (dpi-scal
 }
 
 // What the idle address field shows: Safari prints the site, not the URL -
-// "duckduckgo.com", no scheme, no "www.", no path. Anything that is not a
+// "google.com", no scheme, no "www.", no path. Anything that is not a
 // plain web address (about:, edge:) is shown whole.
 static std::wstring WebHostOf(const std::wstring& u) {
     if (u.rfind(L"https://", 0) != 0 && u.rfind(L"http://", 0) != 0) return u;
@@ -11053,7 +11053,7 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int hit = WebNavHit(p);
             bool pill = PtInRect(&g_webOmni, p);
             bool xi = WxHit(p) >= 0;
-            SetCursor(LoadCursorW(nullptr, ((hit >= 0 && hit != WB_RELOAD) || xi) ? IDC_HAND : (pill ? IDC_IBEAM : IDC_ARROW)));
+            SetCursor(LoadCursorW(nullptr, (hit >= 0 || xi) ? IDC_HAND : (pill ? IDC_IBEAM : IDC_ARROW)));
             return TRUE;
         }
         break;
@@ -11271,7 +11271,7 @@ static void WebBarClick(int id) {
     case WB_RELOAD:
         if (t && t->web) { if (t->loading) t->web->Stop(); else t->web->Reload(); }
         return;
-    case WB_NEWTAB: WebNewTab(L"https://duckduckgo.com/", true); return;
+    case WB_NEWTAB: WebNewTab(L"https://www.google.com/", true); return;
     case WB_MENU: {
         if (!g_wstrip) return;
         POINT pt{ g_wbR[WB_MENU].left, g_wbR[WB_MENU].bottom };
@@ -11291,7 +11291,7 @@ static void WebBarClick(int id) {
         int c = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.main, nullptr);
         DestroyMenu(m);
         switch (c) {
-        case 1: WebNewTab(L"https://duckduckgo.com/", true); break;
+        case 1: WebNewTab(L"https://www.google.com/", true); break;
         case 2: WebZoomBy(1.25); break;
         case 3: WebZoomBy(0.8); break;
         case 4: WebZoomBy(0); break;               // 0 = reset to 100%
@@ -11317,8 +11317,9 @@ static void WebGo(const std::wstring& what) {
     if (s.find(L"://") != std::wstring::npos || s.rfind(L"about:", 0) == 0 || s.rfind(L"edge:", 0) == 0) {
         url = s;
     } else if (s.find(L'.') == std::wstring::npos || s.find(L' ') != std::wstring::npos) {
-        // a search, percent-encoded the way an address bar owes the engine
-        url = L"https://duckduckgo.com/?q=";
+        // a search, percent-encoded the way an address bar owes the engine:
+        // Google is the default search engine
+        url = L"https://www.google.com/search?q=";
         char hex[] = "0123456789ABCDEF";
         for (wchar_t c : s) {
             if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9')
@@ -11413,7 +11414,8 @@ static void WebThumbDecode(int id, IStream* st) {
     bm->GetHBITMAP(Gdiplus::Color(255, 0x1c, 0x1c, 0x1c), &full);   // the card's face behind
     delete bm;
     if (!full) return;
-    int TW2 = (int)(160 * g.dpi), TH2 = max(1, (int)((long long)TW2 * bh / bw));
+    int TW2 = (int)(240 * g.dpi), TH2 = max(1, (int)((long long)TW2 * bh / bw));   // 240dp: the rail
+                              // stretches thumbs past 96dp now, so the capture keeps the headroom
     BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), TW2, -TH2, 1, 32, BI_RGB };
     void* bits = nullptr;
     HBITMAP scaled = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
@@ -11581,12 +11583,15 @@ static void WebEnsureController(int i) {
                                                    // the card's backdrop shows instead, and the
                                                    // first NavigationCompleted raises the view
                 WebPlace(); WebRepaintChrome();
-                if (t && !t->pending.empty()) {    // a tab born before its engine navigates
-                    if (g_wxReady) {                        // the moment it exists - once the extensions
-                        t->web->Navigate(t->pending.c_str());   // are in, so content scripts hit page one
-                        t->pending.clear();
-                    }
-                }
+                if (t && !t->pending.empty()) {    // a tab born before its engine navigates the moment
+                    t->web->Navigate(t->pending.c_str());   // it exists. The page is the product: extensions
+                    t->pending.clear();            // already registered in the profile ride the browser
+                }                                  // process from its birth, so gating the first load on
+                                                   // the extension listing only ever delayed it - and a
+                                                   // listing that stalled left a fresh tab on its New Tab
+                                                   // word forever, the blackscreen's last disguise. The
+                                                   // WxFinishInit replay below stays for tabs whose
+                                                   // controller lands after the listing answers.
                 WxInit();                          // once per session, pending or not: the listing
                 return S_OK;                       // is the evidence - a refusal here condemns the
                                                    // whole engine, not just one install
@@ -11664,6 +11669,9 @@ static void WebNewTab(std::wstring url, bool makeCurrent) {
     if (makeCurrent || g_wtCur < 0) g_wtCur = i;
     WebEnsureEnv();
     WebEnsureController(i);
+    WebShowCurrent();                // the outgoing tab's surface hides at once: the new tab is
+                                     // current now, and the old page's frozen pixels must not read
+                                     // through the engine's build window like a wrong tab
     WebSideLayout();
     WebRepaintChrome();
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
@@ -11676,7 +11684,7 @@ static void WebCloseTabAt(int i) {
     g_wt.erase(g_wt.begin() + i);
     if (g_wt.empty()) {                            // Chrome closes the window; docsy's mode
         g_wtCur = -1;                              // stays and opens a fresh tab instead
-        WebNewTab(L"https://duckduckgo.com/", true);
+        WebNewTab(L"https://www.google.com/", true);
         return;
     }
     if (g_wtCur >= (int)g_wt.size()) g_wtCur = (int)g_wt.size() - 1;
@@ -11699,38 +11707,32 @@ static void WebSwitchTo(int i) {
     WebRepaintChrome();
 }
 
-// the page: KillerPDF's floating card. The webview rides inset in the view -
-// its top tucks under the strip the way the reader's card tucks under the tab
-// band, an 8dp gutter runs down the right (the window gutter), the foot keeps
-// 16dp (the shadow's room, the rows the reader's footer used to own), and the
-// left edge either butts the thumbnails container - its halo falls on it, the
-// rail's story - or, with the rail closed, keeps the same 8dp gutter. The
-// gutters are where the card's PaneShadow shows.
-static int WebGutL() { return g_webSide ? 0 : (int)(8 * g.dpi); }
-
+// the page: the READER'S OWN CONTAINER, copied whole. The webview rides in the
+// same rounded card the reader's pages sit in - RadCard 6 corners, the 1px
+// #555 ring, flush against the toolbar above, the rail on the left and the
+// window's foot, the classic 8dp window gutter on the right. Same container,
+// same margins, same bake - the gutters and the foot are where the card's
+// PaneShadow shows, exactly as it does around the PDF pages.
 static void WebCardRect(RECT& c, int w, int h) {
-    int L = WebGutL();
-    int R = max(L + 10, w - (int)(8 * g.dpi));
-    int B = max(10, h - (int)(16 * g.dpi));
-    c = { L, 0, R, B };
+    int R = max(10, w - (int)(8 * g.dpi));
+    c = { 0, 0, R, h };
 }
 
-// the view's whole paint in browser mode: KillerPDF's backdrop - the shared
-// chrome grain as the field, the card's PaneShadow falling into the gutters
-// (black, BlurRadius 16, ShadowDepth 5, Direction 270, Opacity 0.6, the same
-// blurred silhouette CardShadowStrip bakes for the reader's panes, evaluated
-// over the three strips where the gutters are - the middle dies under the
-// webview's own pixels) - plus the no-engine card when the runtime is missing
-// and the New Tab word while the engine's first frame is still on its way, so
-// an open and a fresh tab show the card's own room, never black glass. One
-// body for the live view's WM_PAINT and the shot composite, so the two can
-// never drift.
+// the view's whole paint in browser mode: the reader's OWN backdrop recipe,
+// run verbatim - the shared chrome grain as the field, CardShadowStrip's
+// PaneShadow in the right gutter, the canvas grain inside the ring and
+// CardRingBake's #555 edge (the exact functions the reader's CardBackdrop
+// calls, so the browser's card is the pages' card to the pixel) - plus the
+// no-engine card when the runtime is missing and the New Tab word while the
+// engine's first frame is still on its way, so an open and a fresh tab show
+// the card's own room, never black glass. One body for the live view's
+// WM_PAINT and the shot composite, so the two can never drift.
 static HBITMAP g_wcbm = nullptr; static HDC g_wcdc = nullptr;
-static int g_wcw = 0, g_wch = 0, g_wcside = -1; static double g_wcdpi = 0;
+static int g_wcw = 0, g_wch = 0; static double g_wcdpi = 0;
 
 static void WebCardPaint(HDC dc, int w, int h) {
     RECT vr{ 0, 0, w, h };
-    if (!g_wcbm || g_wcw != w || g_wch != h || g_wcdpi != g.dpi || g_wcside != (int)g_webSide) {
+    if (!g_wcbm || g_wcw != w || g_wch != h || g_wcdpi != g.dpi) {
         BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
         BYTE* bits = nullptr;
         HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&bits, nullptr, 0);
@@ -11744,49 +11746,27 @@ static void WebCardPaint(HDC dc, int w, int h) {
             SetBrushOrgEx(bdc, po.x, po.y, nullptr);
             RECT fr{ 0, 0, w, h };
             FillRect(bdc, &fr, GrainBrush(1));                // the one dark chrome field
-            int L = WebGutL();
-            int R = max(L + 10, w - (int)(8 * g.dpi));
-            int B = max(10, h - (int)(16 * g.dpi));
-            const double sig = 8.0 * g.dpi, depth = 5.0 * g.dpi;   // BlurRadius 16, ShadowDepth 5
-            int rad = max(2, (int)(6 * g.dpi));
-            float sx0 = (float)L, sy0 = (float)depth, sx1 = (float)R, sy1 = (float)B + (float)depth;
-            // the silhouette: the card pushed straight down, the reader's own recipe
-            const int LUTN = 236;
-            static float lut[LUTN]; static double lutSig = 0;
-            if (lutSig != sig) {
-                for (int i = 0; i < LUTN; i++) {
-                    double d2 = -3.0 * sig + (6.0 * sig) * i / (LUTN - 1);
-                    lut[i] = (float)(0.6 * Phi(-d2 / sig));
+            int R = max(10, w - (int)(8 * g.dpi));            // the card inside this DIB: the reader's
+            int rad = max(2, (int)(6 * g.dpi));               // unsplit geometry, flush left and foot
+            if (R > 2 * rad + 4 && h > 2 * rad + 2) {
+                CardShadowStrip(bits, w, h, 0, R, rad, 0);    // the reader's PaneShadow, its own
+                                                              // function: black, BlurRadius 16,
+                                                              // ShadowDepth 5, Direction 270,
+                                                              // Opacity 0.6 - the gutter is the only
+                                                              // place it can show, the webview covers
+                                                              // the rest exactly as pages cover it
+                Gdiplus::Graphics gs(bdc);
+                gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                Gdiplus::GraphicsPath* inner = CardPath(0.5f, 0.5f, (float)R - 1, (float)h - 1,
+                                                        (float)rad - 1, 0);   // the canvas interior,
+                if (Gdiplus::TextureBrush* c = GrainTex(0))          // half a pixel in, the reader's
+                    gs.FillPath(c, inner);                           // own edge rule
+                else {
+                    Gdiplus::SolidBrush cb(Gdiplus::Color(255, 58, 58, 58));
+                    gs.FillPath(&cb, inner);
                 }
-                lutSig = sig;
-            }
-            for (int side = 0; side < 3; side++) {            // three disjoint strips: the right
-                int x0, x1, y0, y1;                           // falloff, the left one when the
-                if (side == 0) {                              // gutter exists, and the foot - the
-                    x0 = max(0, R - 4); x1 = w; y0 = 0; y1 = h;    // corners wrap through the SDF
-                } else if (side == 1) {
-                    if (L <= 0) continue;                     // open rail: the halo falls on it,
-                    x0 = 0; x1 = min(w, L + 4); y0 = 0; y1 = h;    // DrawRailShadow's, not this one's
-                } else {
-                    x0 = (L > 0) ? min(w, L + 4) : 0;   // open rail: the left column is the
-                                                        // card's own - the strip starts at 0
-                    x1 = max(x0, min(w, R - 4));
-                    y0 = max(0, B - 4); y1 = h;
-                }
-                for (int y = y0; y < y1; y++) {
-                    BYTE* row = bits + (size_t)y * w * 4;
-                    for (int x = x0; x < x1; x++) {
-                        float d = SdRoundRect(x + 0.5f, y + 0.5f, sx0, sy0, sx1, sy1, (float)rad);
-                        int i = (int)((d / sig + 3.0) * (LUTN - 1) / 6.0);
-                        int a = i < 0 ? (int)(0.6 * 255 + 0.5f) : (i >= LUTN ? 0 : (int)(lut[i] * 255 + 0.5f));
-                        if (a <= 0) continue;
-                        BYTE* p = row + (size_t)x * 4;
-                        int inv = 255 - a;
-                        p[0] = (BYTE)((p[0] * inv) >> 8);
-                        p[1] = (BYTE)((p[1] * inv) >> 8);
-                        p[2] = (BYTE)((p[2] * inv) >> 8);
-                    }
-                }
+                delete inner;
+                CardRingBake(bits, w, h, R, rad, 0, 0);       // the #555 ring, exact per pixel
             }
             SelectObject(bdc, ob);
             DeleteDC(bdc);
@@ -11795,7 +11775,7 @@ static void WebCardPaint(HDC dc, int w, int h) {
             g_wcbm = bm;
             g_wcdc = CreateCompatibleDC(dc);
             SelectObject(g_wcdc, bm);
-            g_wcw = w; g_wch = h; g_wcdpi = g.dpi; g_wcside = (int)g_webSide;
+            g_wcw = w; g_wch = h; g_wcdpi = g.dpi;
         }
     }
     if (g_wcbm) BitBlt(dc, 0, 0, w, h, g_wcdc, 0, 0, SRCCOPY);
@@ -11837,7 +11817,7 @@ static void WebToggle(bool on) {
     if (g.side)                                    // the rail is the browser's own, closed until asked
         ShowWindow(g.side, on ? (g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE) : (g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE));
     if (on) {
-        if (g_wt.empty()) WebNewTab(L"https://duckduckgo.com/", true);
+        if (g_wt.empty()) WebNewTab(L"https://www.google.com/", true);
         else { WebEnsureEnv(); WebShowCurrent(); }
         if (g_wtool) { ShowWindow(g_wtool, SW_SHOWNOACTIVATE); InvalidateRect(g_wtool, nullptr, FALSE); }
         if (g_wstrip) { ShowWindow(g_wstrip, SW_SHOWNOACTIVATE); InvalidateRect(g_wstrip, nullptr, FALSE); }
@@ -11874,7 +11854,7 @@ static void WebShutdown() {
     g_wvEnv.Reset();
     if (g_wcbm) { DeleteObject(g_wcbm); g_wcbm = nullptr; }   // the card's baked backdrop
     if (g_wcdc) { DeleteDC(g_wcdc); g_wcdc = nullptr; }
-    g_wcw = g_wch = 0; g_wcside = -1;
+    g_wcw = g_wch = 0;
 }
 
 // ---- the sidebar: the reader's page rail, showing the web tabs ----
@@ -11888,7 +11868,9 @@ static int WebSideTH(int i) {
 static void WebSideLayout() {
     int n = (int)g_wt.size();
     if (!n || ws.cw <= 0) { ws.docH = 0; return; }
-    ws.tw = (int)(96 * g.dpi);                     // the reader's card width, the same figure
+    ws.tw = max(1, (int)std::lround((ws.cw - SBar()) * 0.95));   // 95% of the item's container:
+                                                                 // KillerPDF's stretch-to-width card,
+                                                                 // the last 5% left as its margin
     int padT = (int)(8 * g.dpi), below = (int)(28 * g.dpi);
     ws.top.assign((size_t)n + 1, 0);
     int y = (int)(8 * g.dpi);
@@ -12070,7 +12052,7 @@ static std::wstring WebStatusLine() {
 }
 
 static bool WebKey(WPARAM wp, bool ctrl, bool shift) {
-    if (ctrl && wp == 'T') { WebNewTab(L"https://duckduckgo.com/", true); return true; }
+    if (ctrl && wp == 'T') { WebNewTab(L"https://www.google.com/", true); return true; }
     if (ctrl && wp == 'W') { WebCloseTabAt(g_wtCur); return true; }
     if (ctrl && wp == 'L') {
         if (g_wedit && !g_webFail) { SetFocus(g_wedit); PostMessageW(g_wedit, EM_SETSEL, 0, -1); }
@@ -15702,7 +15684,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
         for (int a = 3; a < argc; a++)
             if (!wcscmp(argv[a], L"web=1")) {
                 WebTab t1; t1.id = g_wtIds++;
-                t1.url = L"https://duckduckgo.com/"; t1.title = L"DuckDuckGo";
+                t1.url = L"https://www.google.com/"; t1.title = L"Google";
                 WebTab t2; t2.id = g_wtIds++;
                 t2.url = L"https://github.com/etb190/docsy";
                 t2.title = L"GitHub - etb190/docsy";
