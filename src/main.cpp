@@ -9196,10 +9196,6 @@ struct WebTab {
     wrl::ComPtr<ICoreWebView2> web;
     double zoom = 1.0;
     bool loading = false, canBack = false, canFwd = false;
-    bool shown = false;                    // the first frame has landed: a controller whose
-                                           // engine has yet to composite stays invisible, so
-                                           // a fresh tab shows the card's backdrop, never the
-                                           // black glass the bare surface reads as
     bool capturing = false, capturePending = false;
     unsigned long long captureDue = 0;
     std::wstring pending;                  // the URL a brand-new tab opens once its
@@ -11438,9 +11434,9 @@ static void WebThumbDecode(int id, IStream* st) {
 
 static void WebShowCurrent() {
     for (int i = 0; i < (int)g_wt.size(); i++)
-        if (g_wt[i].ctr)   // a tab whose first frame never landed stays hidden: its surface
-            g_wt[i].ctr->put_IsVisible((i == g_wtCur && g_wt[i].shown) ? TRUE : FALSE);   // is still black glass
-    WebPlace();
+        if (g_wt[i].ctr)   // the current tab's surface shows at once: its DefaultBackgroundColor
+            g_wt[i].ctr->put_IsVisible((i == g_wtCur) ? TRUE : FALSE);   // is the card's own dark, so the engine's spin-up reads as
+    WebPlace();        // the card, never as black glass or a page that never lands
 }
 
 static void WebHistorySync(int id) {
@@ -11531,13 +11527,6 @@ static void WebEnsureController(int i) {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
                             t->loading = false;
-                            if (!t->shown) {           // the engine's first frame exists now: the
-                                t->shown = true;       // card comes off the backdrop - this is the
-                                if (g_webOn && g_wtCur >= 0 && g_wtCur < (int)g_wt.size()
-                                    && &g_wt[g_wtCur] == t && t->ctr)
-                                    t->ctr->put_IsVisible(TRUE);
-                                if (g.view) InvalidateRect(g.view, nullptr, FALSE);
-                            }
                             WxPushState(t->web.Get());                 // the store button learns what is installed
                             t->captureDue = GetTickCount64() + 1200;   // let the page settle, then
                             WebEnsurePump();                           // the rail gets its thumb
@@ -11576,25 +11565,21 @@ static void WebEnsureController(int i) {
                             WebHistorySync(id);
                             return S_OK;
                         }).Get(), &t->tkHist);
-                c->put_IsVisible(FALSE);           // the surface stays dark until its first frame:
-                                                   // a fresh controller's HWND reads as pure black
-                                                   // glass before Chromium composites into it, which
-                                                   // is the blackscreen on open and on a new tab -
-                                                   // the card's backdrop shows instead, and the
-                                                   // first NavigationCompleted raises the view
-                WebPlace(); WebRepaintChrome();
+                WebShowCurrent();                  // the controller shows THE MOMENT it exists: a surface
+                                                   // held invisible until its first NavigationCompleted
+                                                   // never got there on real machines - the hidden widget
+                                                   // throttles its renderer and the first navigation stalls
+                                                   // behind it, which held the card on its placeholder word
+                                                   // forever. The DefaultBackgroundColor set above IS the
+                                                   // card's dark, so the visible spin-up reads as the card
+                                                   // itself, never as black glass - and the page lands over it
+                WebRepaintChrome();
                 if (t && !t->pending.empty()) {    // a tab born before its engine navigates the moment
                     t->web->Navigate(t->pending.c_str());   // it exists. The page is the product: extensions
                     t->pending.clear();            // already registered in the profile ride the browser
-                }                                  // process from its birth, so gating the first load on
-                                                   // the extension listing only ever delayed it - and a
-                                                   // listing that stalled left a fresh tab on its New Tab
-                                                   // word forever, the blackscreen's last disguise. The
-                                                   // WxFinishInit replay below stays for tabs whose
-                                                   // controller lands after the listing answers.
-                WxInit();                          // once per session, pending or not: the listing
-                return S_OK;                       // is the evidence - a refusal here condemns the
-                                                   // whole engine, not just one install
+                }                                  // process from its birth, and WxInit below only asks the
+                WxInit();                          // listing - a stall there can never hold the page back.
+                return S_OK;
             }).Get());
 }
 
@@ -11707,26 +11692,90 @@ static void WebSwitchTo(int i) {
     WebRepaintChrome();
 }
 
-// the page: the READER'S OWN CONTAINER, copied whole. The webview rides in the
-// same rounded card the reader's pages sit in - RadCard 6 corners, the 1px
-// #555 ring, flush against the toolbar above, the rail on the left and the
-// window's foot, the classic 8dp window gutter on the right. Same container,
-// same margins, same bake - the gutters and the foot are where the card's
-// PaneShadow shows, exactly as it does around the PDF pages.
+// the page: the reader's own container, and the reader's own margins. The
+// webview rides in the same rounded card the pages sit in - RadCard 6 corners,
+// the 1px #555 ring - and the card's classic 8dp window gutter now sits on
+// EVERY side: under the address bar, off the rail, off the foot, and the
+// original 8dp on the right, so the PaneShadow's room shows all the way around
+// the page - a floating card, same bake as the pages' card.
 static void WebCardRect(RECT& c, int w, int h) {
-    int R = max(10, w - (int)(8 * g.dpi));
-    c = { 0, 0, R, h };
+    int m = (int)(8 * g.dpi);
+    c = { m, m, max(m + 10, w - m), max(m + 10, h - m) };
+}
+
+// the reader's PaneShadow (black, BlurRadius 16, ShadowDepth 5, Direction 270,
+// Opacity 0.6) around a card that FLOATS inside its DIB: CardShadowStrip only
+// paints the left/right falloffs because the reader's card is flush against
+// the band, the rail and the foot - the browser's card floats 8dp free on all
+// four sides, so the same erfc falloff paints all the way around it.
+static void WebCardShadow(BYTE* bits, int w, int h, int x0, int y0, int x1, int y1, int rad) {
+    const double sig = 8.0 * g.dpi;
+    const double depth = 5.0 * g.dpi;
+    float sx0 = (float)x0, sy0 = (float)y0 + (float)depth, sx1 = (float)x1, sy1 = (float)y1 + (float)depth;
+    const int LUTN = 236;
+    static float lut[LUTN]; static double lutSig = 0;
+    if (lutSig != sig) {
+        for (int i = 0; i < LUTN; i++) {
+            double d = -3.0 * sig + (6.0 * sig) * i / (LUTN - 1);
+            lut[i] = (float)(0.6 * Phi(-d / sig));
+        }
+        lutSig = sig;
+    }
+    int yA = max(0, y0 - (int)(3 * sig) - 4), yB = min(h, y1 + (int)depth + (int)(3 * sig) + 4);
+    for (int y = yA; y < yB; y++) {
+        BYTE* row = bits + (size_t)y * w * 4;
+        for (int x = 0; x < w; x++) {
+            float d = SdRoundRect(x + 0.5f, y + 0.5f, sx0, sy0, sx1, sy1, (float)rad);
+            int i = (int)((d / sig + 3.0) * (LUTN - 1) / 6.0);
+            int a = i < 0 ? (int)(0.6 * 255 + 0.5f) : (i >= LUTN ? 0 : (int)(lut[i] * 255 + 0.5f));
+            if (a <= 0) continue;
+            BYTE* p = row + (size_t)x * 4;
+            int inv = 255 - a;
+            p[0] = (BYTE)((p[0] * inv) >> 8);
+            p[1] = (BYTE)((p[1] * inv) >> 8);
+            p[2] = (BYTE)((p[2] * inv) >> 8);
+        }
+    }
+}
+
+// the #555 ring for the floating card: CardRingBake's own per-pixel band with
+// its analytic corner AA, all four edges free instead of flush to the foot.
+static void WebCardRing(BYTE* bits, int w, int h, int x0, int y0, int x1, int y1, int rad) {
+    float ox0 = (float)x0 - 0.5f, oy0 = (float)y0 - 0.5f, ox1 = (float)x1 - 0.5f, oy1 = (float)y1 - 0.5f;
+    float ix0 = (float)x0 + 0.5f, iy0 = (float)y0 + 0.5f, ix1 = ox1 - 1.0f, iy1 = oy1 - 1.0f;
+    int band2 = min(rad + 2, min(y1 - y0, x1 - x0));
+    auto ring = [&](int x, int y) {
+        float f = -SdRoundRect((float)x, (float)y, ox0, oy0, ox1, oy1, (float)rad);   // inside outer
+        float gq = SdRoundRect((float)x, (float)y, ix0, iy0, ix1, iy1, (float)rad - 1);   // outside inner
+        float a = min(f, gq) + 0.5f;
+        if (a <= 0) return;
+        if (a > 1) a = 1;
+        BYTE* p = bits + ((size_t)y * w + x) * 4;
+        int al = (int)(a * 255 + 0.5f), inv = 255 - al;
+        p[0] = (BYTE)((0x55 * al + p[0] * inv) >> 8);
+        p[1] = (BYTE)((0x55 * al + p[1] * inv) >> 8);
+        p[2] = (BYTE)((0x55 * al + p[2] * inv) >> 8);
+    };
+    for (int y = max(0, y0 - 1); y < min(h, y0 + band2); y++)          // top strip, then bottom,
+        for (int x = max(0, x0 - 1); x < min(w, x1 + 1); x++) ring(x, y);
+    for (int y = max(y0 + band2, max(0, y1 - band2)); y < min(h, y1 + 1); y++)
+        for (int x = max(0, x0 - 1); x < min(w, x1 + 1); x++) ring(x, y);
+    for (int y = max(0, y0 + band2); y < max(y0 + band2, min(h, y1 - band2)); y++) {
+        for (int x = max(0, x0 - 1); x < min(w, x0 + band2); x++) ring(x, y);   // left straight,
+        for (int x = max(x0 + band2, min(w, x1 - band2)); x < min(w, x1 + 1); x++) ring(x, y);   // right
+    }
 }
 
 // the view's whole paint in browser mode: the reader's OWN backdrop recipe,
-// run verbatim - the shared chrome grain as the field, CardShadowStrip's
-// PaneShadow in the right gutter, the canvas grain inside the ring and
-// CardRingBake's #555 edge (the exact functions the reader's CardBackdrop
-// calls, so the browser's card is the pages' card to the pixel) - plus the
-// no-engine card when the runtime is missing and the New Tab word while the
-// engine's first frame is still on its way, so an open and a fresh tab show
-// the card's own room, never black glass. One body for the live view's
-// WM_PAINT and the shot composite, so the two can never drift.
+// run verbatim - the shared chrome grain as the field, the PaneShadow all the
+// way around the floating card, the canvas grain inside the ring and the #555
+// edge (the exact recipes the reader's CardBackdrop bakes, so the browser's
+// card is the pages' card to the pixel) - plus the no-engine card when the
+// runtime is missing. The webview itself lands on the card's rect the moment
+// its controller exists, its own background the card's dark, so an open and a
+// fresh tab show the card's room until the page composites - never black
+// glass, never a placeholder word. One body for the live view's WM_PAINT and
+// the shot composite, so the two can never drift.
 static HBITMAP g_wcbm = nullptr; static HDC g_wcdc = nullptr;
 static int g_wcw = 0, g_wch = 0; static double g_wcdpi = 0;
 
@@ -11746,18 +11795,20 @@ static void WebCardPaint(HDC dc, int w, int h) {
             SetBrushOrgEx(bdc, po.x, po.y, nullptr);
             RECT fr{ 0, 0, w, h };
             FillRect(bdc, &fr, GrainBrush(1));                // the one dark chrome field
-            int R = max(10, w - (int)(8 * g.dpi));            // the card inside this DIB: the reader's
-            int rad = max(2, (int)(6 * g.dpi));               // unsplit geometry, flush left and foot
-            if (R > 2 * rad + 4 && h > 2 * rad + 2) {
-                CardShadowStrip(bits, w, h, 0, R, rad, 0);    // the reader's PaneShadow, its own
-                                                              // function: black, BlurRadius 16,
+            int m = (int)(8 * g.dpi);                         // the card inside this DIB: 8dp of
+            int R = max(m + 10, w - m), B = max(m + 10, h - m);   // room on every side, the
+            int rad = max(2, (int)(6 * g.dpi));               // reader's own corners
+            if (R - m > 2 * rad + 4 && B - m > 2 * rad + 2) {
+                WebCardShadow(bits, w, h, m, m, R, B, rad);   // the reader's PaneShadow all the way
+                                                              // around: black, BlurRadius 16,
                                                               // ShadowDepth 5, Direction 270,
-                                                              // Opacity 0.6 - the gutter is the only
-                                                              // place it can show, the webview covers
-                                                              // the rest exactly as pages cover it
+                                                              // Opacity 0.6 - the gutters are where
+                                                              // it shows, the webview covers the
+                                                              // middle exactly as pages cover it
                 Gdiplus::Graphics gs(bdc);
                 gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                Gdiplus::GraphicsPath* inner = CardPath(0.5f, 0.5f, (float)R - 1, (float)h - 1,
+                Gdiplus::GraphicsPath* inner = CardPath((float)m + 0.5f, (float)m + 0.5f,
+                                                        (float)(R - m) - 1, (float)(B - m) - 1,
                                                         (float)rad - 1, 0);   // the canvas interior,
                 if (Gdiplus::TextureBrush* c = GrainTex(0))          // half a pixel in, the reader's
                     gs.FillPath(c, inner);                           // own edge rule
@@ -11766,7 +11817,7 @@ static void WebCardPaint(HDC dc, int w, int h) {
                     gs.FillPath(&cb, inner);
                 }
                 delete inner;
-                CardRingBake(bits, w, h, R, rad, 0, 0);       // the #555 ring, exact per pixel
+                WebCardRing(bits, w, h, m, m, R, B, rad);         // the #555 ring, exact per pixel
             }
             SelectObject(bdc, ob);
             DeleteDC(bdc);
@@ -11784,24 +11835,15 @@ static void WebCardPaint(HDC dc, int w, int h) {
         FillRect(dc, &vr, pb); DeleteObject(pb);
     }
     if (g_webFail) { WebFailCard(dc, w, h); return; }
-    WebTab* t = WebCur();
-    if (t && !t->shown) {                        // the engine's first frame has not landed: the
-        SetBkMode(dc, TRANSPARENT);              // card says what it is instead of black glass
-        SelectObject(dc, CaptionFont(g_tbcap, 15, false, L"Killer Sans"));
-        SetTextColor(dc, wvb::InkDim);
-        RECT tr{ 0, h / 2 - (int)(12 * g.dpi), w, h / 2 + (int)(12 * g.dpi) };
-        DrawTextW(dc, L"New Tab", -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
 }
 
 static void WebPlace() {
-    WebTab* t = WebCur();
-    if (!g.view || !t || !t->ctr) return;
+    if (!g.view) return;
     RECT c; WebCardRect(c, g.cw, g.ch);
-    RECT b = c;
-    if (b.right <= b.left || b.bottom <= b.top) return;
-    t->ctr->put_Bounds(b);
-}
+    if (c.right <= c.left || c.bottom <= c.top) return;
+    for (auto& t : g_wt)                 // every controller rides the card's rect - one born
+        if (t.ctr) t.ctr->put_Bounds(c); // in the background keeps it until it is shown, and
+}                                        // none is left at the parent's raw client default
 
 static void WebResizeDeb() {                       // a resize re-captures the visible thumb
     WebTab* t = WebCur();
