@@ -14893,6 +14893,7 @@ static void WxTestRep(const wchar_t* fmt, ...) {
 static void WxTestFinish(int code) {
     if (g_xt.fin) return;
     g_xt.fin = true;
+    g_xt.exitCode = code;
     {   wchar_t n[64]; swprintf_s(n, L"exit code: %d\r\n", code); g_xt.report += n; }
     std::string raw;                                    // the fetch/download steps speak
     PWSTR la = nullptr;                                 // only in webext.log: the tail rides along
