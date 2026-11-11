@@ -94,6 +94,7 @@ using std::min; using std::max;
 #include <winhttp.h>     // the Chrome Web Store download
 #include <thread>
 #include <memory>
+#include <cstdarg>
 #include <functional>
 #include <cstring>
 #include <cctype>
@@ -9683,6 +9684,35 @@ static void WxRmTree(const std::wstring& p) {
     }
     RemoveDirectoryW(p.c_str());
 }
+// ---- install diagnostics. every step that can refuse an extension writes its
+// reason here, to %LOCALAPPDATA%\Docsy\webext.log - a store-pill tooltip can
+// never carry an HRESULT, and "it always fails" needs numbers to be fixed ----
+static void WxLogf(const wchar_t* fmt, ...) {
+    static bool dead = false;                       // the log is a luxury, never a roadblock
+    if (dead) return;
+    wchar_t msg[600];
+    va_list ap; va_start(ap, fmt);
+    _vsnwprintf_s(msg, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    SYSTEMTIME st; GetLocalTime(&st);
+    wchar_t line[760];
+    _snwprintf_s(line, _TRUNCATE, L"[%02u-%02u %02u:%02u:%02u.%03u] %s\r\n",
+                 st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, msg);
+    PWSTR la = nullptr;
+    SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la);
+    std::wstring p = (la ? std::wstring(la) : std::wstring(L".")) + L"\\Docsy\\webext.log";
+    if (la) CoTaskMemFree(la);
+    HANDLE h = CreateFileW(p.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { dead = true; return; }
+    DWORD wrote = 0;
+    WriteFile(h, line, (DWORD)(wcslen(line) * sizeof(wchar_t)), &wrote, nullptr);
+    CloseHandle(h);
+    WIN32_FILE_ATTRIBUTE_DATA fa{};                 // over half a meg: the older half moves aside
+    if (GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &fa) &&
+        (((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow) > (512ll << 10))
+        MoveFileExW(p.c_str(), (p + L".old").c_str(), MOVEFILE_REPLACE_EXISTING);
+}
 static bool WxReadFile(const std::wstring& p, std::string& out) {
     HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -9835,15 +9865,16 @@ static wrl::ComPtr<ICoreWebView2Profile7> WxProfile() {
             if (SUCCEEDED(p.As(&p7)) && p7) { g_wxProf = p7; break; }
         }
     }
+    if (!g_wxProf) WxLogf(L"profile: no ICoreWebView2Profile7 on any tab - the runtime has no extension API");
     return g_wxProf;
 }
 static void WxAddFolder(const std::wstring& dir, std::function<void(HRESULT, ICoreWebView2BrowserExtension*)> done) {
     wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
-    if (!p) { done(E_NOINTERFACE, nullptr); return; }
+    if (!p) { WxLogf(L"add: no profile for %s", dir.c_str()); done(E_NOINTERFACE, nullptr); return; }
     HRESULT hr = p->AddBrowserExtension(dir.c_str(),
         Microsoft::WRL::Callback<ICoreWebView2ProfileAddBrowserExtensionCompletedHandler>(
             [done](HRESULT r, ICoreWebView2BrowserExtension* ext) -> HRESULT { done(r, ext); return S_OK; }).Get());
-    if (FAILED(hr)) done(hr, nullptr);
+    if (FAILED(hr)) { WxLogf(L"add: %s refused synchronously 0x%08lX", dir.c_str(), (unsigned long)hr); done(hr, nullptr); }
 }
 // a registration left by an earlier attempt (the profile remembers extensions across runs, and a
 // failed install can leave one behind) makes AddBrowserExtension answer ERROR_INVALID_STATE: so any
@@ -9867,7 +9898,8 @@ static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
                             CoTaskMemFree(rid);
                         }
                     }
-                if (stale->empty()) { WxAddFolder(dir, done); return S_OK; }
+                if (stale->empty()) { WxLogf(L"add: no stale registration under %s", id.c_str()); WxAddFolder(dir, done); return S_OK; }
+                WxLogf(L"add: %u stale registration(s) under %s - removing before the fresh add", (unsigned)stale->size(), id.c_str());
                 auto left = std::make_shared<int>((int)stale->size());
                 for (auto& e : *stale) {
                     HRESULT rh = e->Remove(
@@ -9933,11 +9965,13 @@ static void WxInit() {
                     }
                     if (!found) toAdd.push_back(i);
                 }
+                WxLogf(L"init: %u installed, %zu folder(s), %zu to re-add", (unsigned)have.size(), g_wx.size(), toAdd.size());
                 if (toAdd.empty()) { WxFinishInit(); return S_OK; }
                 *left = (int)toAdd.size();
                 for (int i : toAdd) {
                     std::wstring id = g_wx[i].id, dir = g_wx[i].dir;
                     WxAddFolder(dir, [id, left](HRESULT r, ICoreWebView2BrowserExtension* ext) {
+                        WxLogf(L"init: re-add %s -> 0x%08lX", id.c_str(), (unsigned long)r);
                         int k = WxFind(id);
                         if (k >= 0) {
                             if (SUCCEEDED(r) && ext) {
@@ -9951,7 +9985,7 @@ static void WxInit() {
                 }
                 return S_OK;
             }).Get());
-    if (FAILED(hr0)) { g_wxBusy = false; g_wxOk = false; WxFinishInit(); }
+    if (FAILED(hr0)) { WxLogf(L"init: GetBrowserExtensions refused 0x%08lX", (unsigned long)hr0); g_wxBusy = false; g_wxOk = false; WxFinishInit(); }
 }
 
 // ---- installing from the Chrome Web Store ----
@@ -9980,6 +10014,7 @@ static bool WxHttpGet(const std::wstring& url, const std::wstring& ua, std::vect
         if (WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr)) {
             DWORD code = 0, sz = sizeof code;
             WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz, WINHTTP_NO_HEADER_INDEX);
+            WxLogf(L"dl: HTTP %u", code);
             if (code == 200) {
                 ok = true;
                 for (;;) {
@@ -10012,6 +10047,7 @@ static std::wstring WxCleanVer(const std::wstring& v) {     // "131.0.2903.112 b
 }
 static void WxFetch(WxJob& j, const std::wstring& rawVer, const std::wstring& root) {   // worker thread
     std::wstring ver = WxCleanVer(rawVer);
+    WxLogf(L"fetch: id %s, prodver %s", j.id.c_str(), ver.c_str());
     std::vector<unsigned char> d;
     // the update service answers by the Chrome version it is told: the runtime's own first, then a
     // plain stable one - a 204/403 for one is often a 200 for the other
@@ -10025,12 +10061,13 @@ static void WxFetch(WxJob& j, const std::wstring& rawVer, const std::wstring& ro
         d.clear(); j.err.clear();
         if (WxHttpGet(url, ua, d, j.err) && d.size() >= 64) break;
         if (j.err.empty()) j.err = L"The Chrome Web Store has no download for this extension.";
+        WxLogf(L"fetch: prodver %s refused: %s", tries[a].c_str(), j.err.c_str());
         d.clear();
     }
-    if (d.empty()) return;
+    if (d.empty()) { WxLogf(L"fetch: every version refused"); return; }
     if (d.size() < 64) { j.err = L"The Chrome Web Store has no download for this extension."; return; }
     size_t zo = 0; std::string key;
-    if (!crxk::CrxParse(d.data(), d.size(), zo, key)) { j.err = L"That is not a valid extension package."; return; }
+    if (!crxk::CrxParse(d.data(), d.size(), zo, key)) { WxLogf(L"fetch: not a crx (%zu bytes)", d.size()); j.err = L"That is not a valid extension package."; return; }
     std::vector<crxk::ZipEnt> zl;
     if (!crxk::ZipList(d.data() + zo, d.size() - zo, zl)) { j.err = L"The extension package is damaged."; return; }
     std::wstring dir = root + L"\\" + j.id;
@@ -10054,6 +10091,7 @@ static void WxFetch(WxJob& j, const std::wstring& rawVer, const std::wstring& ro
     }
     if (!man) { j.err = L"The package has no manifest."; WxRmTree(dir); return; }
     j.dir = dir; j.ok = true;
+    WxLogf(L"fetch: unpacked %zu entries -> %s", zl.size(), dir.c_str());
 }
 static std::wstring WxJsStr(const std::wstring& s) {
     std::wstring r = L"\"";
@@ -10068,7 +10106,8 @@ static void WxPushState(ICoreWebView2* w) {             // the store button's st
     if (!w) return;
     std::wstring js = L"window.__docsySet&&window.__docsySet([";
     bool first = true;
-    for (size_t i = 0; i < g_wx.size(); i++) {          // the id WebView2 reports and the id the store knows
+    for (size_t i = 0; i < g_wx.size(); i++) {          // the id WebView2 reports and the id the store knows;
+        if (!g_wx[i].ext) continue;                     // one whose load failed stays off the pill, so it can be retried
         if (!first) js += L","; first = false; js += WxJsStr(g_wx[i].id);
         if (!g_wx[i].storeId.empty() && g_wx[i].storeId != g_wx[i].id) js += L"," + WxJsStr(g_wx[i].storeId);
     }
@@ -10088,8 +10127,12 @@ static void WxInstall(const std::wstring& id) {
                     L"Docsy", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (WxFind(id) >= 0) { WxNotifyTabs(); return; }
+    int have = WxFind(id);
+    if (have >= 0 && g_wx[have].ext) { WxNotifyTabs(); return; }   // in and alive - the pill already knows
+    // (a listed entry whose load failed once carries no ICoreWebView2BrowserExtension:
+    //  it falls through here, gets reinstalled and WxAddFolderFresh clears the stale state)
     for (auto& s : g_wxInstalling) if (s == id) return;
+    WxLogf(L"install: begin %s", id.c_str());
     g_wxInstalling.push_back(id);
     std::wstring ver = g_webVer.empty() ? std::wstring(L"131.0.0.0") : g_webVer;
     std::wstring root = WxRoot();
@@ -10103,19 +10146,25 @@ static void WxInstall(const std::wstring& id) {
 static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the UI thread
     std::unique_ptr<WxJob> j(job);
     for (size_t i = 0; i < g_wxInstalling.size(); i++) if (g_wxInstalling[i] == j->id) { g_wxInstalling.erase(g_wxInstalling.begin() + i); break; }
-    if (!j->ok) { WxNotifyFail(j->err); return; }
+    if (!j->ok) { WxLogf(L"install: failed before load: %s", j->err.c_str()); WxNotifyFail(j->err); return; }
     std::wstring id = j->id, dir = j->dir;
     WxAddFolderFresh(dir, id, [id, dir](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
+        WxLogf(L"install: AddBrowserExtension -> 0x%08lX", (unsigned long)hr);
         if (FAILED(hr) || !ext) {                          // the reason travels with the failure:
-            wchar_t why[160];                              // policy, old runtime, bad manifest - the
-            if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED))   // toast should say which one it hit
-                swprintf_s(why, L"Extensions are turned off on this machine (0x%08lX).",
+            wchar_t why[220];                              // the toast spells out which one it hit
+            if (hr == E_NOINTERFACE)
+                swprintf_s(why, L"This WebView2 runtime has no extension API - update Microsoft Edge (WebView2 Runtime) and restart Docsy.");
+            else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED))
+                swprintf_s(why, L"The engine came up with extensions off. Restart Docsy once; if it still fails, the WebView2 runtime or a machine policy is blocking extensions (0x%08lX).",
                            (unsigned long)hr);
             else if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE))
                 swprintf_s(why, L"WebView2's extension store is in a bad state (0x%08lX). Close every Docsy window and try again.",
                            (unsigned long)hr);
             else if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))
-                swprintf_s(why, L"This extension unpacked wrong (0x%08lX). Try again.",
+                swprintf_s(why, L"The extension unpacked into a folder WebView2 rejects (0x%08lX). Try again.",
+                           (unsigned long)hr);
+            else if (hr == E_ACCESSDENIED)
+                swprintf_s(why, L"The package carries a reserved system file name (0x%08lX).",
                            (unsigned long)hr);
             else
                 swprintf_s(why, L"WebView2 refused this extension (0x%08lX).",
@@ -10192,8 +10241,18 @@ static const wchar_t* const kWxStoreScript = LR"JS((function(){
     btn.style.background=done?'#3a3a3c':failed?'#c0392b':'#22bb56';
     btn.style.cursor=(done||work)?'default':'pointer';
   }
-  window.__docsySet=function(l){have=l||[];busy=null;failed=false;paint();};
-  window.__docsyFail=function(m){busy=null;failed=true;why=m?String(m):'';paint();};
+  function toast(m){
+    var t=document.getElementById('docsy-note');
+    if(!t){t=document.createElement('div');t.id='docsy-note';
+      t.style.cssText='position:fixed;left:50%;bottom:30px;transform:translateX(-50%);z-index:2147483647;padding:12px 18px;border-radius:12px;background:#1c1c1c;color:#eee;font:500 13px/1.45 "Segoe UI",system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.45);max-width:540px;opacity:0;transition:opacity .18s;';
+      (document.body||document.documentElement).appendChild(t);}
+    t.textContent=String(m);t.style.opacity='1';
+    clearTimeout(toast._h);toast._h=setTimeout(function(){t.style.opacity='0';},8000);
+  }
+  window.__docsySet=function(l){var n=(have||[]).length;have=l||[];busy=null;failed=false;why='';
+    if(have.length>n){var i2=cur();if(i2&&have.indexOf(i2)>=0)toast('Added to Docsy');}
+    paint();};
+  window.__docsyFail=function(m){busy=null;failed=true;why=m?String(m):'';if(m)toast(String(m));paint();};
   setInterval(paint,500);
   document.addEventListener('DOMContentLoaded',paint);
   // the store's own "Add to Chrome" dead-ends here (no chrome.webstore in a
@@ -11296,12 +11355,30 @@ static void WebEnsureEnv() {
     if (la) CoTaskMemFree(la);
     g_wvEnv = nullptr;
     auto envOpts = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();   // extensions on
+    bool extOn = false;                                     // did the switch actually land?
     wrl::ComPtr<ICoreWebView2EnvironmentOptions6> envOpts6;
-    if (envOpts && SUCCEEDED(envOpts.As(&envOpts6)) && envOpts6) envOpts6->put_AreBrowserExtensionsEnabled(TRUE);
+    if (envOpts && SUCCEEDED(envOpts.As(&envOpts6)) && envOpts6)
+        extOn = SUCCEEDED(envOpts6->put_AreBrowserExtensionsEnabled(TRUE));
+    // extension installs only work in a profile that was born with them on: a
+    // user data folder provisioned by an older build - extensions off - keeps
+    // that state forever, and every AddBrowserExtension fails inside it, no
+    // matter how correct the package is. A marker file tells the two eras
+    // apart, so the first extension-capable run rebuilds the profile once;
+    // installed extensions live outside the profile and are re-added from
+    // their folders on startup, so nothing the user keeps is lost.
+    if (extOn && GetFileAttributesW((udf + L"\\.docsy-ext-on").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        WxLogf(L"env: profile predates extension support - rebuilding it once so installs stop failing");
+        WxRmTree(udf);
+        WxMkdirs(udf);
+        HANDLE mf = CreateFileW((udf + L"\\.docsy-ext-on").c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN, nullptr);
+        if (mf != INVALID_HANDLE_VALUE) CloseHandle(mf);
+    }
+    WxLogf(L"env: extensions flag %s, runtime %s", extOn ? L"on" : L"OFF", g_webVer.c_str());
     CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), envOpts.Get(),
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
-                if (FAILED(hr) || !env) { g_webFail = true; WebRepaintChrome(); return S_OK; }
+                if (FAILED(hr) || !env) { g_webFail = true; WxLogf(L"env: creation failed 0x%08lX", (unsigned long)hr); WebRepaintChrome(); return S_OK; }
                 g_wvEnv = env;
                 for (int i = 0; i < (int)g_wt.size(); i++) WebEnsureController(i);
                 WebRepaintChrome();
