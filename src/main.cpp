@@ -10117,7 +10117,15 @@ static void WxPushState(ICoreWebView2* w) {             // the store button's st
 static void WxNotifyTabs() { for (auto& t : g_wt) if (t.web) WxPushState(t.web.Get()); }
 static void WxNotifyFail(const std::wstring& msg) {
     std::wstring js = L"window.__docsyFail&&window.__docsyFail(" + WxJsStr(msg) + L")";
-    for (auto& t : g_wt) if (t.web) t.web->ExecuteScript(js.c_str(), nullptr);
+    bool storeOpen = false;
+    for (auto& t : g_wt) {
+        if (!t.web) continue;
+        if (WxStoreHost(t.url, nullptr)) storeOpen = true;    // the page's own toast carries it
+        t.web->ExecuteScript(js.c_str(), nullptr);
+    }
+    if (!storeOpen)                                           // an install started from the
+        MessageBoxW(g.main, msg.c_str(), L"Docsy - extension install failed",  // menu or a
+                    MB_OK | MB_ICONWARNING);                  // CRX download: say it natively
 }
 static void WxInstall(const std::wstring& id) {
     if (!WxIsExtId(id)) return;
@@ -10167,7 +10175,7 @@ static void WxInstallDone(WxJob* job) {                  // WM_APP + 5, on the U
                 swprintf_s(why, L"The package carries a reserved system file name (0x%08lX).",
                            (unsigned long)hr);
             else
-                swprintf_s(why, L"WebView2 refused this extension (0x%08lX).",
+                swprintf_s(why, L"WebView2 refused this extension (0x%08lX). Extensions menu > Copy diagnostics carries the full trail, and its test extensions separate a Manifest V2 cutoff from a broken install.",
                            (unsigned long)hr);
             WxNotifyFail(why);
             WxRmTree(dir);
@@ -10399,6 +10407,37 @@ static void WxOpenOptions(int ei) {
     WebNewTab(WxExtUrl(g_wx[ei], g_wx[ei].options), true);
 }
 
+// one command in the menu answers "it always fails": the clipboard carries the
+// runtime, what the profile holds, and the log's tail - pasteable straight back
+static void WxCopyDiag() {
+    std::wstring r = L"Docsy extension diagnostics\r\n============================\r\n";
+    r += L"runtime: " + (g_webVer.empty() ? std::wstring(L"(none)") : g_webVer) + L"\r\n";
+    r += std::wstring(L"extension system: ") + (g_wxOk ? L"usable" : L"NOT usable on this runtime") + L"\r\n";
+    wchar_t nb[32]; swprintf_s(nb, L"%u", (unsigned)g_wx.size());
+    r += std::wstring(L"installed: ") + nb + L"\r\n";
+    for (auto& e : g_wx)
+        r += L"  " + e.name + L"  [" + e.id + (e.enabled ? L"] on" : L"] off") +
+             (e.ext ? L"" : L"  NOT LOADED") + L"\r\n";
+    r += L"\r\n---- webext.log (tail) ----\r\n";
+    std::string raw;
+    {   PWSTR la = nullptr; SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la);
+        if (la) { WxReadFile((std::wstring(la) + L"\\Docsy\\webext.log"), raw); CoTaskMemFree(la); } }
+    if (raw.size() > 1) {
+        size_t n = raw.size() / 2, from = n > 4000 ? n - 4000 : 0;   // UTF-16LE, tail only
+        for (size_t i = from; i < n; i++)
+            r += (wchar_t)((unsigned char)raw[i * 2] | ((wchar_t)(unsigned char)raw[i * 2 + 1] << 8));
+    }
+    if (!OpenClipboard(g.main)) return;
+    EmptyClipboard();
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, (r.size() + 1) * sizeof(wchar_t));
+    if (h) {
+        void* p = GlobalLock(h);
+        if (p) { memcpy(p, r.c_str(), (r.size() + 1) * sizeof(wchar_t)); GlobalUnlock(h); SetClipboardData(CF_UNICODETEXT, h); }
+        else GlobalFree(h);
+    }
+    CloseClipboard();
+}
+
 static void WxMenu() {
     if (!g_wstrip) return;
     POINT pt{ g_wbR[WB_EXT].left, g_wbR[WB_EXT].bottom };
@@ -10428,11 +10467,17 @@ static void WxMenu() {
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, 1, L"Get extensions from the Chrome Web Store");
+    AppendMenuW(m, MF_STRING, 3, L"Copy diagnostics to the clipboard");
+    AppendMenuW(m, MF_STRING, 4, L"Install test extension (Manifest V3)");
+    AppendMenuW(m, MF_STRING, 5, L"Install test extension (Manifest V2)");
     SetForegroundWindow(g.main);
     int c = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g.main, nullptr);
     DestroyMenu(m);
     if (c == 1) { WebNewTab(L"https://chromewebstore.google.com/category/extensions", true); return; }
     if (c == 2) { WxInstall(page); return; }
+    if (c == 3) { WxCopyDiag(); return; }
+    if (c == 4) { WxInstall(L"ddkjiahejlhfcafbddmgiahcphecmpfh"); return; }   // uBlock Origin Lite, MV3
+    if (c == 5) { WxInstall(L"dhdgffkkebhmkfjojejmpbldmpobfkfo"); return; }   // Tampermonkey, MV2
     if (c >= 1000) {
         int i = (c - 1000) / 10, k = (c - 1000) % 10;
         if (i < 0 || i >= (int)g_wx.size()) return;
@@ -11359,6 +11404,17 @@ static void WebEnsureEnv() {
     wrl::ComPtr<ICoreWebView2EnvironmentOptions6> envOpts6;
     if (envOpts && SUCCEEDED(envOpts.As(&envOpts6)) && envOpts6)
         extOn = SUCCEEDED(envOpts6->put_AreBrowserExtensionsEnabled(TRUE));
+    // the engine is in the middle of retiring Manifest V2 (Chrome hard-killed it in
+    // 139; Edge's own cutoff lands through 2026/27), and nearly every extension the
+    // store offers is still MV2 - Tampermonkey, uBlock Origin, Dark Reader. These
+    // two switches hold the old manifest alive; unknown or already-flipped features
+    // are ignored harmlessly by the runtime, so this costs nothing when not needed.
+    wrl::ComPtr<ICoreWebView2EnvironmentOptions2> envOpts2;
+    if (envOpts && SUCCEEDED(envOpts.As(&envOpts2)) && envOpts2) {
+        envOpts2->put_AdditionalBrowserArguments(
+            L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled");
+        WxLogf(L"env: mv2 keep-alive arguments set");
+    }
     // extension installs only work in a profile that was born with them on: a
     // user data folder provisioned by an older build - extensions off - keeps
     // that state forever, and every AddBrowserExtension fails inside it, no
@@ -14799,6 +14855,203 @@ static int Shot(const wchar_t* out, int w, int h) {
     return st == Gdiplus::Ok ? 0 : 10 + (int)st;
 }
 
+// ---------------------------------------------------------------------------
+// Headless extension self-test: docsy --exttest <id|store-url> [out=path]
+//                            docsy --extdiag
+// Runs the exact road a store install runs in the GUI - engine options with
+// extensions on, a live profile, the CRX download, the unpack, then
+// AddBrowserExtension, then a listing that proves the extension is really
+// there - with no window and no user, writes a report, and exits 0 (pass) /
+// 1 (failed) / 2 (timed out). CI runs it on a real machine, so "extensions
+// always fail" stops being one person's desktop and becomes a fact with an
+// HRESULT; a user who can only say "fails" gets one command that says all.
+// ---------------------------------------------------------------------------
+static struct {
+    HWND w = nullptr;
+    wrl::ComPtr<ICoreWebView2Controller> ctr;
+    std::wstring id, outPath, report;
+    bool fin = false;
+    int exitCode = 2;
+} g_xt;
+
+static const wchar_t* WxHrName(HRESULT hr) {
+    if (hr == S_OK) return L"S_OK";
+    if (hr == E_NOINTERFACE) return L"E_NOINTERFACE - this runtime has no extension API (update Microsoft Edge)";
+    if (hr == E_ACCESSDENIED) return L"E_ACCESSDENIED - the package carries a '_' name the engine reserves";
+    if (hr == E_INVALIDARG) return L"E_INVALIDARG";
+    if (hr == E_FAIL) return L"E_FAIL - the engine refused the package (often the Manifest V2 cutoff)";
+    if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)) return L"ERROR_NOT_SUPPORTED - the engine came up with extensions off";
+    if (hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) return L"ERROR_FILE_NOT_FOUND - manifest.json missing or invalid";
+    if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) return L"ERROR_INVALID_STATE - the profile carries stale state, or it is open in another Docsy window";
+    return L"";
+}
+static void WxTestRep(const wchar_t* fmt, ...) {
+    wchar_t msg[700]; va_list ap; va_start(ap, fmt);
+    _vsnwprintf_s(msg, _TRUNCATE, fmt, ap); va_end(ap);
+    g_xt.report += msg; g_xt.report += L"\r\n";
+    WxLogf(L"test: %s", msg);
+}
+static void WxTestFinish(int code) {
+    if (g_xt.fin) return;
+    g_xt.fin = true;
+    {   wchar_t n[64]; swprintf_s(n, _TRUNCATE, L"exit code: %d\r\n", code); g_xt.report += n; }
+    std::string raw;                                    // the fetch/download steps speak
+    PWSTR la = nullptr;                                 // only in webext.log: the tail rides along
+    SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la);
+    if (la) {
+        WxReadFile((std::wstring(la) + L"\\Docsy\\webext.log"), raw);
+        std::wstring p = g_xt.outPath.empty() ? (std::wstring(la) + L"\\Docsy\\exttest.txt") : g_xt.outPath;
+        CoTaskMemFree(la);
+        if (raw.size() > 1) {
+            size_t n = raw.size() / 2, from = n > 5000 ? n - 5000 : 0;    // UTF-16LE tail
+            g_xt.report += L"\r\n---- webext.log (tail) ----\r\n";
+            for (size_t i = from; i < n; i++)
+                g_xt.report += (wchar_t)((unsigned char)raw[i * 2] | ((wchar_t)(unsigned char)raw[i * 2 + 1] << 8));
+        }
+        size_t sl = p.find_last_of(L'\\');
+        if (sl != std::wstring::npos) WxMkdirs(p.substr(0, sl));
+        std::string u8 = WxU(g_xt.report);
+        std::vector<unsigned char> d; const unsigned char bom[3] = { 0xEF, 0xBB, 0xBF };
+        d.insert(d.end(), bom, bom + 3); d.insert(d.end(), u8.begin(), u8.end());
+        WxWriteFile(p, d.data(), d.size());
+    }
+    if (g_xt.ctr) { g_xt.ctr->Close(); g_xt.ctr.Reset(); }
+    PostMessageW(g_xt.w, WM_CLOSE, 0, 0);
+}
+static void WxTestList(ICoreWebView2Profile7* p, std::function<void(const std::vector<std::wstring>&)> done) {
+    if (!p) { done({}); return; }
+    HRESULT hr = p->GetBrowserExtensions(
+        Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
+            [done](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
+                std::vector<std::wstring> ids;
+                UINT n = 0;
+                if (SUCCEEDED(hr) && list && SUCCEEDED(list->get_Count(&n)))
+                    for (UINT i = 0; i < n; i++) {
+                        wrl::ComPtr<ICoreWebView2BrowserExtension> e;
+                        if (SUCCEEDED(list->GetValueAtIndex(i, &e)) && e) {
+                            LPWSTR id = nullptr;
+                            if (SUCCEEDED(e->get_Id(&id)) && id) { ids.push_back(id); CoTaskMemFree(id); }
+                        }
+                    }
+                if (FAILED(hr)) WxTestRep(L"GetBrowserExtensions: 0x%08lX %s", (unsigned long)hr, WxHrName(hr));
+                done(ids);
+                return S_OK;
+            }).Get());
+    if (FAILED(hr)) { WxTestRep(L"GetBrowserExtensions refused synchronously 0x%08lX", (unsigned long)hr); done({}); }
+}
+static LRESULT CALLBACK WxTestProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    switch (m) {
+    case WM_TIMER:
+        if (wp == 1 && !g_xt.fin) { WxTestRep(L"TIMEOUT after 120s - the engine stopped answering"); WxTestFinish(2); }
+        return 0;
+    case WM_APP + 5: {                        // the fetch thread is back: unpacked, or refused
+        std::unique_ptr<WxJob> j((WxJob*)lp);
+        if (!j || g_xt.fin) return 0;
+        if (!j->ok) { WxTestRep(L"download/unpack: FAILED - %s", j->err.c_str()); WxTestFinish(1); return 0; }
+        WxTestRep(L"download/unpack: ok -> %s", j->dir.c_str());
+        std::wstring id = j->id;
+        WxAddFolderFresh(j->dir, id, [id](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
+            WxTestRep(L"AddBrowserExtension: 0x%08lX %s", (unsigned long)hr, WxHrName(hr));
+            if (FAILED(hr) || !ext) { WxTestFinish(1); return; }
+            WxTestList(g_wxProf.Get(), [id](const std::vector<std::wstring>& ids) {
+                bool on = false;
+                for (auto& i : ids) if (i == id) on = true;
+                if (on) { WxTestRep(L"VERDICT: PASS - %s is installed and listed", id.c_str()); WxTestFinish(0); }
+                else { WxTestRep(L"VERDICT: FAIL - the add answered ok, but the profile does not list it"); WxTestFinish(1); }
+            });
+        });
+        return 0; }
+    case WM_CLOSE: DestroyWindow(h); return 0;
+    case WM_DESTROY: PostQuitMessage(g_xt.exitCode); return 0;
+    }
+    return DefWindowProcW(h, m, wp, lp);
+}
+static int WxExtTestMain(const std::wstring& spec, const std::wstring& out) {
+    g_xt.outPath = out;
+    if (!spec.empty()) {
+        g_xt.id = WxStoreIdOf(spec);
+        if (g_xt.id.empty() && spec.find(L"/detail/") != std::wstring::npos) {
+            size_t p = spec.rfind(L'/');
+            if (p != std::wstring::npos && WxIsExtId(spec.substr(p + 1))) g_xt.id = spec.substr(p + 1);
+        }
+        if (g_xt.id.empty() && WxIsExtId(spec)) g_xt.id = spec;
+    }
+    WNDCLASSEXW wc{ sizeof wc };
+    wc.lpfnWndProc = WxTestProc; wc.hInstance = g.hinst; wc.lpszClassName = L"DocsyExtTest";
+    RegisterClassExW(&wc);
+    g_xt.w = CreateWindowExW(WS_EX_TOOLWINDOW, L"DocsyExtTest", L"", WS_POPUP, 0, 0, 8, 8,
+                             nullptr, nullptr, g.hinst, nullptr);
+    SetTimer(g_xt.w, 1, 120000, nullptr);
+    SYSTEMTIME st; GetLocalTime(&st);
+    WxTestRep(L"Docsy extension self-test  %04u-%02u-%02u %02u:%02u:%02u",
+              st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    WxTestRep(L"target: %s", g_xt.id.empty() ? L"(diagnose only)" : g_xt.id.c_str());
+    LPWSTR ver = nullptr;
+    if (SUCCEEDED(GetAvailableCoreWebView2BrowserVersionString(nullptr, &ver)) && ver) {
+        g_webVer = ver; CoTaskMemFree(ver);
+    }
+    WxTestRep(L"runtime: %s", g_webVer.empty() ? L"(none - the WebView2 runtime is missing)" : g_webVer.c_str());
+    if (g_webVer.empty()) { WxTestFinish(1); }
+    else {
+        PWSTR la = nullptr; SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la);
+        std::wstring udf = (la ? std::wstring(la) : std::wstring(L".")) + L"\\Docsy\\WebView2";
+        if (la) CoTaskMemFree(la);
+        WxTestRep(L"user data folder: %s", udf.c_str());
+        auto envOpts = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+        bool extOn = false;
+        wrl::ComPtr<ICoreWebView2EnvironmentOptions6> o6;
+        if (envOpts && SUCCEEDED(envOpts.As(&o6)) && o6)
+            extOn = SUCCEEDED(o6->put_AreBrowserExtensionsEnabled(TRUE));
+        wrl::ComPtr<ICoreWebView2EnvironmentOptions2> o2;
+        if (envOpts && SUCCEEDED(envOpts.As(&o2)) && o2)
+            o2->put_AdditionalBrowserArguments(
+                L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled");
+        WxTestRep(L"extensions flag: %s, mv2 keep-alive arguments set", extOn ? L"on" : L"COULD NOT SET");
+        HRESULT hrE = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), envOpts.Get(),
+            Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+                [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+                    if (FAILED(hr) || !env) { WxTestRep(L"environment: FAILED 0x%08lX %s", (unsigned long)hr, WxHrName(hr)); WxTestFinish(1); return S_OK; }
+                    wrl::ComPtr<ICoreWebView2Environment> e = env;
+                    e->CreateCoreWebView2Controller(g_xt.w,
+                        Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                            [](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
+                                if (FAILED(hr) || !c) { WxTestRep(L"controller: FAILED 0x%08lX %s", (unsigned long)hr, WxHrName(hr)); WxTestFinish(1); return S_OK; }
+                                WxTestRep(L"controller: created");
+                                g_xt.ctr = c;
+                                c->put_IsVisible(FALSE);
+                                wrl::ComPtr<ICoreWebView2> w;
+                                c->get_CoreWebView2(&w);
+                                wrl::ComPtr<ICoreWebView2_13> w13; wrl::ComPtr<ICoreWebView2Profile> pr;
+                                wrl::ComPtr<ICoreWebView2Profile7> p7;
+                                if (w && SUCCEEDED(w.As(&w13)) && w13 && SUCCEEDED(w13->get_Profile(&pr)) && pr &&
+                                    SUCCEEDED(pr.As(&p7)) && p7) {
+                                    g_wxProf = p7;               // the real install road uses this handle
+                                    WxTestRep(L"profile: ICoreWebView2Profile7 ok");
+                                } else {
+                                    WxTestRep(L"profile: NO ICoreWebView2Profile7 - this runtime cannot install extensions");
+                                    WxTestFinish(1); return S_OK;
+                                }
+                                WxTestList(p7.Get(), [](const std::vector<std::wstring>& ids) {
+                                    WxTestRep(L"profile carries %u extension(s) already", (unsigned)ids.size());
+                                    for (auto& i : ids) WxTestRep(L"  installed: %s", i.c_str());
+                                    if (g_xt.id.empty()) { WxTestRep(L"VERDICT: engine ok (diagnose-only run)"); WxTestFinish(0); return; }
+                                    std::thread([]() {          // the same thread-and-post the GUI install runs
+                                        WxJob* j = new WxJob; j->id = g_xt.id;
+                                        WxFetch(*j, g_webVer, WxRoot());
+                                        PostMessageW(g_xt.w, WM_APP + 5, 0, (LPARAM)j);
+                                    }).detach();
+                                });
+                                return S_OK;
+                            }).Get());
+                    return S_OK;
+                }).Get());
+        if (FAILED(hrE)) { WxTestRep(L"environment refused synchronously 0x%08lX", (unsigned long)hrE); WxTestFinish(1); }
+    }
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+    return g_xt.exitCode;
+}
+
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     winrt::init_apartment(winrt::apartment_type::single_threaded);
     Gdiplus::GdiplusStartupInput gi; ULONG_PTR tok;
@@ -14807,6 +15060,16 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     bool shot = argc >= 4 && !lstrcmpW(argv[1], L"--shot");
     g.quiet = shot; g.hinst = hi; g_sync = shot;   // shots render synchronously: the
                                                    // preview composites one frame directly
+    // --exttest <id|store-url> [out=path] / --extdiag: the headless extension
+    // self-test - it builds the same environment the GUI builds, runs the same
+    // install road a store click runs, and reports PASS/FAIL with an HRESULT.
+    // CI runs it on a real machine; a mute "fails" report becomes a fact.
+    if (argc >= 2 && (!lstrcmpW(argv[1], L"--exttest") || !lstrcmpW(argv[1], L"--extdiag"))) {
+        std::wstring spec = (!lstrcmpW(argv[1], L"--extdiag") || argc < 3) ? std::wstring() : std::wstring(argv[2]);
+        std::wstring out;
+        for (int a = 2; a < argc; a++) if (wcsncmp(argv[a], L"out=", 4) == 0) out = argv[a] + 4;
+        return WxExtTestMain(spec, out);
+    }
 
     // The bundled Killer Sans faces (KillerPDF's BrandSansFont / UiFont, OFL,
     // subset to latin-1 + dashes in src/fonts). Loading them from memory keeps

@@ -25,6 +25,20 @@ jobs:
         if: always()
         shell: bash
         run: cat build.log || true
+      - name: Extension self-test
+        if: always()
+        shell: pwsh
+        run: |
+          $bt = "$env:RUNNER_TEMP\wv2setup.exe"
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/?linkid=2124701' -OutFile $bt
+          Start-Process $bt -ArgumentList '/silent','/install' -Wait
+          "webview2 runtime: $((Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue).pv)" | Out-File extlog.txt
+          $mv3 = Start-Process .\docsy.exe -ArgumentList '--exttest','ddkjiahejlhfcafbddmgiahcphecmpfh','out=exttest-ubolite.txt' -Wait -PassThru
+          "uBlock Origin Lite (mv3) exit: $($mv3.ExitCode)" | Out-File -Append extlog.txt
+          $mv2 = Start-Process .\docsy.exe -ArgumentList '--exttest','dhdgffkkebhmkfjojejmpbldmpobfkfo','out=exttest-tampermonkey.txt' -Wait -PassThru
+          "Tampermonkey (mv2) exit: $($mv2.ExitCode)" | Out-File -Append extlog.txt
+          foreach ($f in 'exttest-ubolite.txt','exttest-tampermonkey.txt') { if (Test-Path $f) { "----- $f -----" | Out-File -Append extlog.txt; Get-Content $f | Out-File -Append extlog.txt } }
+          if ($mv3.ExitCode -ne 0) { exit 1 }
       - name: Preview
         id: preview
         continue-on-error: true
@@ -80,7 +94,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf extlog.txt exttest-ubolite.txt exttest-tampermonkey.txt; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log
