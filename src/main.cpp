@@ -11376,17 +11376,27 @@ static void WebEnsurePump() {
 
 static const wchar_t* WebProcName(COREWEBVIEW2_PROCESS_FAILED_KIND k) {   // the failure's kind, in words
     switch (k) {
-    case COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED_UNEXPECTEDLY: return L"browser process exited";
-    case COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_UNRESPONSIVE: return L"browser process unresponsive";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED: return L"browser process exited";
     case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED: return L"render process exited";
     case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE: return L"render process unresponsive";
-    case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_CRASHED: return L"render process crashed";
-    case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_TERMINATED: return L"render process terminated";
     case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED: return L"frame render process exited";
-    case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_UNRESPONSIVE: return L"frame render process unresponsive";
-    case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_CRASHED: return L"frame render process crashed";
-    case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_TERMINATED: return L"frame render process terminated";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_UTILITY_PROCESS_EXITED: return L"utility process exited";
     default: return L"process failure";
+    }
+}
+
+static const wchar_t* WebProcReason(COREWEBVIEW2_PROCESS_FAILED_REASON r) {   // why it died, in words
+    switch (r) {
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_UNEXPECTED: return L"unexpected";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_UNRESPONSIVE: return L"unresponsive";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_TERMINATED: return L"terminated";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_CRASHED: return L"crashed";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_LAUNCH_FAILED: return L"launch failed";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_OUT_OF_MEMORY: return L"out of memory";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_PROFILE_DELETED: return L"profile deleted";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_NORMAL_EXIT: return L"normal exit";
+    case COREWEBVIEW2_PROCESS_FAILED_REASON_ABNORMAL_EXIT: return L"abnormal exit";
+    default: return L"other";
     }
 }
 
@@ -11668,37 +11678,35 @@ static void WebEnsureController(int i) {
                             WebHistorySync(id);
                             return S_OK;
                         }).Get(), &t->tkHist);
-                {   wrl::ComPtr<ICoreWebView2_2> w2;   // the processes' own verdicts: a render death
-                    if (SUCCEEDED(t->web->QueryInterface(IID_PPV_ARGS(&w2))) && w2) {   // reloads the tab
-                        w2->add_ProcessFailed(             // once, a second one cold-restarts the engine -
-                            Microsoft::WRL::Callback<ICoreWebView2ProcessFailedEventHandler>(   // deferred through
-                                [id](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs* a) -> HRESULT {   // WM_APP+7,
-                                    WebTab* t = WebTabById(id);   // never re-entrant in an event frame
-                                    if (!t) return S_OK;
-                                    COREWEBVIEW2_PROCESS_FAILED_KIND k{};
-                                    if (a) a->get_ProcessFailureKind(&k);
-                                    WxLogf(L"proc: %s on tab %llu", WebProcName(k), (unsigned long long)id);
-                                    if (k == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED_UNEXPECTEDLY
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_UNRESPONSIVE) {
-                                        if (g.main) PostMessageW(g.main, WM_APP + 7, 0, 0);
-                                        return S_OK;
-                                    }
-                                    bool render = k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_CRASHED
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_TERMINATED
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_CRASHED
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_TERMINATED
-                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_UNRESPONSIVE;
-                                    if (render && ++t->renderDeaths <= 1) {
-                                        if (t->web) t->web->Reload();   // one silent recovery per tab
-                                    } else if (render && g.main) {
-                                        PostMessageW(g.main, WM_APP + 7, 0, 0);
-                                    }
+                {   // the processes' own verdicts: a render death reloads the tab once, a
+                    // second one cold-restarts the engine - deferred through WM_APP+7,
+                    // never re-entrant in an event frame. The handler rides the base
+                    // interface, where ProcessFailed has lived since the first SDK.
+                    t->web->add_ProcessFailed(
+                        Microsoft::WRL::Callback<ICoreWebView2ProcessFailedEventHandler>(
+                            [id](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs* a) -> HRESULT {
+                                WebTab* t = WebTabById(id);   // resolve the tab fresh: the vector may
+                                if (!t) return S_OK;          // have moved since the handler was born
+                                COREWEBVIEW2_PROCESS_FAILED_KIND k{};
+                                if (a) a->get_ProcessFailedKind(&k);
+                                wrl::ComPtr<ICoreWebView2ProcessFailedEventArgs2> a2;
+                                COREWEBVIEW2_PROCESS_FAILED_REASON r = COREWEBVIEW2_PROCESS_FAILED_REASON_UNEXPECTED;
+                                if (a && SUCCEEDED(a->QueryInterface(IID_PPV_ARGS(&a2))) && a2) a2->get_Reason(&r);
+                                WxLogf(L"proc: %s (%s) on tab %llu", WebProcName(k), WebProcReason(r), (unsigned long long)id);
+                                if (k == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED) {
+                                    if (g.main) PostMessageW(g.main, WM_APP + 7, 0, 0);
                                     return S_OK;
-                                }).Get(), &t->tkProc);
-                    }
+                                }
+                                bool render = k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                                    || k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE
+                                    || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED;
+                                if (render && ++t->renderDeaths <= 1) {
+                                    if (t->web) t->web->Reload();   // one silent recovery per tab
+                                } else if (render && g.main) {
+                                    PostMessageW(g.main, WM_APP + 7, 0, 0);
+                                }
+                                return S_OK;
+                            }).Get(), &t->tkProc);
                 }
                 WebShowCurrent();                  // the controller shows THE MOMENT it exists: a surface
                                                    // held invisible until its first NavigationCompleted
