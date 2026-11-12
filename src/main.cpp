@@ -9903,7 +9903,7 @@ static std::wstring WxPathHashId(const std::wstring& dir, bool native) {
         if (!ascii) bytes.clear();         // a non-ASCII path hashed as the empty string, faithfully
     }
     unsigned char h[32];
-    Sha256((const unsigned char*)bytes.data(), bytes.size(), h);
+    crxk::Sha256((const unsigned char*)bytes.data(), bytes.size(), h);   // the hash lives in the unpacker
     std::string id;
     for (int i = 0; i < 16; i++) { id += (char)('a' + (h[i] >> 4)); id += (char)('a' + (h[i] & 15)); }
     return WxW(id);
@@ -15660,6 +15660,7 @@ static struct {
     std::wstring id, outPath, report;
     bool fin = false;
     int exitCode = 2;
+    bool check = false;                // --extcheck: the restart road, not the install road
 } g_xt;
 
 static const wchar_t* WxHrName(HRESULT hr) {
@@ -15728,10 +15729,45 @@ static void WxTestList(ICoreWebView2Profile7* p, std::function<void(const std::v
             }).Get());
     if (FAILED(hr)) { WxTestRep(L"GetBrowserExtensions refused synchronously 0x%08lX", (unsigned long)hr); done({}); }
 }
+// --extcheck's verdict, polled while WxInit's roads run. The folders are the
+// truth: every one must come back riding a live registration, and every one
+// with a popup must carry its enabled switch - exactly the state the toolbar's
+// icons are drawn from. A folder whose registration died lands here as FAIL
+// with the machine's own words, never a guess.
+static void WxCheckPoll() {
+    std::wstring root = WxRoot();
+    std::vector<std::wstring> dirs;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+            dirs.push_back(root + L"\\" + fd.cFileName);
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    if (dirs.empty()) { WxTestRep(L"check: no extension folders under %s yet", root.c_str()); return; }
+    bool all = true;
+    for (auto& d : dirs) {
+        std::wstring nm = d.substr(d.find_last_of(L'\\') + 1);
+        WebExt probe; probe.dir = d; probe.id = nm; probe.storeId = nm;
+        WxLoadInfo(probe);                        // the manifest: name, popup, icon
+        if (probe.icon) { delete probe.icon; probe.icon = nullptr; }
+        const WebExt* e = nullptr;
+        for (auto& o : g_wx) if (o.dir == d) { e = &o; break; }
+        bool ok = e && e->ext && (e->popup.empty() || e->enabled);
+        WxTestRep(L"check: %s '%s' - %s", nm.c_str(), probe.name.c_str(),
+                  !e ? L"NOT LISTED" : !e->ext ? L"NO LIVE REGISTRATION" :
+                  !ok ? L"OFF" : L"on");
+        if (!ok) all = false;
+    }
+    if (all) { WxTestRep(L"VERDICT: PASS - the restart persists every extension the toolbar draws"); WxTestFinish(0); }
+}
 static LRESULT CALLBACK WxTestProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_TIMER:
         if (wp == 1 && !g_xt.fin) { WxTestRep(L"TIMEOUT after 120s - the engine stopped answering"); WxTestFinish(2); }
+        if (wp == 2 && !g_xt.fin && g_xt.check) WxCheckPoll();
         return 0;
     case WM_APP + 5: {                        // the fetch thread is back: unpacked, or refused
         std::unique_ptr<WxJob> j((WxJob*)lp);
@@ -15827,6 +15863,11 @@ static int WxExtTestMain(const std::wstring& spec, const std::wstring& out) {
                                 WxTestList(p7.Get(), [](const std::vector<std::wstring>& ids) {
                                     WxTestRep(L"profile carries %u extension(s) already", (unsigned)ids.size());
                                     for (auto& i : ids) WxTestRep(L"  installed: %s", i.c_str());
+                                    if (g_xt.check) {          // the restart road itself: no download,
+                                        SetTimer(g_xt.w, 2, 250, nullptr);   // and no install - the exact
+                                        WxInit();              // WxInit a real launch runs, and the
+                                        return;                // poll decides what the toolbar will see
+                                    }
                                     if (g_xt.id.empty()) { WxTestRep(L"VERDICT: engine ok (diagnose-only run)"); WxTestFinish(0); return; }
                                     std::thread([]() {          // the same thread-and-post the GUI install runs
                                         WxJob* j = new WxJob; j->id = g_xt.id;
@@ -15857,7 +15898,13 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     // self-test - it builds the same environment the GUI builds, runs the same
     // install road a store click runs, and reports PASS/FAIL with an HRESULT.
     // CI runs it on a real machine; a mute "fails" report becomes a fact.
-    if (argc >= 2 && (!lstrcmpW(argv[1], L"--exttest") || !lstrcmpW(argv[1], L"--extdiag"))) {
+    // --extcheck <id|store-url> [out=path]: the restart road in the same harness -
+    // a fresh process over the profile a previous one left behind, running the
+    // GUI's own WxInit, and polling until every folder rides a live registration
+    // the way the toolbar's icons need. CI chains it after --exttest, so "the
+    // icons vanish on reopen" is a verdict a build carries, not a user's word.
+    if (argc >= 2 && (!lstrcmpW(argv[1], L"--exttest") || !lstrcmpW(argv[1], L"--extdiag") || !lstrcmpW(argv[1], L"--extcheck"))) {
+        g_xt.check = !lstrcmpW(argv[1], L"--extcheck");
         std::wstring spec = (!lstrcmpW(argv[1], L"--extdiag") || argc < 3) ? std::wstring() : std::wstring(argv[2]);
         std::wstring out;
         for (int a = 2; a < argc; a++) if (wcsncmp(argv[a], L"out=", 4) == 0) out = argv[a] + 4;
