@@ -9876,6 +9876,19 @@ static std::wstring WxLoadEngineId(const std::wstring& dir) {
     std::wstring id = WxW(s.substr(a, b - a + 1));
     return WxIsExtId(id) ? id : L"";
 }
+// the user's own on/off switch, beside the folder. The engine's remembered
+// enabled state has been the poisoned well this bug drank from: an install that
+// died half-landed left 'off' behind, and every restart then read that poison
+// back and hid the icon again. docsy keeps the verdict where the folder is.
+static std::wstring WxOnPath(const std::wstring& dir) { return dir + L"\\.docsy-on"; }
+static void WxSaveOn(const std::wstring& dir, bool on) {
+    WxWriteFile(WxOnPath(dir), (const unsigned char*)(on ? "1" : "0"), 1);
+}
+static bool WxLoadOn(const std::wstring& dir) {
+    std::string s;
+    if (!WxReadFile(WxOnPath(dir), s) || s.empty()) return true;   // never written: on
+    return s[0] != '0';
+}
 static std::wstring WxPathHashId(const std::wstring& dir, bool native) {
     std::wstring p = dir;
     while (!p.empty() && (p[p.size() - 1] == L'\\' || p[p.size() - 1] == L'/')) p.pop_back();
@@ -10100,6 +10113,90 @@ static void WxFinishInit() {
         });
     }
 }
+// the add answered "already here". A live registration the matching pass could
+// not see IS a working extension - the engine runs it, only its id was not one
+// the folder could predict, and the old answer to that success was to switch
+// the entry off and hide its face on every restart. Adopt the live registration:
+// by any id the folder can name, then by its name when that name is alone in
+// both lists; the marker saves the adopted id, so the next restart matches
+// exactly and this road goes quiet for good.
+static void WxAdoptLive(const std::wstring& dir, const std::wstring& id) {
+    wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
+    if (!p) return;
+    HRESULT hr = p->GetBrowserExtensions(
+        Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
+            [dir, id](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
+                UINT n = 0;
+                if (FAILED(hr) || !list || FAILED(list->get_Count(&n))) {
+                    WxLogf(L"adopt: %s - the listing failed 0x%08lX", id.c_str(), (unsigned long)hr);
+                    return S_OK;
+                }
+                std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>> have;
+                std::vector<std::wstring> rids, rnames;
+                std::vector<BOOL> rens;
+                for (UINT i = 0; i < n; i++) {
+                    wrl::ComPtr<ICoreWebView2BrowserExtension> e;
+                    if (FAILED(list->GetValueAtIndex(i, &e)) || !e) continue;
+                    LPWSTR s = nullptr;
+                    std::wstring rid, rn; BOOL en = TRUE;
+                    if (SUCCEEDED(e->get_Id(&s)) && s) { rid = s; CoTaskMemFree(s); }
+                    if (SUCCEEDED(e->get_Name(&s)) && s) { rn = s; CoTaskMemFree(s); }
+                    e->get_IsEnabled(&en);
+                    have.push_back(e); rids.push_back(rid); rnames.push_back(rn); rens.push_back(en);
+                }
+                std::wstring mk = WxLoadEngineId(dir), ph0 = WxPathHashId(dir, true),
+                             ph1 = WxPathHashId(dir, false);
+                WebExt probe; probe.dir = dir;             // the manifest's name, the last road
+                std::wstring fname;
+                if (WxLoadInfo(probe)) fname = probe.name;
+                if (probe.icon) { delete probe.icon; probe.icon = nullptr; }
+                auto owned = [&rids](size_t j) {
+                    for (auto& o : g_wx) if (o.ext && o.id == rids[j]) return true;
+                    return false;
+                };
+                int pick = -1; const wchar_t* how = L"";
+                for (size_t j = 0; j < have.size(); j++) {
+                    if (rids[j].empty() || owned(j)) continue;
+                    if (rids[j] == id || (!mk.empty() && rids[j] == mk) ||
+                        (!ph0.empty() && rids[j] == ph0) || (!ph1.empty() && rids[j] == ph1)) {
+                        pick = (int)j; how = L"id"; break;
+                    }
+                }
+                if (pick < 0 && !fname.empty()) {          // the name, only when it is alone
+                    int same = 0;                          // in both lists, so a namesake
+                    for (auto& o : g_wx) if (!_wcsicmp(o.name.c_str(), fname.c_str())) same++;
+                    int hits = 0, at = -1;
+                    for (size_t j = 0; j < have.size(); j++)
+                        if (!rnames[j].empty() && !owned(j) &&
+                            !_wcsicmp(rnames[j].c_str(), fname.c_str())) { hits++; at = (int)j; }
+                    if (same == 1 && hits == 1) { pick = at; how = L"name"; }
+                }
+                if (pick < 0) {
+                    WxLogf(L"adopt: %s found no live registration to claim (%u listed)", id.c_str(), (unsigned)n);
+                    WxNotifyTabs();                    // the store page's busy pill resets too
+                    return S_OK;
+                }
+                int k = WxFind(id);
+                if (k < 0) { WxNotifyTabs(); return S_OK; }
+                g_wx[k].ext = have[pick];
+                g_wx[k].id = rids[pick];
+                WxSaveEngineId(g_wx[k].dir, rids[pick]);   // learned once, matched forever
+                bool want = WxLoadOn(g_wx[k].dir);
+                if (want != (rens[pick] != FALSE))         // the user's switch rules, and a
+                    g_wx[k].ext->Enable(want ? TRUE : FALSE,   // poisoned 'off' is healed here
+                        Microsoft::WRL::Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>(
+                            [](HRESULT) { return S_OK; }).Get());
+                g_wx[k].enabled = want;
+                WxLogf(L"adopt: %s rides live registration %s (matched by %s), %s",
+                       id.c_str(), rids[pick].c_str(), how, want ? L"on" : L"off");
+                if (g_webOn) WebBarLayout();
+                WebRepaintChrome();
+                WxNotifyTabs();
+                return S_OK;
+            }).Get());
+    if (FAILED(hr))                        // a synchronous refusal is a fact worth keeping:
+        WxLogf(L"adopt: %s - the listing refused synchronously 0x%08lX", id.c_str(), (unsigned long)hr);
+}
 static void WxInit() {
     if (g_wxReady || g_wxBusy) return;
     wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
@@ -10179,11 +10276,16 @@ static void WxInit() {
                     bool bridged = g_wx[i].id != rids[pick];
                     g_wx[i].id = rids[pick];               // the engine's id rules the URLs, and
                     g_wx[i].ext = have[pick];              // WxFind rides id, storeId, marker alike
-                    g_wx[i].enabled = rens[pick] != FALSE;
+                    bool want = WxLoadOn(g_wx[i].dir);     // the user's switch beside the folder
+                    if (want != (rens[pick] != FALSE))     // rules, not the engine's memory - a
+                        g_wx[i].ext->Enable(want ? TRUE : FALSE,   // profile that kept a poisoned
+                            Microsoft::WRL::Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>(
+                                [](HRESULT) { return S_OK; }).Get());   // 'off' gets healed here
+                    g_wx[i].enabled = want;
                     WxSaveEngineId(g_wx[i].dir, rids[pick]);   // the next restart matches by the marker
                     if (bridged)
-                        WxLogf(L"init: %s rides registration %s (matched by %s) - id adopted",
-                               g_wx[i].storeId.c_str(), rids[pick].c_str(), how);
+                        WxLogf(L"init: %s rides registration %s (matched by %s), %s",
+                               g_wx[i].storeId.c_str(), rids[pick].c_str(), how, want ? L"on" : L"off");
                 }
                 for (size_t j = 0; j < have.size(); j++)
                     if (!claimed[j])
@@ -10212,6 +10314,16 @@ static void WxInit() {
                                     WxSaveEngineId(dir, rid);   // learned once, matched forever after
                                     CoTaskMemFree(rid);
                                 }
+                                g_wx[k].enabled = WxLoadOn(dir);   // the fresh load obeys the user's
+                                if (!g_wx[k].enabled && g_wx[k].ext)   // switch, not the engine's mood
+                                    g_wx[k].ext->Enable(FALSE,
+                                        Microsoft::WRL::Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>(
+                                            [](HRESULT) { return S_OK; }).Get());
+                            } else if (r == HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) {
+                                // "already here" is a working extension, not a failure: a live
+                                // registration the id roads could not see. Adopt it - the old
+                                // answer switched the entry off and hid its face on every restart.
+                                WxAdoptLive(dir, id);
                             } else g_wx[k].enabled = false;     // it would not load: keep it listed, off
                         }
                         if (--*left == 0) WxFinishInit();
@@ -10457,6 +10569,16 @@ static void WxFinishInstall(const std::wstring& id, const std::wstring& dir, HRE
             PostMessageW(g.main, WM_APP + 7, 0, 0);
             return;
         }
+        if (hr == HRESULT_FROM_WIN32(ERROR_INVALID_STATE)) {
+            // the restart is spent and the folder is still "already here": a live
+            // registration the id roads cannot see. The folder is the user's copy -
+            // it is never destroyed for being already loaded. The adoption claims
+            // the live registration and pins its id beside the folder; if nothing
+            // lives, the folder stays and the next restart's WxInit adds it.
+            WxLogf(L"install: INVALID_STATE with the restart spent - adopting the live registration");
+            WxAdoptLive(dir, id);
+            return;
+        }
         wchar_t why[512];                              // the toast spells out which one it hit
         if (hr == E_NOINTERFACE)
             swprintf_s(why, L"This WebView2 runtime has no extension API - update Microsoft Edge (WebView2 Runtime) and restart Docsy.");
@@ -10522,10 +10644,19 @@ static void WxRemove(const std::wstring& id) {
 }
 static void WxSetEnabled(const std::wstring& id, bool on) {
     int i = WxFind(id); if (i < 0 || !g_wx[i].ext) return;
+    WxSaveOn(g_wx[i].dir, on);                     // the switch lives beside the folder now: the
+    g_wx[i].enabled = on;                          // restart reads it back instead of the engine's
+    if (g_webOn) WebBarLayout();                   // memory of what it refused
+    WebRepaintChrome();
     g_wx[i].ext->Enable(on ? TRUE : FALSE, Microsoft::WRL::Callback<ICoreWebView2BrowserExtensionEnableCompletedHandler>(
         [id, on](HRESULT hr) -> HRESULT {
             int k = WxFind(id);
-            if (SUCCEEDED(hr) && k >= 0) { g_wx[k].enabled = on; if (g_webOn) WebBarLayout(); WebRepaintChrome(); }
+            if (k >= 0 && FAILED(hr)) {            // the engine refused: the switch springs back
+                WxSaveOn(g_wx[k].dir, !on);
+                g_wx[k].enabled = !on;
+                if (g_webOn) WebBarLayout();
+                WebRepaintChrome();
+            }
             return S_OK;
         }).Get());
 }
@@ -11222,19 +11353,17 @@ static void WebBarLayout() {
     int leftEdge = (int)g_wbR[WB_NEWTAB].left;
     g_wbR[WB_EXT] = { 0, 0, 0, 0 };                // the puzzle button is gone too - extensions
     g_wxR.clear(); g_wxIdx.clear();                // work from their own icons, and the pill
-    if (g_wxOk) {                                  // gains the room they used to bracket
-        std::vector<int> vis;
-        for (int i = 0; i < (int)g_wx.size() && vis.size() < 5; i++)
-            if (g_wx[i].enabled && !g_wx[i].popup.empty()) vis.push_back(i);
-        int n = (int)vis.size();
-        int right0 = (int)g_wbR[WB_NEWTAB].left - (pitch - d);   // the row's own 2dp gap
-        for (int k = 0; k < n; k++) {
-            int right = right0 - (n - 1 - k) * pitch;
-            g_wxR.push_back(RECT{ right - d, cy, right, cy + d });
-            g_wxIdx.push_back(vis[k]);
-        }
-        if (n) leftEdge = (int)g_wxR[0].left;
+    std::vector<int> vis;                          // gains the room they used to bracket. The
+    for (int i = 0; i < (int)g_wx.size() && vis.size() < 5; i++)   // icons ride g_wx alone now:
+        if (g_wx[i].enabled && !g_wx[i].popup.empty()) vis.push_back(i);   // g_wxOk was the listing
+    int n = (int)vis.size();                       // call's verdict, and a listing that fails
+    int right0 = (int)g_wbR[WB_NEWTAB].left - (pitch - d);   // while the folders still run must
+    for (int k = 0; k < n; k++) {                  // never take the faces with it
+        int right = right0 - (n - 1 - k) * pitch;
+        g_wxR.push_back(RECT{ right - d, cy, right, cy + d });
+        g_wxIdx.push_back(vis[k]);
     }
+    if (n) leftEdge = (int)g_wxR[0].left;
     int lo = (int)g_wbR[WB_FWD].right + TABF(18), hi = leftEdge - TABF(18);
     int pw = max(10, min(hi - lo, TABF(560)));     // the capsule: centered in the window, capped
     int pl = std::clamp((int)r.right / 2 - pw / 2, lo, max(lo, hi - pw));
