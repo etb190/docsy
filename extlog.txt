@@ -1,0 +1,194 @@
+webview2 runtime (registry): 156.0.4314.58
+uBlock Origin Lite (mv3) exit: 0
+Tampermonkey (mv2) exit: 0
+restart check exit: 0
+mv2 restart check exit: 0
+----- exttest-ubolite.txt -----
+Docsy extension self-test  2026-11-12 21:24:35
+target: ddkjiahejlhfcafbddmgiahcphecmpfh
+runtime: 156.0.4314.58
+user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+extensions flag: on, mv2 keep-alive arguments set
+controller: created
+profile: ICoreWebView2Profile7 ok
+profile carries 2 extension(s) already
+  installed: dgiklkfkllikcanfonkcabmbdfmgleag
+  installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+download/unpack: ok -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\ddkjiahejlhfcafbddmgiahcphecmpfh
+AddBrowserExtension: 0x00000000 S_OK
+VERDICT: PASS - ddkjiahejlhfcafbddmgiahcphecmpfh is installed and listed
+exit code: 0
+----- exttest-tampermonkey.txt -----
+Docsy extension self-test  2026-11-12 21:24:42
+target: dhdgffkkebhmkfjojejmpbldmpobfkfo
+runtime: 156.0.4314.58
+user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+extensions flag: on, mv2 keep-alive arguments set
+controller: created
+profile: ICoreWebView2Profile7 ok
+profile carries 3 extension(s) already
+  installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+  installed: dgiklkfkllikcanfonkcabmbdfmgleag
+  installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+download/unpack: ok -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+AddBrowserExtension: 0x00000000 S_OK
+VERDICT: PASS - dhdgffkkebhmkfjojejmpbldmpobfkfo is installed and listed
+exit code: 0
+
+---- webext.log (tail) ----
+[11-12 21:24:42.111] test: Docsy extension self-test  2026-11-12 21:24:42
+[11-12 21:24:42.113] test: target: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:42.115] test: runtime: 156.0.4314.58
+[11-12 21:24:42.117] test: user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+[11-12 21:24:42.117] test: extensions flag: on, mv2 keep-alive arguments set
+[11-12 21:24:42.488] test: controller: created
+[11-12 21:24:42.489] test: profile: ICoreWebView2Profile7 ok
+[11-12 21:24:42.491] test: profile carries 3 extension(s) already
+[11-12 21:24:42.491] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:42.492] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-12 21:24:42.492] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-12 21:24:42.492] fetch: id dhdgffkkebhmkfjojejmpbldmpobfkfo, prodver 156.0.4314.58
+[11-12 21:24:42.632] dl: HTTP 200
+[11-12 21:24:43.223] fetch: unpacked 124 entries -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.223] test: download/unpack: ok -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.247] add: no stale registration under dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.396] test: AddBrowserExtension: 0x00000000 S_OK
+[11-12 21:24:43.398] test: VERDICT: PASS - dhdgffkkebhmkfjojejmpbldmpobfkfo is installed and listed
+----- extcheck.txt -----
+Docsy extension self-test  2026-11-12 21:24:43
+target: ddkjiahejlhfcafbddmgiahcphecmpfh
+runtime: 156.0.4314.58
+user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+extensions flag: on, mv2 keep-alive arguments set
+controller: created
+profile: ICoreWebView2Profile7 ok
+profile carries 4 extension(s) already
+  installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+  installed: dgiklkfkllikcanfonkcabmbdfmgleag
+  installed: dhdgffkkebhmkfjojejmpbldmpobfkfo
+  installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+check: ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' - on
+check: dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' - on
+VERDICT: PASS - the restart persists every extension the toolbar draws
+exit code: 0
+
+---- webext.log (tail) ----
+[11-12 21:24:42.111] test: Docsy extension self-test  2026-11-12 21:24:42
+[11-12 21:24:42.113] test: target: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:42.115] test: runtime: 156.0.4314.58
+[11-12 21:24:42.117] test: user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+[11-12 21:24:42.117] test: extensions flag: on, mv2 keep-alive arguments set
+[11-12 21:24:42.488] test: controller: created
+[11-12 21:24:42.489] test: profile: ICoreWebView2Profile7 ok
+[11-12 21:24:42.491] test: profile carries 3 extension(s) already
+[11-12 21:24:42.491] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:42.492] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-12 21:24:42.492] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-12 21:24:42.492] fetch: id dhdgffkkebhmkfjojejmpbldmpobfkfo, prodver 156.0.4314.58
+[11-12 21:24:42.632] dl: HTTP 200
+[11-12 21:24:43.223] fetch: unpacked 124 entries -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.223] test: download/unpack: ok -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.247] add: no stale registration under dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.396] test: AddBrowserExtension: 0x00000000 S_OK
+[11-12 21:24:43.398] test: VERDICT: PASS - dhdgffkkebhmkfjojejmpbldmpobfkfo is installed and listed
+[11-12 21:24:43.447] test: Docsy extension self-test  2026-11-12 21:24:43
+[11-12 21:24:43.450] test: target: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:43.454] test: runtime: 156.0.4314.58
+[11-12 21:24:43.454] test: user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+[11-12 21:24:43.454] test: extensions flag: on, mv2 keep-alive arguments set
+[11-12 21:24:43.899] test: controller: created
+[11-12 21:24:43.899] test: profile: ICoreWebView2Profile7 ok
+[11-12 21:24:43.900] test: profile carries 4 extension(s) already
+[11-12 21:24:43.901] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:43.901] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-12 21:24:43.901] test:   installed: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.901] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-12 21:24:43.907] init: registration ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' enabled=1
+[11-12 21:24:43.907] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' enabled=1
+[11-12 21:24:43.907] init: registration dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' enabled=1
+[11-12 21:24:43.908] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' enabled=1
+[11-12 21:24:43.909] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' has no folder - left alone
+[11-12 21:24:43.909] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' has no folder - left alone
+[11-12 21:24:43.909] init: GetBrowserExtensions answered 0x00000000, 4 extension(s) registered
+[11-12 21:24:43.909] init: 4 installed, 2 folder(s), 0 to re-add
+[11-12 21:24:44.159] test: check: ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' - on
+[11-12 21:24:44.161] test: check: dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' - on
+[11-12 21:24:44.161] test: VERDICT: PASS - the restart persists every extension the toolbar draws
+----- extcheck-mv2.txt -----
+Docsy extension self-test  2026-11-12 21:24:44
+target: dhdgffkkebhmkfjojejmpbldmpobfkfo
+runtime: 156.0.4314.58
+user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+extensions flag: on, mv2 keep-alive arguments set
+controller: created
+profile: ICoreWebView2Profile7 ok
+profile carries 4 extension(s) already
+  installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+  installed: dgiklkfkllikcanfonkcabmbdfmgleag
+  installed: dhdgffkkebhmkfjojejmpbldmpobfkfo
+  installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+check: ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' - on
+check: dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' - on
+VERDICT: PASS - the restart persists every extension the toolbar draws
+exit code: 0
+
+---- webext.log (tail) ----
+1:24:42.488] test: controller: created
+[11-12 21:24:42.489] test: profile: ICoreWebView2Profile7 ok
+[11-12 21:24:42.491] test: profile carries 3 extension(s) already
+[11-12 21:24:42.491] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:42.492] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-12 21:24:42.492] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-12 21:24:42.492] fetch: id dhdgffkkebhmkfjojejmpbldmpobfkfo, prodver 156.0.4314.58
+[11-12 21:24:42.632] dl: HTTP 200
+[11-12 21:24:43.223] fetch: unpacked 124 entries -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.223] test: download/unpack: ok -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.247] add: no stale registration under dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.396] test: AddBrowserExtension: 0x00000000 S_OK
+[11-12 21:24:43.398] test: VERDICT: PASS - dhdgffkkebhmkfjojejmpbldmpobfkfo is installed and listed
+[11-12 21:24:43.447] test: Docsy extension self-test  2026-11-12 21:24:43
+[11-12 21:24:43.450] test: target: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:43.454] test: runtime: 156.0.4314.58
+[11-12 21:24:43.454] test: user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+[11-12 21:24:43.454] test: extensions flag: on, mv2 keep-alive arguments set
+[11-12 21:24:43.899] test: controller: created
+[11-12 21:24:43.899] test: profile: ICoreWebView2Profile7 ok
+[11-12 21:24:43.900] test: profile carries 4 extension(s) already
+[11-12 21:24:43.901] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:43.901] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-12 21:24:43.901] test:   installed: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:43.901] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-12 21:24:43.907] init: registration ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' enabled=1
+[11-12 21:24:43.907] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' enabled=1
+[11-12 21:24:43.907] init: registration dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' enabled=1
+[11-12 21:24:43.908] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' enabled=1
+[11-12 21:24:43.909] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' has no folder - left alone
+[11-12 21:24:43.909] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' has no folder - left alone
+[11-12 21:24:43.909] init: GetBrowserExtensions answered 0x00000000, 4 extension(s) registered
+[11-12 21:24:43.909] init: 4 installed, 2 folder(s), 0 to re-add
+[11-12 21:24:44.159] test: check: ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' - on
+[11-12 21:24:44.161] test: check: dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' - on
+[11-12 21:24:44.161] test: VERDICT: PASS - the restart persists every extension the toolbar draws
+[11-12 21:24:44.205] test: Docsy extension self-test  2026-11-12 21:24:44
+[11-12 21:24:44.206] test: target: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:44.209] test: runtime: 156.0.4314.58
+[11-12 21:24:44.209] test: user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+[11-12 21:24:44.209] test: extensions flag: on, mv2 keep-alive arguments set
+[11-12 21:24:44.650] test: controller: created
+[11-12 21:24:44.651] test: profile: ICoreWebView2Profile7 ok
+[11-12 21:24:44.653] test: profile carries 4 extension(s) already
+[11-12 21:24:44.653] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-12 21:24:44.653] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-12 21:24:44.653] test:   installed: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-12 21:24:44.653] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-12 21:24:44.659] init: registration ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' enabled=1
+[11-12 21:24:44.659] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' enabled=1
+[11-12 21:24:44.659] init: registration dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' enabled=1
+[11-12 21:24:44.659] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' enabled=1
+[11-12 21:24:44.661] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' has no folder - left alone
+[11-12 21:24:44.661] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' has no folder - left alone
+[11-12 21:24:44.661] init: GetBrowserExtensions answered 0x00000000, 4 extension(s) registered
+[11-12 21:24:44.662] init: 4 installed, 2 folder(s), 0 to re-add
+[11-12 21:24:44.904] test: check: ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' - on
+[11-12 21:24:44.906] test: check: dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' - on
+[11-12 21:24:44.906] test: VERDICT: PASS - the restart persists every extension the toolbar draws
