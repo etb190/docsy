@@ -9198,9 +9198,14 @@ struct WebTab {
     bool loading = false, canBack = false, canFwd = false;
     bool capturing = false, capturePending = false;
     unsigned long long captureDue = 0;
+    unsigned long long navStart = 0;       // when the live navigation left the dock; 0 at rest.
+                                           // The watchdog's clock: a navigation that never lands
+                                           // is the launch blackscreen's one remaining shape
+    bool navKicked = false, navReloaded = false;   // the self-heal's own stages, once each
+    int renderDeaths = 0;                  // render-process failures the tab has lived through
     std::wstring pending;                  // the URL a brand-new tab opens once its
                                            // controller finishes building
-    EventRegistrationToken tkNavS{}, tkNavC{}, tkSrc{}, tkTitle{}, tkHist{}, tkDl{};
+    EventRegistrationToken tkNavS{}, tkNavC{}, tkSrc{}, tkTitle{}, tkHist{}, tkDl{}, tkProc{};
     HBITMAP thumb = nullptr; int thumbW = 0, thumbH = 0; double ar = 0.0;
 };
 static std::vector<WebTab> g_wt;
@@ -10112,6 +10117,19 @@ static void CALLBACK WxEngineRestartTimer(HWND, UINT, UINT_PTR id, DWORD) {
     if (id != g_wxRestartTimer) return;
     g_wxRestartTimer = 0;
     WxLogf(L"env: the old engine is gone - building the new one");
+    {   PWSTR la = nullptr;                // the GPU shader caches go too: a poisoned GPUCache or
+        SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &la);   // DawnCache is the classic
+        if (la) {                          // every-frame-fails-on-this-machine cause, and caches
+            std::wstring base = std::wstring(la) + L"\\Docsy\\WebView2";   // regenerate on the spot
+            CoTaskMemFree(la);
+            for (const wchar_t* d : { L"\\GPUCache", L"\\DawnCache", L"\\DawnGraphiteCache", L"\\DawnWebGPUCache",
+                                      L"\\GrShaderCache", L"\\ShaderCache", L"\\Default\\GPUCache",
+                                      L"\\Default\\DawnCache", L"\\Default\\GrShaderCache",
+                                      L"\\Default\\DawnGraphiteCache", L"\\Default\\DawnWebGPUCache" })
+                WxRmTree(base + d);
+            WxLogf(L"env: the gpu shader caches are wiped for the fresh engine");
+        }
+    }
     WebEnsureEnv();                        // its completion builds the controllers again
 }
 static void WxEngineRestart() {
@@ -10127,6 +10145,7 @@ static void WxEngineRestart() {
         t.ctr.Reset(); t.web.Reset();
         if (t.pending.empty() && !t.url.empty()) t.pending = t.url;   // every live tab re-opens
         t.capturing = false; t.capturePending = false; t.captureDue = 0;
+        t.loading = false; t.navStart = 0; t.navKicked = t.navReloaded = false;
     }
     g_wvEnv.Reset();                       // the last host let go: the browser process exits
     UINT_PTR t = SetTimer(nullptr, 0, 1000, WxEngineRestartTimer);   // ...then the fresh one builds
@@ -11349,15 +11368,81 @@ static void WebGo(const std::wstring& what) {
 static void WebEnsurePump() {
     if (!g.main) return;
     bool need = false;
-    for (auto& t : g_wt) if (t.captureDue || t.capturePending) need = true;
-    if (need) SetTimer(g.main, 7, 200, nullptr);
-    else KillTimer(g.main, 7);
+    for (auto& t : g_wt)                   // a navigation in flight rides the pump too: the
+        if (t.captureDue || t.capturePending || t.loading) need = true;   // watchdog lives there,
+    if (need) SetTimer(g.main, 7, 200, nullptr);   // and a stuck load is the blackscreen's
+    else KillTimer(g.main, 7);                     // last standing shape
+}
+
+static const wchar_t* WebProcName(COREWEBVIEW2_PROCESS_FAILED_KIND k) {   // the failure's kind, in words
+    switch (k) {
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED_UNEXPECTEDLY: return L"browser process exited";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_UNRESPONSIVE: return L"browser process unresponsive";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED: return L"render process exited";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE: return L"render process unresponsive";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_CRASHED: return L"render process crashed";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_TERMINATED: return L"render process terminated";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED: return L"frame render process exited";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_UNRESPONSIVE: return L"frame render process unresponsive";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_CRASHED: return L"frame render process crashed";
+    case COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_TERMINATED: return L"frame render process terminated";
+    default: return L"process failure";
+    }
+}
+
+static const wchar_t* WebErrName(COREWEBVIEW2_WEB_ERROR_STATUS es) {      // the load's verdict, in words
+    switch (es) {
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CANNOT_CONNECT: return L"cannot connect";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_HOST_NAME_NOT_RESOLVED: return L"name not resolved";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_TIMEOUT: return L"timeout";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_SERVER_UNREACHABLE: return L"server unreachable";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_ABORTED: return L"connection aborted";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CONNECTION_RESET: return L"connection reset";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_DISCONNECTED: return L"offline";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_ERROR_HTTP_INVALID_SERVER_RESPONSE: return L"bad server response";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_IS_INVALID: return L"invalid certificate";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_CERTIFICATE_EXPIRED: return L"certificate expired";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_OPERATION_CANCELED: return L"canceled";
+    case COREWEBVIEW2_WEB_ERROR_STATUS_REDIRECT_FAILED: return L"redirect failed";
+    default: break;
+    }
+    return es == COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN ? L"unknown" : L"error";
+}
+
+// the stuck-navigation self-heal, run from the pump: a navigation that left and
+// never lands (the DirectComposition stall of WebView2Feedback 5574, a hung
+// renderer, a dead network service) gets one presentation kick - a 1px bounds
+// jog forces the swap-chain to commit again, the exact move that showed content
+// in that thread's repros - and one reload. Each stage lands in webext.log, so
+// the next "blackscreen" report arrives with times and URLs, not adjectives.
+static void WebNavWatchdog() {
+    unsigned long long now = GetTickCount64();
+    for (auto& t : g_wt) {
+        if (!t.loading || !t.navStart) continue;
+        unsigned long long age = now - t.navStart;
+        if (age > 25000 && !t.navReloaded) {
+            t.navReloaded = true;
+            WxLogf(L"nav: watchdog reloads after %us - %s", (unsigned)(age / 1000), t.url.c_str());
+            if (t.web) t.web->Reload();
+        } else if (age > 12000 && !t.navKicked) {
+            t.navKicked = true;
+            WxLogf(L"nav: watchdog kicks the surface after %us - %s", (unsigned)(age / 1000), t.url.c_str());
+            if (t.ctr) {                   // one pixel further in than WebPlace's own inset: the size
+                RECT c; WebCardRect(c, g.cw, g.ch);   // change itself is what forces the fresh commit
+                c.left++; c.top++; c.right -= 2; c.bottom -= 2;
+                if (c.right > c.left && c.bottom > c.top) t.ctr->put_Bounds(c);
+            }
+        } else if (t.navKicked && age > 12400) {
+            WebPlace();                    // the kick's bounds go back; idempotent afterwards
+        }
+    }
 }
 
 static void WebCaptureTab(int id);
 static void WebThumbDecode(int id, IStream* st);
 
 static void WebCaptureTick() {                     // the main window's pump (timer 7)
+    WebNavWatchdog();                              // the stuck-navigation self-heal rides along
     unsigned long long now = GetTickCount64();
     for (auto& t : g_wt) {
         if (t.captureDue && now >= t.captureDue && t.web) {
@@ -11435,8 +11520,8 @@ static void WebThumbDecode(int id, IStream* st) {
 static void WebShowCurrent() {
     for (int i = 0; i < (int)g_wt.size(); i++)
         if (g_wt[i].ctr)   // the current tab's surface shows at once: its DefaultBackgroundColor
-            g_wt[i].ctr->put_IsVisible((i == g_wtCur) ? TRUE : FALSE);   // is the card's own dark, so the engine's spin-up reads as
-    WebPlace();        // the card, never as black glass or a page that never lands
+            g_wt[i].ctr->put_IsVisible((i == g_wtCur) ? TRUE : FALSE);   // is the pages' canvas, so the engine's
+    WebPlace();        // spin-up reads as the card, never as black glass or a page that never lands
 }
 
 static void WebHistorySync(int id) {
@@ -11463,8 +11548,11 @@ static void WebEnsureController(int i) {
                 c->get_CoreWebView2(&t->web);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
-                    c2->put_DefaultBackgroundColor({ 255, 0x1c, 0x1c, 0x1c });   // the card's dark,
-                                                                                    // not Chromium's white
+                    c2->put_DefaultBackgroundColor({ 255, 0x3a, 0x3a, 0x3a });   // the pages' canvas
+                                                                                    // (#3a3a3a, PaneBrush), so the
+                                                                                    // engine's spin-up reads as the
+                                                                                    // card's own surface, never as
+                                                                                    // Chromium's white or black glass
                 t->web->AddScriptToExecuteOnDocumentCreated(kWxStoreScript, nullptr);   // the store's "Add to Docsy"
                 {   EventRegistrationToken tkm;
                     t->web->add_WebMessageReceived(
@@ -11514,19 +11602,34 @@ static void WebEnsureController(int i) {
                 }
                 t->web->add_NavigationStarting(
                     Microsoft::WRL::Callback<ICoreWebView2NavigationStartingEventHandler>(
-                        [id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs*) -> HRESULT {
+                        [id](ICoreWebView2*, ICoreWebView2NavigationStartingEventArgs* a) -> HRESULT {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
+                            LPWSTR nu = nullptr;
+                            if (SUCCEEDED(a->get_Uri(&nu)) && nu) { WxLogf(L"nav: start %s", nu); CoTaskMemFree(nu); }
                             t->loading = true;
+                            t->navStart = GetTickCount64();   // the watchdog's clock starts here
+                            t->navKicked = false; t->navReloaded = false;
+                            WebEnsurePump();                  // the pump lives while a load is out
                             WebRepaintChrome(); WebStripSpin();
                             return S_OK;
                         }).Get(), &t->tkNavS);
                 t->web->add_NavigationCompleted(
                     Microsoft::WRL::Callback<ICoreWebView2NavigationCompletedEventHandler>(
-                        [id](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
+                        [id](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs* a) -> HRESULT {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
                             t->loading = false;
+                            t->navStart = 0;                           // the watchdog stands down
+                            BOOL navOk = FALSE;
+                            if (a) a->get_IsSuccess(&navOk);
+                            if (navOk) WxLogf(L"nav: done %s", t->url.c_str());
+                            else {
+                                COREWEBVIEW2_WEB_ERROR_STATUS es = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
+                                if (a) a->get_WebErrorStatus(&es);
+                                WxLogf(L"nav: failed %s (%s)", t->url.c_str(), WebErrName(es));
+                            }
+                            WebPlace();                                // a watchdog kick returns to the card
                             WxPushState(t->web.Get());                 // the store button learns what is installed
                             t->captureDue = GetTickCount64() + 1200;   // let the page settle, then
                             WebEnsurePump();                           // the rail gets its thumb
@@ -11565,15 +11668,48 @@ static void WebEnsureController(int i) {
                             WebHistorySync(id);
                             return S_OK;
                         }).Get(), &t->tkHist);
+                {   wrl::ComPtr<ICoreWebView2_2> w2;   // the processes' own verdicts: a render death
+                    if (SUCCEEDED(t->web->QueryInterface(IID_PPV_ARGS(&w2))) && w2) {   // reloads the tab
+                        w2->add_ProcessFailed(             // once, a second one cold-restarts the engine -
+                            Microsoft::WRL::Callback<ICoreWebView2ProcessFailedEventHandler>(   // deferred through
+                                [id](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs* a) -> HRESULT {   // WM_APP+7,
+                                    WebTab* t = WebTabById(id);   // never re-entrant in an event frame
+                                    if (!t) return S_OK;
+                                    COREWEBVIEW2_PROCESS_FAILED_KIND k{};
+                                    if (a) a->get_ProcessFailureKind(&k);
+                                    WxLogf(L"proc: %s on tab %llu", WebProcName(k), (unsigned long long)id);
+                                    if (k == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED_UNEXPECTEDLY
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_UNRESPONSIVE) {
+                                        if (g.main) PostMessageW(g.main, WM_APP + 7, 0, 0);
+                                        return S_OK;
+                                    }
+                                    bool render = k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_CRASHED
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_TERMINATED
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_UNRESPONSIVE
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_EXITED
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_CRASHED
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_TERMINATED
+                                        || k == COREWEBVIEW2_PROCESS_FAILED_KIND_FRAME_RENDER_PROCESS_UNRESPONSIVE;
+                                    if (render && ++t->renderDeaths <= 1) {
+                                        if (t->web) t->web->Reload();   // one silent recovery per tab
+                                    } else if (render && g.main) {
+                                        PostMessageW(g.main, WM_APP + 7, 0, 0);
+                                    }
+                                    return S_OK;
+                                }).Get(), &t->tkProc);
+                    }
+                }
                 WebShowCurrent();                  // the controller shows THE MOMENT it exists: a surface
                                                    // held invisible until its first NavigationCompleted
                                                    // never got there on real machines - the hidden widget
                                                    // throttles its renderer and the first navigation stalls
-                                                   // behind it, which held the card on its placeholder word
-                                                   // forever. The DefaultBackgroundColor set above IS the
-                                                   // card's dark, so the visible spin-up reads as the card
-                                                   // itself, never as black glass - and the page lands over it
+                                                   // behind it. The DefaultBackgroundColor set above IS the
+                                                   // pages' canvas, so the visible spin-up reads as the card
+                                                   // itself - and the page lands over it; a load that never
+                                                   // lands at all meets the watchdog further down
                 WebRepaintChrome();
+                WxLogf(L"ctrl: tab %llu is up, bounds placed", (unsigned long long)id);
                 if (t && !t->pending.empty()) {    // a tab born before its engine navigates the moment
                     t->web->Navigate(t->pending.c_str());   // it exists. The page is the product: extensions
                     t->pending.clear();            // already registered in the profile ride the browser
@@ -11614,9 +11750,21 @@ static void WebEnsureEnv() {
     // two switches hold the old manifest alive; unknown or already-flipped features
     // are ignored harmlessly by the runtime, so this costs nothing when not needed.
     wrl::ComPtr<ICoreWebView2EnvironmentOptions> envOptsBase;      // the arguments ride
-    if (envOpts && SUCCEEDED(envOpts.As(&envOptsBase)) && envOptsBase)   // the base interface
+    if (envOpts && SUCCEEDED(envOpts.As(&envOptsBase)) && envOptsBase) {   // the base interface
+        // GPU compositing stays off, on purpose. WebView2Feedback 5574 is the
+        // proof this machine class exists: on it, the DirectComposition
+        // presentation path dies while every DOM event keeps firing, and the
+        // view holds ONE uniform dark frame forever - the launch blackscreen
+        // this browser carried for weeks, screenshots and all. Microsoft's own
+        // committed workaround for that thread routes compositing through the
+        // CPU; the cost is a slower scroll on huge pages, and the payment is
+        // that the page SHOWS. The --disable-features list merges with the
+        // runtime's own (a union, per the AdditionalBrowserArguments docs), so
+        // the MV2 keep-alive and Edge's internal disabled features both survive.
         envOptsBase->put_AdditionalBrowserArguments(
-            L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled");
+            L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled"
+            L" --disable-gpu-compositing");
+    }
     WxLogf(L"env: mv2 keep-alive arguments set");
     // extension installs only work in a profile that was born with them on: a
     // user data folder provisioned by an older build - extensions off - keeps
@@ -11697,7 +11845,10 @@ static void WebSwitchTo(int i) {
 // the 1px #555 ring - and the card's classic 8dp window gutter now sits on
 // EVERY side: under the address bar, off the rail, off the foot, and the
 // original 8dp on the right, so the PaneShadow's room shows all the way around
-// the page - a floating card, same bake as the pages' card.
+// the page - a floating card, same bake as the pages' card. The webview's
+// bounds stop one pixel shy of the card's edge (WebPlace), so the ring shows
+// the whole way around and the page lives inside the card like the pages do -
+// a fresh tab's spin-up is the pages' canvas tone, never a black slab.
 static void WebCardRect(RECT& c, int w, int h) {
     int m = (int)(8 * g.dpi);
     c = { m, m, max(m + 10, w - m), max(m + 10, h - m) };
@@ -11841,9 +11992,10 @@ static void WebPlace() {
     if (!g.view) return;
     RECT c; WebCardRect(c, g.cw, g.ch);
     if (c.right <= c.left || c.bottom <= c.top) return;
-    for (auto& t : g_wt)                 // every controller rides the card's rect - one born
-        if (t.ctr) t.ctr->put_Bounds(c); // in the background keeps it until it is shown, and
-}                                        // none is left at the parent's raw client default
+    c.left++; c.top++; c.right--; c.bottom--;   // one pixel in: the #555 ring stays visible the
+    for (auto& t : g_wt)                        // whole way around, and the page sits INSIDE the
+        if (t.ctr) t.ctr->put_Bounds(c);        // card exactly where the PDF pages sit in theirs -
+}                                               // none is left at the parent's raw client default
 
 static void WebResizeDeb() {                       // a resize re-captures the visible thumb
     WebTab* t = WebCur();
@@ -15356,7 +15508,8 @@ static int WxExtTestMain(const std::wstring& spec, const std::wstring& out) {
         wrl::ComPtr<ICoreWebView2EnvironmentOptions> oBase;         // the base interface carries
         if (envOpts && SUCCEEDED(envOpts.As(&oBase)) && oBase)      // the additional arguments
             oBase->put_AdditionalBrowserArguments(
-                L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled");
+                L"--disable-features=ExtensionManifestV2Unsupported,ExtensionManifestV2Disabled"
+                L" --disable-gpu-compositing");   // the same road the GUI runs, flags and all
         WxTestRep(L"extensions flag: %s, mv2 keep-alive arguments set", extOn ? L"on" : L"COULD NOT SET");
         HRESULT hrE = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), envOpts.Get(),
             Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
