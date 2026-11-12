@@ -9645,6 +9645,8 @@ static bool JParse(const std::string& in, J& out) {
 // ---------------------------------------------------------------------------
 struct WebExt {
     std::wstring id, storeId, name, version, dir, popup, options;   // storeId: the Web Store id it was fetched under
+    std::wstring engineId;                 // the engine's own id for this folder, recorded in dir\.docsy-engine-id
+    std::wstring phId[2];                  // the ids the folder's path hashes to (current + legacy loader rule)
     Gdiplus::Bitmap* icon = nullptr;
     bool enabled = true;
     wrl::ComPtr<ICoreWebView2BrowserExtension> ext;
@@ -9848,6 +9850,51 @@ static bool WxIsExtId(const std::wstring& s) {
     for (wchar_t c : s) if (c < L'a' || c > L'p') return false;
     return true;
 }
+
+// ---- which registration belongs to which folder. The engine answers an added
+// folder with its OWN id - for an unpacked load it derives one from the folder's
+// path (Chromium's GenerateIdForPath: today the path's own bytes with the drive
+// letter forced upper, in older loaders the lowercased ASCII path), and the
+// manifest "key" this app writes into store packages does not always pin it.
+// ICoreWebView2BrowserExtension carries no folder path, so the restart needs
+// notes of its own: the engine id is recorded beside the folder the moment it is
+// learned (WxFinishInstall, WxInit's adoption and re-add), and the path-hash ids
+// are recomputed from the folder. A folder whose registration is found by any of
+// these keeps it - re-adding over a living registration answers
+// ERROR_INVALID_STATE, and that answer is what used to strip the icons. ----
+static std::wstring WxMarkerPath(const std::wstring& dir) { return dir + L"\\.docsy-engine-id"; }
+static void WxSaveEngineId(const std::wstring& dir, const std::wstring& id) {
+    if (!WxIsExtId(id)) return;
+    std::string s = WxU(id);
+    WxWriteFile(WxMarkerPath(dir), (const unsigned char*)s.data(), s.size());
+}
+static std::wstring WxLoadEngineId(const std::wstring& dir) {
+    std::string s;
+    if (!WxReadFile(WxMarkerPath(dir), s)) return L"";
+    size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
+    if (a == std::string::npos) return L"";
+    std::wstring id = WxW(s.substr(a, b - a + 1));
+    return WxIsExtId(id) ? id : L"";
+}
+static std::wstring WxPathHashId(const std::wstring& dir, bool native) {
+    std::wstring p = dir;
+    while (!p.empty() && (p[p.size() - 1] == L'\\' || p[p.size() - 1] == L'/')) p.pop_back();
+    std::string bytes;
+    if (native) {                          // today's loader: UTF-16LE bytes, drive letter forced upper
+        if (p.size() >= 2 && p[0] >= L'a' && p[0] <= L'z' && p[1] == L':')
+            p[0] = (wchar_t)(p[0] - L'a' + L'A');
+        bytes.assign((const char*)p.data(), p.size() * sizeof(wchar_t));
+    } else {                               // the older loader: the lowercased ASCII path
+        bool ascii = true;
+        for (wchar_t c : p) { if (c > 0x7f) { ascii = false; break; } bytes += (char)tolower((unsigned char)c); }
+        if (!ascii) bytes.clear();         // a non-ASCII path hashed as the empty string, faithfully
+    }
+    unsigned char h[32];
+    Sha256((const unsigned char*)bytes.data(), bytes.size(), h);
+    std::string id;
+    for (int i = 0; i < 16; i++) { id += (char)('a' + (h[i] >> 4)); id += (char)('a' + (h[i] & 15)); }
+    return WxW(id);
+}
 static bool WxStoreHost(const std::wstring& url, std::wstring* pathOut) {
     size_t p = url.find(L"://"); if (p == std::wstring::npos) return false;
     std::wstring rest = url.substr(p + 3);
@@ -9945,7 +9992,9 @@ static std::wstring WxExtUrl(const WebExt& e, const std::wstring& page) {
     return L"chrome-extension://" + e.id + L"/" + p;
 }
 static int WxFind(const std::wstring& id) {
-    for (int i = 0; i < (int)g_wx.size(); i++) if (g_wx[i].id == id || (!g_wx[i].storeId.empty() && g_wx[i].storeId == id)) return i;
+    for (int i = 0; i < (int)g_wx.size(); i++)
+        if (g_wx[i].id == id || (!g_wx[i].storeId.empty() && g_wx[i].storeId == id) ||
+            (!g_wx[i].engineId.empty() && g_wx[i].engineId == id)) return i;
     return -1;
 }
 
@@ -9972,15 +10021,29 @@ static void WxAddFolder(const std::wstring& dir, std::function<void(HRESULT, ICo
     if (FAILED(hr)) { WxLogf(L"add: %s refused synchronously 0x%08lX", dir.c_str(), (unsigned long)hr); done(hr, nullptr); }
 }
 // a registration left by an earlier attempt (the profile remembers extensions across runs, and a
-// failed install can leave one behind) makes AddBrowserExtension answer ERROR_INVALID_STATE: so any
-// extension already registered under this id is removed first, then the folder is added fresh
+// failed install can leave one behind) makes AddBrowserExtension answer ERROR_INVALID_STATE: so
+// every registration this folder can ride is removed first - by the store id it is named by, by
+// the engine id the last install recorded, by either id the folder's path can hash to and, as the
+// weakest net, by the manifest's own name - then the folder is added fresh
 static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
                              std::function<void(HRESULT, ICoreWebView2BrowserExtension*)> done) {
     wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
     if (!p) { done(E_NOINTERFACE, nullptr); return; }
+    std::vector<std::wstring> ids; ids.push_back(id);
+    {   std::wstring mk = WxLoadEngineId(dir);
+        if (!mk.empty()) ids.push_back(mk);
+        std::wstring ph0 = WxPathHashId(dir, true), ph1 = WxPathHashId(dir, false);
+        if (!ph1.empty() && ph1 != ph0) ids.push_back(ph1);
+        if (!ph0.empty()) ids.push_back(ph0);
+    }
+    std::wstring fname;                            // the manifest's own name, the last-resort key
+    {   WebExt probe; probe.dir = dir;             // (an update that renamed the extension lands here)
+        if (WxLoadInfo(probe)) fname = probe.name;
+        if (probe.icon) { delete probe.icon; probe.icon = nullptr; }
+    }
     HRESULT hr = p->GetBrowserExtensions(
         Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
-            [dir, id, done](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
+            [dir, id, ids, fname, done](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
                 auto stale = std::make_shared<std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>>>();
                 UINT n = 0;
                 if (SUCCEEDED(hr) && list && SUCCEEDED(list->get_Count(&n)))
@@ -9989,8 +10052,17 @@ static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
                         if (FAILED(list->GetValueAtIndex(i, &e)) || !e) continue;
                         LPWSTR rid = nullptr;
                         if (SUCCEEDED(e->get_Id(&rid)) && rid) {
-                            if (id == rid) stale->push_back(e);
+                            std::wstring rs = rid;
                             CoTaskMemFree(rid);
+                            bool hit = false;
+                            for (auto& s : ids) if (rs == s) { hit = true; break; }
+                            if (!hit && !fname.empty()) {          // the name answers only when every
+                                LPWSTR rn = nullptr;               // id road missed, so an innocent
+                                std::wstring rns;                  // namesake is removed only when the
+                                if (SUCCEEDED(e->get_Name(&rn)) && rn) { rns = rn; CoTaskMemFree(rn); }
+                                if (!rns.empty() && !_wcsicmp(rns.c_str(), fname.c_str())) hit = true;
+                            }
+                            if (hit) stale->push_back(e);
                         }
                     }
                 if (stale->empty()) { WxLogf(L"add: no stale registration under %s", id.c_str()); WxAddFolder(dir, done); return S_OK; }
@@ -10038,11 +10110,21 @@ static void WxInit() {
             [](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
                 g_wxOk = SUCCEEDED(hr);        // the fresh engine's own verdict - a restart
                 std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>> have;   // resets this
+                std::vector<std::wstring> rids, rnames;   // the registrations' own words
+                std::vector<BOOL> rens;
                 UINT n = 0;
                 if (SUCCEEDED(hr) && list && SUCCEEDED(list->get_Count(&n)))
                     for (UINT i = 0; i < n; i++) {
                         wrl::ComPtr<ICoreWebView2BrowserExtension> e;
-                        if (SUCCEEDED(list->GetValueAtIndex(i, &e)) && e) have.push_back(e);
+                        if (SUCCEEDED(list->GetValueAtIndex(i, &e)) && e) {
+                            LPWSTR s = nullptr;
+                            std::wstring rid, rn; BOOL en = TRUE;
+                            if (SUCCEEDED(e->get_Id(&s)) && s) { rid = s; CoTaskMemFree(s); }
+                            if (SUCCEEDED(e->get_Name(&s)) && s) { rn = s; CoTaskMemFree(s); }
+                            e->get_IsEnabled(&en);
+                            have.push_back(e); rids.push_back(rid); rnames.push_back(rn); rens.push_back(en);
+                            WxLogf(L"init: registration %s '%s' enabled=%u", rid.c_str(), rn.c_str(), en != FALSE);
+                        }
                     }
                 // our folders are the source of truth for names, icons and popups
                 std::wstring root = WxRoot();
@@ -10052,56 +10134,84 @@ static void WxInit() {
                     do {
                         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
                         WebExt e; e.id = fd.cFileName; e.storeId = e.id; e.dir = root + L"\\" + fd.cFileName;
+                        e.engineId = WxLoadEngineId(e.dir);
+                        e.phId[0] = WxPathHashId(e.dir, true);
+                        e.phId[1] = WxPathHashId(e.dir, false);
+                        if (e.phId[1] == e.phId[0]) e.phId[1].clear();
                         if (WxLoadInfo(e)) g_wx.push_back(std::move(e));
                     } while (FindNextFileW(h, &fd));
                     FindClose(h);
                 }
-                auto left = std::make_shared<int>(0);
+                // the restart's matching. The folder name is the store id, the marker
+                // remembers the engine id the install landed under, the path hash names
+                // what the unpacked loader derives, and the manifest name is the last
+                // net - the engine answers with its OWN id, the store id alone never
+                // matched, so every folder walked the re-add road and the add over the
+                // still-living registration answered ERROR_INVALID_STATE, flipped
+                // enabled off and dropped every icon on reopen.
+                std::vector<char> claimed(have.size(), 0);
                 std::vector<int> toAdd;
                 for (int i = 0; i < (int)g_wx.size(); i++) {
-                    bool found = false;
-                    for (auto& e : have) {
-                        LPWSTR rid = nullptr;
-                        if (SUCCEEDED(e->get_Id(&rid)) && rid) {
-                            // the folder's name is the store id, but the engine keeps its own:
-                            // a manifest without a key gets an id hashed from the folder's
-                            // path, never the store id. The live install adopts that id the
-                            // moment it lands (WxFinishInstall); the restart must find the
-                            // same registration through the store id too, or it would
-                            // re-add over a living registration, answer INVALID_STATE and
-                            // mark the extension off - the icons' vanishing act on reopen.
-                            if (g_wx[i].id == rid || g_wx[i].storeId == rid) {
-                                if (g_wx[i].id != rid)         // the bridge, in the log for the
-                                    WxLogf(L"init: %s registers as %s - the engine's id is adopted",
-                                           g_wx[i].id.c_str(), rid);   // next diagnosis to ride on
-                                g_wx[i].id = rid;              // the engine's id rules the URLs,
-                                g_wx[i].ext = e; found = true;  // WxFind rides id and storeId alike
-                                BOOL en = TRUE; if (SUCCEEDED(e->get_IsEnabled(&en))) g_wx[i].enabled = en != FALSE;
-                            }
-                            CoTaskMemFree(rid);
+                    int pick = -1;
+                    const wchar_t* how = L"";
+                    for (size_t j = 0; j < have.size(); j++) {
+                        if (claimed[j] || rids[j].empty()) continue;
+                        const WebExt& e = g_wx[i];
+                        if (rids[j] == e.id || rids[j] == e.storeId) { pick = (int)j; how = L"store id"; break; }
+                        if (!e.engineId.empty() && rids[j] == e.engineId) { pick = (int)j; how = L"engine marker"; break; }
+                        if (!e.phId[0].empty() && rids[j] == e.phId[0]) { pick = (int)j; how = L"path hash"; break; }
+                        if (!e.phId[1].empty() && rids[j] == e.phId[1]) { pick = (int)j; how = L"path hash (legacy)"; break; }
+                    }
+                    if (pick < 0 && !g_wx[i].name.empty()) {   // the name is matched only when one
+                        int same = 0;                          // folder and one registration carry it:
+                        for (int k = 0; k < (int)g_wx.size(); k++)   // a namesake never steals a claim
+                            if (!_wcsicmp(g_wx[k].name.c_str(), g_wx[i].name.c_str())) same++;
+                        if (same == 1) {
+                            int hits = 0, at = -1;
+                            for (size_t j = 0; j < have.size(); j++)
+                                if (!claimed[j] && !rnames[j].empty() &&
+                                    !_wcsicmp(rnames[j].c_str(), g_wx[i].name.c_str())) { hits++; at = (int)j; }
+                            if (hits == 1) { pick = at; how = L"name"; }
                         }
                     }
-                    if (!found) toAdd.push_back(i);
+                    if (pick < 0) { toAdd.push_back(i); continue; }
+                    claimed[pick] = 1;
+                    bool bridged = g_wx[i].id != rids[pick];
+                    g_wx[i].id = rids[pick];               // the engine's id rules the URLs, and
+                    g_wx[i].ext = have[pick];              // WxFind rides id, storeId, marker alike
+                    g_wx[i].enabled = rens[pick] != FALSE;
+                    WxSaveEngineId(g_wx[i].dir, rids[pick]);   // the next restart matches by the marker
+                    if (bridged)
+                        WxLogf(L"init: %s rides registration %s (matched by %s) - id adopted",
+                               g_wx[i].storeId.c_str(), rids[pick].c_str(), how);
                 }
+                for (size_t j = 0; j < have.size(); j++)
+                    if (!claimed[j])
+                        WxLogf(L"init: registration %s '%s' has no folder - left alone",
+                               rids[j].c_str(), rnames[j].c_str());
                 WxLogf(L"init: GetBrowserExtensions answered 0x%08lX, %u extension(s) registered",
                        (unsigned long)hr, (unsigned)have.size());
                 if (FAILED(hr)) WxLogf(L"init: the listing itself failed - the engine has no working extension subsystem");
                 WxLogf(L"init: %u installed, %zu folder(s), %zu to re-add", (unsigned)have.size(), g_wx.size(), toAdd.size());
                 if (toAdd.empty()) { WxFinishInit(); return S_OK; }
-                *left = (int)toAdd.size();
+                auto left = std::make_shared<int>((int)toAdd.size());
                 for (int i : toAdd) {
                     std::wstring id = g_wx[i].id, dir = g_wx[i].dir;
                     // fresh, never plain: the profile remembers registrations across runs,
                     // and a plain add over one answers ERROR_INVALID_STATE - the exact
                     // death this path died on every restart
-                    WxAddFolderFresh(dir, id, [id, left](HRESULT r, ICoreWebView2BrowserExtension* ext) {
+                    WxAddFolderFresh(dir, id, [id, dir, left](HRESULT r, ICoreWebView2BrowserExtension* ext) {
                         WxLogf(L"init: re-add %s -> 0x%08lX", id.c_str(), (unsigned long)r);
                         int k = WxFind(id);
                         if (k >= 0) {
                             if (SUCCEEDED(r) && ext) {
                                 g_wx[k].ext = ext;
                                 LPWSTR rid = nullptr;
-                                if (SUCCEEDED(ext->get_Id(&rid)) && rid) { g_wx[k].id = rid; CoTaskMemFree(rid); }
+                                if (SUCCEEDED(ext->get_Id(&rid)) && rid) {
+                                    g_wx[k].id = rid;
+                                    WxSaveEngineId(dir, rid);   // learned once, matched forever after
+                                    CoTaskMemFree(rid);
+                                }
                             } else g_wx[k].enabled = false;     // it would not load: keep it listed, off
                         }
                         if (--*left == 0) WxFinishInit();
@@ -10376,6 +10486,7 @@ static void WxFinishInstall(const std::wstring& id, const std::wstring& dir, HRE
     if (SUCCEEDED(ext->get_Id(&rid)) && rid) { e.id = rid; CoTaskMemFree(rid); }
     BOOL en = TRUE; if (SUCCEEDED(ext->get_IsEnabled(&en))) e.enabled = en != FALSE;
     WxLoadInfo(e);
+    WxSaveEngineId(dir, e.id);         // the restart finds this registration through the folder's marker
     g_wx.push_back(std::move(e));
     std::sort(g_wx.begin(), g_wx.end(), [](const WebExt& a, const WebExt& b) { return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0; });
     if (g_webOn) WebBarLayout();
