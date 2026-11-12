@@ -9195,6 +9195,7 @@ struct WebTab {
     wrl::ComPtr<ICoreWebView2Controller> ctr;
     wrl::ComPtr<ICoreWebView2> web;
     double zoom = 1.0;
+    bool building = false;
     bool loading = false, canBack = false, canFwd = false;
     bool capturing = false, capturePending = false;
     unsigned long long captureDue = 0;
@@ -9211,6 +9212,7 @@ struct WebTab {
 static std::vector<WebTab> g_wt;
 static unsigned long long g_wtIds = 1;
 static wrl::ComPtr<ICoreWebView2Environment> g_wvEnv;
+static bool g_wvEnvBuilding = false;
 static bool g_webChecked = false, g_webAvail = false;
 
 // the sidebar's web state: the one definition lives up by the palette, where
@@ -9678,6 +9680,7 @@ static void WxFinishInstall(const std::wstring& id, const std::wstring& dir, HRE
 static const wchar_t* WxHrName(HRESULT hr);
 static void WebBarLayout();
 static void WebNewTab(std::wstring url, bool makeCurrent);
+static void WxLoadDisk();
 
 static std::wstring WxW(const std::string& s) {
     if (s.empty()) return L"";
@@ -10019,16 +10022,14 @@ static int WxFind(const std::wstring& id) {
 
 // ---- the profile, the existing extensions, loading before the first page ----
 static wrl::ComPtr<ICoreWebView2Profile7> WxProfile() {
-    if (g_wxProf) return g_wxProf;
     for (auto& t : g_wt) {
         if (!t.web) continue;
         wrl::ComPtr<ICoreWebView2_13> w13; wrl::ComPtr<ICoreWebView2Profile> p;
         if (SUCCEEDED(t.web.As(&w13)) && w13 && SUCCEEDED(w13->get_Profile(&p)) && p) {
             wrl::ComPtr<ICoreWebView2Profile7> p7;
-            if (SUCCEEDED(p.As(&p7)) && p7) { g_wxProf = p7; break; }
+            if (SUCCEEDED(p.As(&p7)) && p7) { g_wxProf = p7; return g_wxProf; }
         }
     }
-    if (!g_wxProf) WxLogf(L"profile: no ICoreWebView2Profile7 on any tab - the runtime has no extension API");
     return g_wxProf;
 }
 static void WxAddFolder(const std::wstring& dir, std::function<void(HRESULT, ICoreWebView2BrowserExtension*)> done) {
@@ -10112,6 +10113,7 @@ static void WxFinishInit() {
     if (g_wxInitWatch) { KillTimer(nullptr, g_wxInitWatch); g_wxInitWatch = 0; }
     for (auto& t : g_wt)
         if (t.web && !t.pending.empty()) { t.web->Navigate(t.pending.c_str()); t.pending.clear(); }
+    WxLoadDisk();
     if (g_webOn) WebBarLayout();
     WebRepaintChrome();
     if (!g_wxVerifyRan && !g_wxVerifyTimer)      // one pass per session, a few seconds out:
@@ -10211,10 +10213,38 @@ static void WxAdoptLive(const std::wstring& dir, const std::wstring& id) {
     if (FAILED(hr))                        // a synchronous refusal is a fact worth keeping:
         WxLogf(L"adopt: %s - the listing refused synchronously 0x%08lX", id.c_str(), (unsigned long)hr);
 }
+static void WxLoadDisk() {
+    if (!g_wx.empty()) return;
+    std::wstring root = WxRoot();
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+            WebExt e; e.id = fd.cFileName; e.storeId = e.id; e.dir = root + L"\\" + fd.cFileName;
+            e.engineId = WxLoadEngineId(e.dir);
+            if (!e.engineId.empty()) e.id = e.engineId;
+            e.phId[0] = WxPathHashId(e.dir, true);
+            e.phId[1] = WxPathHashId(e.dir, false);
+            if (e.phId[1] == e.phId[0]) e.phId[1].clear();
+            if (WxLoadInfo(e)) {
+                e.enabled = WxLoadOn(e.dir);
+                g_wx.push_back(std::move(e));
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    std::sort(g_wx.begin(), g_wx.end(), [](const WebExt& a, const WebExt& b) {
+        return _wcsicmp(a.name.c_str(), b.name.c_str()) < 0;
+    });
+}
 static void WxInit() {
+    WxLoadDisk();
+    if (g_webOn) WebBarLayout();
+    WebRepaintChrome();
     if (g_wxReady || g_wxBusy) return;
     wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
-    if (!p) { g_wxOk = false; WxFinishInit(); return; }
+    if (!p) return;
     g_wxBusy = true;
     g_wxInitWatch = SetTimer(nullptr, 0, 9000, WxInitWatchTimer);   // the listing's leash: a wedged
                                                                     // engine answers nothing, and the
@@ -10241,26 +10271,7 @@ static void WxInit() {
                         }
                     }
                 // our folders are the source of truth for names, icons and popups.
-                // The list only fills when it is still empty: the watchdog's force-
-                // finish or the verify pass may have rebuilt it from these very
-                // folders already, and a late enumeration must not duplicate them.
-                if (g_wx.empty()) {
-                std::wstring root = WxRoot();
-                WIN32_FIND_DATAW fd;
-                HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &fd);
-                if (h != INVALID_HANDLE_VALUE) {
-                    do {
-                        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
-                        WebExt e; e.id = fd.cFileName; e.storeId = e.id; e.dir = root + L"\\" + fd.cFileName;
-                        e.engineId = WxLoadEngineId(e.dir);
-                        e.phId[0] = WxPathHashId(e.dir, true);
-                        e.phId[1] = WxPathHashId(e.dir, false);
-                        if (e.phId[1] == e.phId[0]) e.phId[1].clear();
-                        if (WxLoadInfo(e)) g_wx.push_back(std::move(e));
-                    } while (FindNextFileW(h, &fd));
-                    FindClose(h);
-                }
-                }
+                if (g_wx.empty()) WxLoadDisk();
                 // the restart's matching. The folder name is the store id, the marker
                 // remembers the engine id the install landed under, the path hash names
                 // what the unpacked loader derives, and the manifest name is the last
@@ -10327,6 +10338,10 @@ static void WxInit() {
                     WxAddFolderFresh(dir, id, [id, dir, left](HRESULT r, ICoreWebView2BrowserExtension* ext) {
                         WxLogf(L"init: re-add %s -> 0x%08lX", id.c_str(), (unsigned long)r);
                         int k = WxFind(id);
+                        if (k < 0) {
+                            for (int j = 0; j < (int)g_wx.size(); j++)
+                                if (g_wx[j].dir == dir) { k = j; break; }
+                        }
                         if (k >= 0) {
                             if (SUCCEEDED(r) && ext) {
                                 g_wx[k].ext = ext;
@@ -10540,11 +10555,13 @@ static void WxEngineRestart() {
     for (auto& t : g_wt) {
         if (t.ctr) t.ctr->Close();
         t.ctr.Reset(); t.web.Reset();
+        t.building = false;
         if (t.pending.empty() && !t.url.empty()) t.pending = t.url;   // every live tab re-opens
         t.capturing = false; t.capturePending = false; t.captureDue = 0;
         t.loading = false; t.navStart = 0; t.navKicked = t.navReloaded = false;
     }
     g_wvEnv.Reset();                       // the last host let go: the browser process exits
+    g_wvEnvBuilding = false;
     UINT_PTR t = SetTimer(nullptr, 0, 1000, WxEngineRestartTimer);   // ...then the fresh one builds
     if (t) g_wxRestartTimer = t;
     else WebEnsureEnv();                   // no timer: rebuild immediately, best effort
@@ -10996,10 +11013,21 @@ static int WxHit(POINT p) {
 }
 static void WxOpenPopupFor(int k) {
     if (k < 0 || k >= (int)g_wxR.size() || !g_wstrip) return;
-    RECT r = g_wxR[k];
-    POINT a{ r.left, r.top }, b{ r.right, r.bottom };
-    ClientToScreen(g_wstrip, &a); ClientToScreen(g_wstrip, &b);
-    WxOpenPopup(g_wxIdx[k], RECT{ a.x, a.y, b.x, b.y });
+    int idx = g_wxIdx[k];
+    if (idx < 0 || idx >= (int)g_wx.size()) return;
+    if (!g_wx[idx].popup.empty()) {
+        RECT r = g_wxR[k];
+        POINT a{ r.left, r.top }, b{ r.right, r.bottom };
+        ClientToScreen(g_wstrip, &a); ClientToScreen(g_wstrip, &b);
+        WxOpenPopup(idx, RECT{ a.x, a.y, b.x, b.y });
+    } else if (!g_wx[idx].options.empty()) {
+        WxOpenOptions(idx);
+    } else {
+        RECT r = g_wxR[k];
+        POINT a{ r.left, r.bottom };
+        ClientToScreen(g_wstrip, &a);
+        WxMenu(a);
+    }
 }
 static void WxOpenOptions(int ei) {
     if (ei < 0 || ei >= (int)g_wx.size() || g_wx[ei].options.empty()) return;
@@ -11524,7 +11552,7 @@ static void WebBarLayout() {
     g_wxR.clear(); g_wxIdx.clear();                // work from their own icons, and the pill
     std::vector<int> vis;                          // gains the room they used to bracket. The
     for (int i = 0; i < (int)g_wx.size() && vis.size() < 5; i++)   // icons ride g_wx alone now:
-        if (g_wx[i].enabled && !g_wx[i].popup.empty()) vis.push_back(i);   // g_wxOk was the listing
+        if (g_wx[i].enabled && (!g_wx[i].popup.empty() || !g_wx[i].options.empty() || g_wx[i].icon != nullptr)) vis.push_back(i);   // g_wxOk was the listing
     int n = (int)vis.size();                       // call's verdict, and a listing that fails
     int right0 = (int)g_wbR[WB_NEWTAB].left - (pitch - d);   // while the folders still run must
     for (int k = 0; k < n; k++) {                  // never take the faces with it
@@ -11969,13 +11997,15 @@ static void WebHistorySync(int id) {
 static void WebEnsureController(int i) {
     if (!g_wvEnv || i < 0 || i >= (int)g_wt.size()) return;
     WebTab* t = &g_wt[i];
-    if (t->ctr) return;
+    if (t->ctr || t->building) return;
+    t->building = true;
     unsigned long long id = t->id;
-    g_wvEnv->CreateCoreWebView2Controller(g.view,
+    HRESULT hr = g_wvEnv->CreateCoreWebView2Controller(g.view,
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
             [id](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
-                if (FAILED(hr) || !c) { g_webFail = true; WebRepaintChrome(); return S_OK; }
                 WebTab* t = WebTabById(id);
+                if (t) t->building = false;
+                if (FAILED(hr) || !c) { g_webFail = true; WebRepaintChrome(); return S_OK; }
                 if (!t) { c->Close(); return S_OK; }
                 t->ctr = c;
                 c->get_CoreWebView2(&t->web);
@@ -12148,10 +12178,16 @@ static void WebEnsureController(int i) {
                 WxInit();                          // listing - a stall there can never hold the page back.
                 return S_OK;
             }).Get());
+    if (FAILED(hr)) {
+        WebTab* t = WebTabById(id);
+        if (t) t->building = false;
+        g_webFail = true;
+        WebRepaintChrome();
+    }
 }
 
 static void WebEnsureEnv() {
-    if (g_wvEnv || g_webFail) return;
+    if (g_wvEnv || g_webFail || g_wvEnvBuilding) return;
     if (!g_webChecked) {
         g_webChecked = true;
         WxCleanWebViewEnvVars();       // inherited WEBVIEW2_* variables beat every option below
@@ -12213,15 +12249,23 @@ static void WebEnsureEnv() {
         if (mf != INVALID_HANDLE_VALUE) CloseHandle(mf);
     }
     WxLogf(L"env: extensions flag %s, runtime %s", extOn ? L"on" : L"OFF", g_webVer.c_str());
-    CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), envOpts.Get(),
+    g_wvEnvBuilding = true;
+    HRESULT hrE = CreateCoreWebView2EnvironmentWithOptions(nullptr, udf.c_str(), envOpts.Get(),
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [](HRESULT hr, ICoreWebView2Environment* env) -> HRESULT {
+                g_wvEnvBuilding = false;
                 if (FAILED(hr) || !env) { g_webFail = true; WxLogf(L"env: creation failed 0x%08lX", (unsigned long)hr); WebRepaintChrome(); return S_OK; }
                 g_wvEnv = env;
                 for (int i = 0; i < (int)g_wt.size(); i++) WebEnsureController(i);
                 WebRepaintChrome();
                 return S_OK;
             }).Get());
+    if (FAILED(hrE)) {
+        g_wvEnvBuilding = false;
+        g_webFail = true;
+        WxLogf(L"env: creation refused synchronously 0x%08lX", (unsigned long)hrE);
+        WebRepaintChrome();
+    }
 }
 
 static void WebNewTab(std::wstring url, bool makeCurrent) {
@@ -12469,6 +12513,7 @@ static void WebToggle(bool on) {
     if (g.side)                                    // the rail is the browser's own, closed until asked
         ShowWindow(g.side, on ? (g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE) : (g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE));
     if (on) {
+        WxLoadDisk();
         if (g_wt.empty()) WebNewTab(L"https://www.google.com/", true);
         else { WebEnsureEnv(); WebShowCurrent(); }
         if (g_wtool) { ShowWindow(g_wtool, SW_SHOWNOACTIVATE); InvalidateRect(g_wtool, nullptr, FALSE); }
@@ -16408,6 +16453,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
         return Shot(argv[2], c.right, c.bottom);                     // toggle does) - re-read it
     }
 
+    WxLoadDisk();
     ShowWindow(g.main, show);
     UpdateWindow(g.main);
     if (argc > 1) TabOpenInto(false, argv[1]);
