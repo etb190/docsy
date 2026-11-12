@@ -1103,7 +1103,7 @@ static void WebFailCard(HDC dc, int w, int h);   // the no-engine card in the vi
 static void WebViewClick(POINT p);        // the fail card's download button
 static void WebRepaintChrome();           // nav + tabs + footer + rail in one call
 static void WebCardRect(RECT& c, int w, int h);   // the card's rect: the reader's own container,
-                                          // margins and all - the webview rides inside it
+                                          // edge to edge - the webview rides inside it
 static void WebCardPaint(HDC dc, int w, int h);   // the card's field, face and ring
 
 // the sidebar's web state - the same fields sd carries, pointed at the tabs.
@@ -11848,25 +11848,24 @@ static void WebSwitchTo(int i) {
     WebRepaintChrome();
 }
 
-// the page: the reader's own container, and the reader's own margins. The
-// webview rides in the same rounded card the pages sit in - RadCard 6 corners,
-// the 1px #555 ring - and the card's classic 8dp window gutter now sits on
-// EVERY side: under the address bar, off the rail, off the foot, and the
-// original 8dp on the right, so the PaneShadow's room shows all the way around
-// the page - a floating card, same bake as the pages' card. The webview's
-// bounds stop one pixel shy of the card's edge (WebPlace), so the ring shows
-// the whole way around and the page lives inside the card like the pages do -
-// a fresh tab's spin-up is the pages' canvas tone, never a black slab.
+// the page: the reader's own container, edge to edge. The webview rides in
+// the same rounded card the pages sit in - RadCard 6 corners, the 1px #555
+// ring - and the card now fills the view on every side: no gutter anywhere,
+// the window IS the container. The webview's bounds stop one pixel shy of
+// the card's edge (WebPlace), so the ring still draws the container's edge,
+// and a GDI region carves the webview's own window to the same arc
+// (WebRoundWebView): the browser window is rounded exactly like the card it
+// lives in, the ring's arc showing through every carved corner. A fresh
+// tab's spin-up is the pages' canvas tone, never a black slab.
 static void WebCardRect(RECT& c, int w, int h) {
-    int m = (int)(8 * g.dpi);
-    c = { m, m, max(m + 10, w - m), max(m + 10, h - m) };
+    c = { 0, 0, max(10, w), max(10, h) };
 }
 
 // the reader's PaneShadow (black, BlurRadius 16, ShadowDepth 5, Direction 270,
-// Opacity 0.6) around a card that FLOATS inside its DIB: CardShadowStrip only
-// paints the left/right falloffs because the reader's card is flush against
-// the band, the rail and the foot - the browser's card floats 8dp free on all
-// four sides, so the same erfc falloff paints all the way around it.
+// Opacity 0.6) around a card that fills its DIB edge to edge: the silhouette
+// touches all four sides, so the erfc falloff only escapes inside the four
+// corner notches the webview's rounded region leaves open - the same shadow
+// the pages' card casts into its gutter, living where the rounding is.
 static void WebCardShadow(BYTE* bits, int w, int h, int x0, int y0, int x1, int y1, int rad) {
     const double sig = 8.0 * g.dpi;
     const double depth = 5.0 * g.dpi;
@@ -11926,15 +11925,16 @@ static void WebCardRing(BYTE* bits, int w, int h, int x0, int y0, int x1, int y1
 }
 
 // the view's whole paint in browser mode: the reader's OWN backdrop recipe,
-// run verbatim - the shared chrome grain as the field, the PaneShadow all the
-// way around the floating card, the canvas grain inside the ring and the #555
-// edge (the exact recipes the reader's CardBackdrop bakes, so the browser's
-// card is the pages' card to the pixel) - plus the no-engine card when the
-// runtime is missing. The webview itself lands on the card's rect the moment
-// its controller exists, its own background the card's dark, so an open and a
-// fresh tab show the card's room until the page composites - never black
-// glass, never a placeholder word. One body for the live view's WM_PAINT and
-// the shot composite, so the two can never drift.
+// run verbatim - the shared chrome grain as the field, the PaneShadow at the
+// rounded corners, the canvas grain inside the ring and the #555 edge (the
+// exact recipes the reader's CardBackdrop bakes, so the browser's card is
+// the pages' card to the pixel) - plus the no-engine card when the runtime
+// is missing. The webview itself lands on the card's rect the moment its
+// controller exists, its own background the card's dark and its own window
+// carved to the card's arc (WebRoundWebView), so an open and a fresh tab
+// show the card's room until the page composites - never black glass, never
+// a placeholder word. One body for the live view's WM_PAINT and the shot
+// composite, so the two can never drift.
 static HBITMAP g_wcbm = nullptr; static HDC g_wcdc = nullptr;
 static int g_wcw = 0, g_wch = 0; static double g_wcdpi = 0;
 
@@ -11954,16 +11954,16 @@ static void WebCardPaint(HDC dc, int w, int h) {
             SetBrushOrgEx(bdc, po.x, po.y, nullptr);
             RECT fr{ 0, 0, w, h };
             FillRect(bdc, &fr, GrainBrush(1));                // the one dark chrome field
-            int m = (int)(8 * g.dpi);                         // the card inside this DIB: 8dp of
-            int R = max(m + 10, w - m), B = max(m + 10, h - m);   // room on every side, the
-            int rad = max(2, (int)(6 * g.dpi));               // reader's own corners
+            RECT cc; WebCardRect(cc, w, h);                   // the card inside this DIB: the
+            int m = cc.left, R = cc.right, B = cc.bottom;     // whole view, the reader's own
+            int rad = max(2, (int)(6 * g.dpi));               // corners
             if (R - m > 2 * rad + 4 && B - m > 2 * rad + 2) {
-                WebCardShadow(bits, w, h, m, m, R, B, rad);   // the reader's PaneShadow all the way
-                                                              // around: black, BlurRadius 16,
-                                                              // ShadowDepth 5, Direction 270,
-                                                              // Opacity 0.6 - the gutters are where
-                                                              // it shows, the webview covers the
-                                                              // middle exactly as pages cover it
+                WebCardShadow(bits, w, h, m, m, R, B, rad);   // the reader's PaneShadow, alive in
+                                                              // the corner notches: black,
+                                                              // BlurRadius 16, ShadowDepth 5,
+                                                              // Direction 270, Opacity 0.6 - the
+                                                              // webview covers the middle exactly
+                                                              // as pages cover it
                 Gdiplus::Graphics gs(bdc);
                 gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
                 Gdiplus::GraphicsPath* inner = CardPath((float)m + 0.5f, (float)m + 0.5f,
@@ -11996,6 +11996,32 @@ static void WebCardPaint(HDC dc, int w, int h) {
     if (g_webFail) { WebFailCard(dc, w, h); return; }
 }
 
+// the browser window gets the card's rounding too: the webview is a square
+// child HWND, and a square page corner would sit on the ring's arc like a
+// sticker on a curved frame. A GDI region on that child - the ring's own
+// inner silhouette, the radius the container rounds by - carves the page's
+// corners to the card's arc, so the glass is rounded exactly where the card
+// is and the #555 ring draws the frame all the way around. Every
+// Chrome_WidgetWin child of the view is carved (one per controller, all
+// riding the card's bounds), so a background tab arrives rounded when its
+// turn on top comes; the region rides the window's own size, and WebPlace
+// re-cuts it on every resize and every freshly born controller.
+static void WebRoundWebView() {
+    if (!g.view) return;
+    int ew = 2 * (max(2, (int)(6 * g.dpi)) - 1);       // the ring's inner arc: the same
+    if (ew < 4) ew = 4;                                // radius the container rounds by
+    HWND hw = nullptr;
+    while ((hw = FindWindowExW(g.view, hw, nullptr, nullptr)) != nullptr) {
+        WCHAR cls[32]{};
+        if (!GetClassNameW(hw, cls, 32) || wcsncmp(cls, L"Chrome_WidgetWin", 16) != 0) continue;
+        RECT rc{};
+        if (!GetWindowRect(hw, &rc)) continue;
+        int vw = rc.right - rc.left, vh = rc.bottom - rc.top;
+        if (vw < 16 || vh < 16) continue;
+        SetWindowRgn(hw, CreateRoundRectRgn(0, 0, vw, vh, ew, ew), TRUE);   // the system owns
+    }                                                   // the region from here on
+}
+
 static void WebPlace() {
     if (!g.view) return;
     RECT c; WebCardRect(c, g.cw, g.ch);
@@ -12003,7 +12029,8 @@ static void WebPlace() {
     c.left++; c.top++; c.right--; c.bottom--;   // one pixel in: the #555 ring stays visible the
     for (auto& t : g_wt)                        // whole way around, and the page sits INSIDE the
         if (t.ctr) t.ctr->put_Bounds(c);        // card exactly where the PDF pages sit in theirs -
-}                                               // none is left at the parent's raw client default
+    WebRoundWebView();                          // and the glass itself is carved to the card's
+}                                               // arc - none is left at the parent's raw default
 
 static void WebResizeDeb() {                       // a resize re-captures the visible thumb
     WebTab* t = WebCur();
