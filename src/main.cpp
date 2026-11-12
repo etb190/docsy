@@ -10063,8 +10063,19 @@ static void WxInit() {
                     for (auto& e : have) {
                         LPWSTR rid = nullptr;
                         if (SUCCEEDED(e->get_Id(&rid)) && rid) {
-                            if (g_wx[i].id == rid) {
-                                g_wx[i].ext = e; found = true;
+                            // the folder's name is the store id, but the engine keeps its own:
+                            // a manifest without a key gets an id hashed from the folder's
+                            // path, never the store id. The live install adopts that id the
+                            // moment it lands (WxFinishInstall); the restart must find the
+                            // same registration through the store id too, or it would
+                            // re-add over a living registration, answer INVALID_STATE and
+                            // mark the extension off - the icons' vanishing act on reopen.
+                            if (g_wx[i].id == rid || g_wx[i].storeId == rid) {
+                                if (g_wx[i].id != rid)         // the bridge, in the log for the
+                                    WxLogf(L"init: %s registers as %s - the engine's id is adopted",
+                                           g_wx[i].id.c_str(), rid);   // next diagnosis to ride on
+                                g_wx[i].id = rid;              // the engine's id rules the URLs,
+                                g_wx[i].ext = e; found = true;  // WxFind rides id and storeId alike
                                 BOOL en = TRUE; if (SUCCEEDED(e->get_IsEnabled(&en))) g_wx[i].enabled = en != FALSE;
                             }
                             CoTaskMemFree(rid);
@@ -10080,7 +10091,10 @@ static void WxInit() {
                 *left = (int)toAdd.size();
                 for (int i : toAdd) {
                     std::wstring id = g_wx[i].id, dir = g_wx[i].dir;
-                    WxAddFolder(dir, [id, left](HRESULT r, ICoreWebView2BrowserExtension* ext) {
+                    // fresh, never plain: the profile remembers registrations across runs,
+                    // and a plain add over one answers ERROR_INVALID_STATE - the exact
+                    // death this path died on every restart
+                    WxAddFolderFresh(dir, id, [id, left](HRESULT r, ICoreWebView2BrowserExtension* ext) {
                         WxLogf(L"init: re-add %s -> 0x%08lX", id.c_str(), (unsigned long)r);
                         int k = WxFind(id);
                         if (k >= 0) {
