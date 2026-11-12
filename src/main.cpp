@@ -11013,21 +11013,10 @@ static int WxHit(POINT p) {
 }
 static void WxOpenPopupFor(int k) {
     if (k < 0 || k >= (int)g_wxR.size() || !g_wstrip) return;
-    int idx = g_wxIdx[k];
-    if (idx < 0 || idx >= (int)g_wx.size()) return;
-    if (!g_wx[idx].popup.empty()) {
-        RECT r = g_wxR[k];
-        POINT a{ r.left, r.top }, b{ r.right, r.bottom };
-        ClientToScreen(g_wstrip, &a); ClientToScreen(g_wstrip, &b);
-        WxOpenPopup(idx, RECT{ a.x, a.y, b.x, b.y });
-    } else if (!g_wx[idx].options.empty()) {
-        WxOpenOptions(idx);
-    } else {
-        RECT r = g_wxR[k];
-        POINT a{ r.left, r.bottom };
-        ClientToScreen(g_wstrip, &a);
-        WxMenu(a);
-    }
+    RECT r = g_wxR[k];
+    POINT a{ r.left, r.top }, b{ r.right, r.bottom };
+    ClientToScreen(g_wstrip, &a); ClientToScreen(g_wstrip, &b);
+    WxOpenPopup(g_wxIdx[k], RECT{ a.x, a.y, b.x, b.y });
 }
 static void WxOpenOptions(int ei) {
     if (ei < 0 || ei >= (int)g_wx.size() || g_wx[ei].options.empty()) return;
@@ -11552,7 +11541,7 @@ static void WebBarLayout() {
     g_wxR.clear(); g_wxIdx.clear();                // work from their own icons, and the pill
     std::vector<int> vis;                          // gains the room they used to bracket. The
     for (int i = 0; i < (int)g_wx.size() && vis.size() < 5; i++)   // icons ride g_wx alone now:
-        if (g_wx[i].enabled && (!g_wx[i].popup.empty() || !g_wx[i].options.empty() || g_wx[i].icon != nullptr)) vis.push_back(i);   // g_wxOk was the listing
+        if (g_wx[i].enabled && !g_wx[i].popup.empty()) vis.push_back(i);   // g_wxOk was the listing
     int n = (int)vis.size();                       // call's verdict, and a listing that fails
     int right0 = (int)g_wbR[WB_NEWTAB].left - (pitch - d);   // while the folders still run must
     for (int k = 0; k < n; k++) {                  // never take the faces with it
