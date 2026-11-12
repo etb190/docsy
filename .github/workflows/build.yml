@@ -50,8 +50,12 @@ jobs:
           $ck = Start-Process .\docsy.exe -ArgumentList '--extcheck','ddkjiahejlhfcafbddmgiahcphecmpfh','out=extcheck.txt' -PassThru
           if (-not $ck.WaitForExit(180000)) { Stop-Process -Id $ck.Id -Force -ErrorAction SilentlyContinue; "extcheck: killed at 180s" | Out-File -Append extlog.txt }
           "restart check exit: $($ck.ExitCode)" | Out-File -Append extlog.txt
-          foreach ($f in 'exttest-ubolite.txt','exttest-tampermonkey.txt','extcheck.txt') { if (Test-Path $f) { "----- $f -----" | Out-File -Append extlog.txt; Get-Content $f | Out-File -Append extlog.txt } }
+          $ck2 = Start-Process .\docsy.exe -ArgumentList '--extcheck','dhdgffkkebhmkfjojejmpbldmpobfkfo','out=extcheck-mv2.txt' -PassThru
+          if (-not $ck2.WaitForExit(180000)) { Stop-Process -Id $ck2.Id -Force -ErrorAction SilentlyContinue; "extcheck mv2: killed at 180s" | Out-File -Append extlog.txt }
+          "mv2 restart check exit: $($ck2.ExitCode)" | Out-File -Append extlog.txt
+          foreach ($f in 'exttest-ubolite.txt','exttest-tampermonkey.txt','extcheck.txt','extcheck-mv2.txt') { if (Test-Path $f) { "----- $f -----" | Out-File -Append extlog.txt; Get-Content $f | Out-File -Append extlog.txt } }
           if ($ck.ExitCode -ne 0) { exit 1 }
+          if ($ck2.ExitCode -ne 0) { exit 1 }
           if ($mv3.ExitCode -ne 0) { exit 1 }
       - name: Preview
         id: preview
@@ -108,7 +112,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf extlog.txt exttest-ubolite.txt exttest-tampermonkey.txt; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf extlog.txt exttest-ubolite.txt exttest-tampermonkey.txt extcheck.txt extcheck-mv2.txt; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
           gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
           echo "release exit: $?" >> release.log

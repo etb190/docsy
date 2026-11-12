@@ -9666,6 +9666,8 @@ static std::vector<std::wstring> g_wxInstalling;
 static bool g_wxRestarted = false;                 // once per session, never a loop
 static std::wstring g_wxRetryDir, g_wxRetryId;     // the install the old engine refused
 static UINT_PTR g_wxRestartTimer = 0;
+static bool g_wxVerifyRan = false;                 // the late load's one verification pass, per session
+static UINT_PTR g_wxVerifyTimer = 0;
 static void WebEnsureEnv();
 static void WxEngineRestart();
 static void WxFinishInstall(const std::wstring& id, const std::wstring& dir, HRESULT hr, ICoreWebView2BrowserExtension* ext);
@@ -10099,12 +10101,18 @@ static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
     }
 }
 static void WxNotifyTabs();
+static void CALLBACK WxVerifyTimer(HWND, UINT, UINT_PTR, DWORD);
 static void WxFinishInit() {
     g_wxReady = true; g_wxBusy = false;
     for (auto& t : g_wt)
         if (t.web && !t.pending.empty()) { t.web->Navigate(t.pending.c_str()); t.pending.clear(); }
     if (g_webOn) WebBarLayout();
     WebRepaintChrome();
+    if (!g_wxVerifyRan && !g_wxVerifyTimer)      // one pass per session, a few seconds out:
+        g_wxVerifyTimer = SetTimer(nullptr, 0, 4000, WxVerifyTimer);   // the engine's own load of
+                                                   // the profile's persisted extensions can finish
+                                                   // after every road above ran - the folders that
+                                                   // rode no registration get one more look
     if (!g_wxRetryId.empty()) {                    // the engine that refused this install is
         std::wstring dir = g_wxRetryDir, id = g_wxRetryId;   // gone; the fresh one retries it
         g_wxRetryDir.clear(); g_wxRetryId.clear();
@@ -10324,7 +10332,17 @@ static void WxInit() {
                                 // registration the id roads could not see. Adopt it - the old
                                 // answer switched the entry off and hid its face on every restart.
                                 WxAdoptLive(dir, id);
-                            } else g_wx[k].enabled = false;     // it would not load: keep it listed, off
+                            } else {
+                                // the engine refused the folder - but the face is the
+                                // FOLDER's, not the engine's: the user's own switch beside
+                                // it decides, and a refused load wears the switch, not
+                                // the engine's verdict. The icons of folders the engine
+                                // cannot load are the machine's own fact in webext.log.
+                                g_wx[k].enabled = WxLoadOn(dir);
+                                WxLogf(L"init: re-add %s refused 0x%08lX %s - the folder keeps its face (%s)",
+                                       id.c_str(), (unsigned long)r, WxHrName(r),
+                                       g_wx[k].enabled ? L"on" : L"off");
+                            }
                         }
                         if (--*left == 0) WxFinishInit();
                     });
@@ -10340,6 +10358,119 @@ static void WxInit() {
         else WxFinishInit();
         return;
     }
+}
+
+// the late load's last net. WxInit runs while the engine may still be loading the
+// profile's own persisted extensions - its enumeration can answer empty or
+// half-full, every matching road then runs against a list that is not the whole
+// truth, and a folder left riding no registration hides its face even though the
+// engine finishes loading it seconds later. The INVALID_STATE adoption catches
+// the race only when the add itself collides; nothing revisits a folder that
+// simply came up empty. One verification pass, once per session, a few seconds
+// after init: enumerate again, claim each orphan's registration by any id the
+// folder can name, and walk the fresh-add road once for what is still alone -
+// whose INVALID_STATE adoption claims what arrived meanwhile. The folder's own
+// switch keeps ruling the face; the engine's refusals land in webext.log.
+static void WxVerify() {
+    if (g_wxVerifyRan || !g_wxReady || g_wxBusy) return;
+    g_wxVerifyRan = true;
+    wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
+    if (!p) return;
+    if (g_wx.empty()) {                    // a listing that refused before any folder was read
+        std::wstring root = WxRoot();      // left the faces at home entirely - the folders are
+        WIN32_FIND_DATAW fd;               // the truth, so the list is rebuilt from them first
+        HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || fd.cFileName[0] == L'.') continue;
+                WebExt e; e.id = fd.cFileName; e.storeId = e.id; e.dir = root + L"\\" + fd.cFileName;
+                e.engineId = WxLoadEngineId(e.dir);
+                e.phId[0] = WxPathHashId(e.dir, true);
+                e.phId[1] = WxPathHashId(e.dir, false);
+                if (e.phId[1] == e.phId[0]) e.phId[1].clear();
+                if (WxLoadInfo(e)) { e.enabled = WxLoadOn(e.dir); g_wx.push_back(std::move(e)); }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+        if (!g_wx.empty())
+            WxLogf(L"verify: the list came up empty - %zu folder(s) rebuilt from disk",
+                   g_wx.size());
+    }
+    int orphans = 0;
+    for (auto& e : g_wx) if (e.enabled && !e.ext && !e.dir.empty()) orphans++;
+    if (!orphans) { WxLogf(L"verify: every folder rides a live registration"); return; }
+    HRESULT hr = p->GetBrowserExtensions(
+        Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
+            [orphans](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
+                std::vector<wrl::ComPtr<ICoreWebView2BrowserExtension>> have;
+                std::vector<std::wstring> rids;
+                UINT n = 0;
+                if (SUCCEEDED(hr) && list && SUCCEEDED(list->get_Count(&n)))
+                    for (UINT i = 0; i < n; i++) {
+                        wrl::ComPtr<ICoreWebView2BrowserExtension> e;
+                        if (SUCCEEDED(list->GetValueAtIndex(i, &e)) && e) {
+                            LPWSTR s = nullptr; std::wstring rid;
+                            if (SUCCEEDED(e->get_Id(&s)) && s) { rid = s; CoTaskMemFree(s); }
+                            have.push_back(e); rids.push_back(rid);
+                        }
+                    }
+                WxLogf(L"verify: %u registration(s) listed now, %d folder(s) rode none at init",
+                       (unsigned)have.size(), orphans);
+                std::vector<int> redo;
+                for (int i = 0; i < (int)g_wx.size(); i++) {
+                    if (g_wx[i].ext || !g_wx[i].enabled || g_wx[i].dir.empty()) continue;
+                    int pick = -1; const wchar_t* how = L"";
+                    for (size_t j = 0; j < have.size(); j++) {
+                        if (rids[j].empty()) continue;
+                        bool taken = false;                    // a registration another folder
+                        for (auto& o : g_wx)                   // already rides is not free
+                            if (o.ext && o.id == rids[j]) { taken = true; break; }
+                        if (taken) continue;
+                        const WebExt& e = g_wx[i];
+                        if (rids[j] == e.id || rids[j] == e.storeId) { pick = (int)j; how = L"store id"; break; }
+                        if (!e.engineId.empty() && rids[j] == e.engineId) { pick = (int)j; how = L"engine marker"; break; }
+                        if (!e.phId[0].empty() && rids[j] == e.phId[0]) { pick = (int)j; how = L"path hash"; break; }
+                        if (!e.phId[1].empty() && rids[j] == e.phId[1]) { pick = (int)j; how = L"path hash (legacy)"; break; }
+                    }
+                    if (pick < 0) { redo.push_back(i); continue; }
+                    g_wx[i].ext = have[pick];
+                    g_wx[i].id = rids[pick];
+                    WxSaveEngineId(g_wx[i].dir, rids[pick]);   // learned once, matched forever
+                    WxLogf(L"verify: %s rides registration %s (matched by %s)",
+                           g_wx[i].storeId.c_str(), rids[pick].c_str(), how);
+                }
+                for (int i : redo) {
+                    std::wstring id = g_wx[i].id, dir = g_wx[i].dir;
+                    WxAddFolderFresh(dir, id, [id, dir](HRESULT r, ICoreWebView2BrowserExtension* ext) {
+                        WxLogf(L"verify: re-add %s -> 0x%08lX %s", id.c_str(), (unsigned long)r, WxHrName(r));
+                        int k = WxFind(id);
+                        if (k >= 0 && SUCCEEDED(r) && ext) {
+                            g_wx[k].ext = ext;
+                            LPWSTR rid = nullptr;
+                            if (SUCCEEDED(ext->get_Id(&rid)) && rid) {
+                                g_wx[k].id = rid;
+                                WxSaveEngineId(dir, rid);
+                                CoTaskMemFree(rid);
+                            }
+                        } else if (k >= 0 && r == HRESULT_FROM_WIN32(ERROR_INVALID_STATE))
+                            WxAdoptLive(dir, id);          // "already here" - the load landed meanwhile
+                        if (g_webOn) WebBarLayout();
+                        WebRepaintChrome();
+                    });
+                }
+                if (g_webOn) WebBarLayout();
+                WebRepaintChrome();
+                WxNotifyTabs();
+                return S_OK;
+            }).Get());
+    if (FAILED(hr))
+        WxLogf(L"verify: the listing refused synchronously 0x%08lX %s", (unsigned long)hr, WxHrName(hr));
+}
+static void CALLBACK WxVerifyTimer(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    if (id != g_wxVerifyTimer) return;
+    g_wxVerifyTimer = 0;
+    WxVerify();
 }
 
 // the engine cold-restart: release every controller and the environment, let the
