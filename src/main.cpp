@@ -9668,6 +9668,10 @@ static std::wstring g_wxRetryDir, g_wxRetryId;     // the install the old engine
 static UINT_PTR g_wxRestartTimer = 0;
 static bool g_wxVerifyRan = false;                 // the late load's one verification pass, per session
 static UINT_PTR g_wxVerifyTimer = 0;
+static UINT_PTR g_wxInitWatch = 0;                 // the listing's own leash: if GetBrowserExtensions'
+                                                   // completion never comes back (a wedged engine, a
+                                                   // browser process that died mid-call), init finishes
+                                                   // from the folders anyway - the faces never hang on it
 static void WebEnsureEnv();
 static void WxEngineRestart();
 static void WxFinishInstall(const std::wstring& id, const std::wstring& dir, HRESULT hr, ICoreWebView2BrowserExtension* ext);
@@ -10102,8 +10106,10 @@ static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
 }
 static void WxNotifyTabs();
 static void CALLBACK WxVerifyTimer(HWND, UINT, UINT_PTR, DWORD);
+static void CALLBACK WxInitWatchTimer(HWND, UINT, UINT_PTR, DWORD);
 static void WxFinishInit() {
     g_wxReady = true; g_wxBusy = false;
+    if (g_wxInitWatch) { KillTimer(nullptr, g_wxInitWatch); g_wxInitWatch = 0; }
     for (auto& t : g_wt)
         if (t.web && !t.pending.empty()) { t.web->Navigate(t.pending.c_str()); t.pending.clear(); }
     if (g_webOn) WebBarLayout();
@@ -10210,6 +10216,9 @@ static void WxInit() {
     wrl::ComPtr<ICoreWebView2Profile7> p = WxProfile();
     if (!p) { g_wxOk = false; WxFinishInit(); return; }
     g_wxBusy = true;
+    g_wxInitWatch = SetTimer(nullptr, 0, 9000, WxInitWatchTimer);   // the listing's leash: a wedged
+                                                                    // engine answers nothing, and the
+                                                                    // folders' faces must not wait on it
     HRESULT hr0 = p->GetBrowserExtensions(
         Microsoft::WRL::Callback<ICoreWebView2ProfileGetBrowserExtensionsCompletedHandler>(
             [](HRESULT hr, ICoreWebView2BrowserExtensionList* list) -> HRESULT {
@@ -10231,7 +10240,11 @@ static void WxInit() {
                             WxLogf(L"init: registration %s '%s' enabled=%u", rid.c_str(), rn.c_str(), en != FALSE);
                         }
                     }
-                // our folders are the source of truth for names, icons and popups
+                // our folders are the source of truth for names, icons and popups.
+                // The list only fills when it is still empty: the watchdog's force-
+                // finish or the verify pass may have rebuilt it from these very
+                // folders already, and a late enumeration must not duplicate them.
+                if (g_wx.empty()) {
                 std::wstring root = WxRoot();
                 WIN32_FIND_DATAW fd;
                 HANDLE h = FindFirstFileW((root + L"\\*").c_str(), &fd);
@@ -10246,6 +10259,7 @@ static void WxInit() {
                         if (WxLoadInfo(e)) g_wx.push_back(std::move(e));
                     } while (FindNextFileW(h, &fd));
                     FindClose(h);
+                }
                 }
                 // the restart's matching. The folder name is the store id, the marker
                 // remembers the engine id the install landed under, the path hash names
@@ -10471,6 +10485,22 @@ static void CALLBACK WxVerifyTimer(HWND, UINT, UINT_PTR id, DWORD) {
     if (id != g_wxVerifyTimer) return;
     g_wxVerifyTimer = 0;
     WxVerify();
+}
+// the listing's leash. WxInit hands the engine one GetBrowserExtensions call and
+// everything below it - matching, re-adds, the verify pass, WxFinishInit's own
+// pending-navigation flush - hangs on that completion coming back. A wedged
+// engine answers nothing: g_wxBusy sticks true, no later road ever runs, and the
+// session's extensions keep working (the engine loads them from its own
+// persistence) while their faces never exist. Nine seconds in, the watchdog
+// finishes init anyway - from the folders on disk, which the verify pass then
+// rides to their registrations.
+static void CALLBACK WxInitWatchTimer(HWND, UINT, UINT_PTR id, DWORD) {
+    KillTimer(nullptr, id);
+    if (id != g_wxInitWatch) return;
+    g_wxInitWatch = 0;
+    if (!g_wxBusy) return;                 // the listing answered in time - the normal road won
+    WxLogf(L"init: the listing never came back - finishing from the folders on disk");
+    WxFinishInit();                        // busy clears, ready sets, verify is scheduled
 }
 
 // the engine cold-restart: release every controller and the environment, let the
@@ -11007,9 +11037,9 @@ static void WxCopyDiag() {
     CloseClipboard();
 }
 
-static void WxMenu() {
-    if (!g_wstrip) return;
-    POINT pt{ g_wbR[WB_EXT].left, g_wbR[WB_EXT].bottom };
+static void WxMenu(POINT cur) {            // the anchor, in strip coords: the right-click's
+    if (!g_wstrip) return;                 // cursor, or the keyboard road's own spot
+    POINT pt = cur;
     ClientToScreen(g_wstrip, &pt);
     HMENU m = CreatePopupMenu();
     if (!m) return;
@@ -11447,6 +11477,14 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_CAPTURECHANGED:
         if (g.tbPressed >= 0 || g_wxPress >= 0) { g.tbPressed = -1; g_wxPress = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
+    case WM_CONTEXTMENU: {                         // right-click opens the extensions' menu: the
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };   // manager's door, and the diagnostics with it
+        if (p.x != -1 || p.y != -1) {              // (keyboard-open passes -1,-1; no anchor to offer)
+            ScreenToClient(h, &p);
+            WxMenu(p);
+        }
+        return 0;
+    }
     case WM_CTLCOLOREDIT:                          // the omnibox edit is this window's child
         return (LRESULT)WebEditColors((HDC)wp, (HWND)lp);
     case WM_SETCURSOR:
@@ -11660,7 +11698,7 @@ static void WebBarClick(int id) {
     WebTab* t = WebCur();
     switch (id) {
     case WB_READER: WebToggle(false); return;
-    case WB_EXT: WxMenu(); return;
+    case WB_EXT: { POINT z{ g_wbR[WB_EXT].left, g_wbR[WB_EXT].bottom }; WxMenu(z); } return;
     case WB_SIDE:
         g_webSide = !g_webSide;
         if (g.side) ShowWindow(g.side, g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE);
