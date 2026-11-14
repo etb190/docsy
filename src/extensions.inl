@@ -1485,7 +1485,9 @@ static bool WebBtnEnabled(int id) {
     switch (id) {
     case WB_BACK: return t && t->canBack;
     case WB_FWD: return t && t->canFwd;
-    case WB_RELOAD: case WB_READER: case WB_NEWTAB: case WB_MENU: case WB_SIDE: case WB_EXT: return true;
+    case WB_RELOAD: case WB_READER: case WB_NEWTAB: case WB_MENU: case WB_SIDE: case WB_EXT:
+    case WB_STAR:                                    // the star arms with the pill: its own click
+        return true;                                 // answers in WebBarClick, not here
     }
     return false;
 }

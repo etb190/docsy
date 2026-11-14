@@ -165,8 +165,9 @@ static void WebStripPaint(HDC dc, int w, int h) {
     SetBkMode(dc, TRANSPARENT);
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8"
+        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr
     };                                                 // reload rides the field, the sidebar icon is drawn
+                                                       // by hand, and the star lives in the pill too
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
         if (i == WB_RELOAD) continue;                  // its tile draws inside the field
@@ -248,6 +249,16 @@ static void WebStripPaint(HDC dc, int w, int h) {
     SetTextColor(dc, wvb::Ink);
     DrawTextW(dc, (t && t->loading) ? L"\uE711" : L"\uE72C", -1, &rf,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    // the bookmark star, left of the reload: an outline while this page is a
+    // stranger, the accent's fill once it is one of the list's own - the state
+    // flips wherever the URL changes, the omnibox's own invalidation carries it
+    RECT st = g_wbR[WB_STAR];
+    if (g.tbTabHot == WB_STAR && !g_webFail)
+        WebTileC(dc, st, Gdiplus::Color(255, GetRValue(wvb::Hover), GetGValue(wvb::Hover),
+                                        GetBValue(wvb::Hover)), 12.0f);
+    bool saved = t && BmFindUrl(t->url) >= 0;
+    SetTextColor(dc, g_webFail ? wvb::InkOff : (saved ? wvb::Blue : wvb::Ink));
+    DrawTextW(dc, saved ? L"\uE735" : L"\uE734", -1, &st, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     if (t && t->loading) {                             // the progress line: a blue segment sweeping
         int inset = TABF(16);                          // along the capsule's foot
         int pw = (int)(g_webOmni.right - g_webOmni.left) - 2 * inset;
@@ -274,6 +285,11 @@ static void WebStripPaint(HDC dc, int w, int h) {
         DrawTextW(dc, L"Search or enter website name", -1, &pr,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
+    // the bookmarks bar rides the strip's lower band: painted last, so it
+    // covers the toolbar's foot fade in its own rows and restores the hairline
+    // the fade covered - the band's top edge stays clean, the card's boundary
+    // (the hairline at h-1) belongs to the bar's own draw
+    BmBarDraw(dc, w, h);
 }
 
 static void WebStripSpin() {
@@ -316,20 +332,22 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        int hot = WebNavHit(p), xh = WxHit(p);
-        if (hot != g.tbTabHot || xh != g_wxHot) {
-            g.tbTabHot = hot; g_wxHot = xh;
-            if (hot >= 0 || xh >= 0) TrackLeave(h);
+        int hot = WebNavHit(p), xh = WxHit(p), bh = BmHit(p);
+        if (hot != g.tbTabHot || xh != g_wxHot || bh != g_bmHot) {
+            g.tbTabHot = hot; g_wxHot = xh; g_bmHot = bh;
+            if (hot >= 0 || xh >= 0 || bh >= 0) TrackLeave(h);
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.tbTabHot != -1 || g_wxHot != -1) { g.tbTabHot = -1; g_wxHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (g.tbTabHot != -1 || g_wxHot != -1 || g_bmHot != -1) {
+            g.tbTabHot = -1; g_wxHot = -1; g_bmHot = -1; InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        int hit = WebNavHit(p), xh = WxHit(p);
+        int hit = WebNavHit(p), xh = WxHit(p), bh = BmHit(p);
         if (hit >= 0) {                            // capture held: the toolbar's press story
             SetCapture(h);
             g.tbPressed = hit;
@@ -338,13 +356,31 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SetCapture(h);
             g_wxPress = xh;
             InvalidateRect(h, nullptr, FALSE);
+        } else if (bh >= 0) {                      // a bookmark row: the press story once more
+            SetCapture(h);
+            g_bmPress = bh;
+            InvalidateRect(h, nullptr, FALSE);
         } else if (PtInRect(&g_webOmni, p) && g_wedit && !g_webFail) {
             SetFocus(g_wedit);                     // a click on the pill focuses the URL
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
+    case WM_MBUTTONDOWN: {                         // a middle click on a bookmark row: the
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };   // row opens in a tab of its own
+        int mb = BmHit(p);
+        if (mb >= 0) BmClick(mb, true);
+        return 0;
+    }
     case WM_LBUTTONUP: {
+        if (g_bmPress >= 0) {                      // a bookmark row's release answers where it pressed
+            int pr = g_bmPress; g_bmPress = -1;
+            if (GetCapture() == h) ReleaseCapture();
+            POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            InvalidateRect(h, nullptr, FALSE);
+            if (BmHit(p) == pr) BmClick(pr, false);
+            return 0;
+        }
         if (g_wxPress >= 0) {
             int pr = g_wxPress; g_wxPress = -1;
             if (GetCapture() == h) ReleaseCapture();
@@ -370,12 +406,16 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CAPTURECHANGED:
-        if (g.tbPressed >= 0 || g_wxPress >= 0) { g.tbPressed = -1; g_wxPress = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (g.tbPressed >= 0 || g_wxPress >= 0 || g_bmPress >= 0) {
+            g.tbPressed = -1; g_wxPress = -1; g_bmPress = -1; InvalidateRect(h, nullptr, FALSE);
+        }
         return 0;
-    case WM_CONTEXTMENU: {                         // right-click opens the extensions' menu: the
-        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };   // manager's door, and the diagnostics with it
-        if (p.x != -1 || p.y != -1) {              // (keyboard-open passes -1,-1; no anchor to offer)
+    case WM_CONTEXTMENU: {                         // right-click: a bookmark row answers with its own
+        POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };   // menu (edit, remove, open in a tab); the bare
+        if (p.x != -1 || p.y != -1) {              // strip keeps the extensions' menu it always had
             ScreenToClient(h, &p);
+            int rh = BmHit(p);
+            if (rh >= 0 && g_bmRows[rh].kind != 2) { BmRowMenu(rh); return 0; }
             WxMenu(p);
         }
         return 0;
@@ -388,7 +428,8 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             int hit = WebNavHit(p);
             bool pill = PtInRect(&g_webOmni, p);
             bool xi = WxHit(p) >= 0;
-            SetCursor(LoadCursorW(nullptr, (hit >= 0 || xi) ? IDC_HAND : (pill ? IDC_IBEAM : IDC_ARROW)));
+            bool bi = BmHit(p) >= 0;
+            SetCursor(LoadCursorW(nullptr, (hit >= 0 || xi || bi) ? IDC_HAND : (pill ? IDC_IBEAM : IDC_ARROW)));
             return TRUE;
         }
         break;
@@ -434,6 +475,8 @@ static void WebBarLayout() {
     g_webOmni = { pl, py, pl + pw, py + ph };
     g_wbR[WB_RELOAD] = { g_webOmni.right - TABF(30), g_webOmni.top + TABF(3),
                          g_webOmni.right - TABF(6), g_webOmni.bottom - TABF(3) };
+    g_wbR[WB_STAR] = { g_webOmni.right - TABF(58), g_webOmni.top + TABF(3),      // the star lives in
+                       g_webOmni.right - TABF(34), g_webOmni.bottom - TABF(3) };  // the pill too,
     if (!g_webEditFont) g_webEditFont = CreateFontW(-(int)std::lround(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -605,6 +648,8 @@ static void WebBarClick(int id) {
         if (t && t->web) { if (t->loading) t->web->Stop(); else t->web->Reload(); }
         return;
     case WB_NEWTAB: WebNewTab(L"https://www.google.com/", true); return;
+    case WB_STAR: BmStarClick(); return;           // the pill's star: saved page back off the list,
+                                                   // stranger to the bubble (bookmarks.inl)
     case WB_MENU: {
         if (!g_wstrip) return;
         POINT pt{ g_wbR[WB_MENU].left, g_wbR[WB_MENU].bottom };
@@ -858,7 +903,8 @@ static void WebHistorySync(int id) {
     BOOL b = FALSE;
     t->web->get_CanGoBack(&b); t->canBack = b != 0;
     t->web->get_CanGoForward(&b); t->canFwd = b != 0;
-    if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);
+    BmStarSync();                                  // a navigation may cross the star's line: saved
+    if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);   // or not, the pill's fill follows the URL
 }
 
 static void WebEnsureController(int i) {
@@ -1381,6 +1427,7 @@ static void WebToggle(bool on) {
         ShowWindow(g.side, on ? (g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE) : (g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE));
     if (on) {
         WxLoadDisk();
+        BmLoad();                                  // the list is home before the bar first paints
         if (g_wt.empty()) WebNewTab(L"https://www.google.com/", true);
         else { WebEnsureEnv(); WebShowCurrent(); }
         if (g_wtool) { ShowWindow(g_wtool, SW_SHOWNOACTIVATE); InvalidateRect(g_wtool, nullptr, FALSE); }
@@ -1396,6 +1443,8 @@ static void WebToggle(bool on) {
         for (auto& w : g_wt) if (w.ctr) w.ctr->put_IsVisible(FALSE);
         if (g_wedit) { ShowWindow(g_wedit, SW_HIDE); SetFocus(g.main); }
         WxPopClose();
+        BmPopDestroy();                            // the star's bubble has no business over the reader
+        g_bmHot = g_bmPress = -1;
     }
     LayoutMain();                                  // the strip band appears or collapses
     WebBarLayout();

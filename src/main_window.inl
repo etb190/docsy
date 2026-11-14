@@ -529,6 +529,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_APP + 5: WxInstallDone((WxJob*)lp); return 0;   // an extension download finished
     case WM_APP + 7: WxEngineRestart(); return 0;   // the deferred engine restart: a fresh
                                                     // browser process for extension operations
+    case WM_APP + 9: BmFaviconArrived((std::wstring*)lp); return 0;   // a favicon's thread is home:
+                                                    // the bar's faces walk in on the UI thread
     case WM_APP + 3: {                        // the drop queue's drain: one document per
         if (!g_dropQ.empty()) {               // message, so the window paints between loads
             std::wstring p = std::move(g_dropQ.front());

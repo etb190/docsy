@@ -10,6 +10,7 @@
 #include "footer.inl"
 #include "crx_unpack.inl"
 #include "extensions.inl"
+#include "bookmarks.inl"
 #include "browser.inl"
 #include "find_bar.inl"
 #include "sidebar.inl"
@@ -104,6 +105,13 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     xpc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
     xpc.lpszClassName = L"DocsyExtPopup";
     RegisterClassExW(&xpc);
+
+    WNDCLASSEXW bpc{ sizeof bpc };                  // the bookmark bubble: the star's save prompt,
+    bpc.style = CS_DROPSHADOW;                      // a dark card with the chrome's own manners
+    bpc.lpfnWndProc = BmPopProc; bpc.hInstance = hi;
+    bpc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    bpc.lpszClassName = L"DocsyBmPop";
+    RegisterClassExW(&bpc);
 
     WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Safari toolbar (top): the
     wbc.style = CS_DBLCLKS;                         // logo, back/forward, the search pill,
@@ -354,6 +362,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                 g_wt.push_back(std::move(t1)); g_wt.push_back(std::move(t2));
                 g_wtCur = 0;
                 g_webOn = true;
+                BmLoad(); g_bm.clear(); g_bmHot = g_bmPress = -1;   // the shot's list is the demo's
+                BmSeedDemo();                          // own: deterministic rows, no threads, no fetches
                 if (g_wtool) ShowWindow(g_wtool, SW_SHOWNOACTIVATE);
                 if (g_wstrip) ShowWindow(g_wstrip, SW_SHOWNOACTIVATE);
                 LayoutMain();
@@ -372,6 +382,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     }
 
     WxLoadDisk();
+    BmLoad();                                  // the bookmarks' list: one file read, before any
+                                               // window can paint the bar
     ShowWindow(g.main, show);
     UpdateWindow(g.main);
     if (argc > 1) TabOpenInto(false, argv[1]);

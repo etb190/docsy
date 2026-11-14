@@ -1060,7 +1060,10 @@ static void EnsureInfoBack(HDC ref, int w, int h) {
 static bool g_webFail = false;           // the WebView2 runtime is missing (rare)
 static bool g_webSide = false;           // the web-tab thumbnail sidebar (closed by default, like Safari)
 static HWND g_wstrip = nullptr;          // the browser's Safari toolbar (on top)
-static int WEBSTRIPH() { return g_webOn ? (int)(44 * g.dpi) : 0; }   // the toolbar band (Safari)
+static bool g_webBarOn = true;           // the bookmarks bar lives inside the strip's band, so
+                                         // WEBSTRIPH carries it and every band below flows
+static int WebBarH();                    // the bar's height (bookmarks.inl)
+static int WEBSTRIPH() { return g_webOn ? (int)(44 * g.dpi) + WebBarH() : 0; }   // the toolbar band (Safari)
 static HWND g_wtool = nullptr;           // the reader's own top toolbar, carried into browser mode
 static int WEBTOOLH() { return g_webOn ? TBH() : 0; }   // ...with one button: back to the PDF reader
 static int WEBTABH() { return (int)(34 * g.dpi); }   // the tab band: the reader's 3px inset + 29px face + 1px foot
