@@ -317,7 +317,7 @@ static void BmBarRows(int w) {
         int n = (int)s.size();
         if (n > cap) n = cap;
         GetTextExtentPoint32W(dc, s.c_str(), n, &sz);
-        return min(sz.cx, cap);
+        return min((int)sz.cx, cap);          // sz.cx is a LONG: std::min needs one type to deduce
     };
     auto FolderAt = [&](const std::wstring& f) {
         for (size_t k = 0; k < g_bmRowFolders.size(); k++) if (g_bmRowFolders[k] == f) return (int)k;
@@ -814,9 +814,9 @@ static void BmBubbleOpen(unsigned long long id) {
     ClientToScreen(g_wstrip, &a); ClientToScreen(g_wstrip, &b);
     MONITORINFO mi{ sizeof mi };
     GetMonitorInfoW(MonitorFromWindow(g_wstrip, MONITOR_DEFAULTTONEAREST), &mi);
-    int x = std::clamp(b.x - W, (int)mi.rcWork.left, max((int)mi.rcWork.left, (int)mi.rcWork.right - W));
+    int x = std::clamp((int)b.x - W, (int)mi.rcWork.left, max((int)mi.rcWork.left, (int)mi.rcWork.right - W));
     int y = a.y + (int)(4 * g.dpi);
-    if (y + H > mi.rcWork.bottom) y = max((int)mi.rcWork.top, a.y - (int)(4 * g.dpi) - H);
+    if (y + H > mi.rcWork.bottom) y = max((int)mi.rcWork.top, (int)a.y - (int)(4 * g.dpi) - H);
     HWND hw = CreateWindowExW(WS_EX_TOOLWINDOW, L"DocsyBmPop", L"", WS_POPUP, x, y, W, H,
                               g.main, nullptr, g.hinst, nullptr);
     if (!hw) return;
