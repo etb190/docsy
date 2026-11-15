@@ -155,7 +155,8 @@ static void WebStripPaint(HDC dc, int w, int h) {
         Gdiplus::Graphics gfade(dc);
         Gdiplus::Color c0((BYTE)0, (BYTE)0, (BYTE)0, (BYTE)0);
         Gdiplus::Color c1((BYTE)0x22, (BYTE)0, (BYTE)0, (BYTE)0);
-        Gdiplus::RectF fadeR(0.f, h * 0.45f, (float)w, h * 0.55f);
+        float fh = (float)(int)(44 * g.dpi);       // the fade rides the nav band's own foot - the
+        Gdiplus::RectF fadeR(0.f, fh * 0.45f, (float)w, fh * 0.55f);   // bookmarks bar below is a flat sheet, so the ramp must end at the band's top, not the strip's
         Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
         gfade.FillRectangle(&fadeBr, fadeR);
     }
@@ -231,8 +232,8 @@ static void WebStripPaint(HDC dc, int w, int h) {
                 HGDIOBJ of0 = SelectObject(dc, g_webEditFont);
                 SIZE sz{}; GetTextExtentPoint32W(dc, tx, len, &sz);
                 SelectObject(dc, of0);
-                int cx = (int)(g_webOmni.left + g_webOmni.right) / 2;
-                lockX = max((int)g_webOmni.left + TABF(14), cx - (int)sz.cx / 2 - TABF(18));
+                int cx = (int)(g_webOmni.left + TABF(34) + g_webOmni.right - TABF(58)) / 2;   // the edit's own center -
+                lockX = max((int)g_webOmni.left + TABF(14), cx - (int)sz.cx / 2 - TABF(18));   // the field stops shy of the star
             }
         }
         SelectObject(dc, WebGlyphFont(11));
@@ -281,7 +282,7 @@ static void WebStripPaint(HDC dc, int w, int h) {
     if (g_wedit && !editFocus && GetWindowTextW(g_wedit, has, 2) == 0) {
         SelectObject(dc, g_webEditFont);
         SetTextColor(dc, wvb::InkDim);
-        RECT pr{ g_webOmni.left + TABF(30), g_webOmni.top, g_webOmni.right - TABF(30), g_webOmni.bottom };
+        RECT pr{ g_webOmni.left + TABF(34), g_webOmni.top, g_webOmni.right - TABF(58), g_webOmni.bottom };   // the edit's own ground: placeholder and idle site name share one center
         DrawTextW(dc, L"Search or enter website name", -1, &pr,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
@@ -444,8 +445,11 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 static void WebBarLayout() {
     if (!g_wstrip || !g_webOn) return;
     RECT r; GetClientRect(g_wstrip, &r);
-    int d = TABF(30), cy = (r.bottom - 1 - d) / 2, pitch = TABF(32);
-    int ph = TABF(30), py = (r.bottom - 1 - ph) / 2;
+    int navH = (int)(44 * g.dpi);              // the nav row centers in its own 44-band - the
+                                               // bookmarks bar's ground rides below it, and centering
+                                               // in the whole strip slid the pill under the bar
+    int d = TABF(30), cy = (navH - 1 - d) / 2, pitch = TABF(32);
+    int ph = TABF(30), py = (navH - 1 - ph) / 2;
     int x = TABF(10);
     g_wbR[WB_SIDE] = { x, cy, x + d, cy + d };
     x += pitch + TABF(10); g_wbR[WB_BACK] = { x, cy, x + d, cy + d };
@@ -491,8 +495,11 @@ static void WebBarLayout() {
     }
     if (g_wedit) {
         int eh = max(4, TABF(18));                 // one text line, centered in the capsule
-        MoveWindow(g_wedit, g_webOmni.left + TABF(34), g_webOmni.top + (ph - eh) / 2,
-                   max(10, (int)g_webOmni.right - (int)g_webOmni.left - TABF(68)), eh, TRUE);
+        int ew = max(10, (int)(g_webOmni.right - g_webOmni.left) - TABF(92));   // 34 past the lock, 58 shy
+                                                   // of the right edge: the star owns that ground, and
+                                                   // the edit is a child HWND - its opaque fill paints
+                                                   // OVER whatever the pill drew underneath it
+        MoveWindow(g_wedit, g_webOmni.left + TABF(34), g_webOmni.top + (ph - eh) / 2, ew, eh, TRUE);
         ShowWindow(g_wedit, g_webFail ? SW_HIDE : SW_SHOW);
     }
     WebSyncOmnibox();
