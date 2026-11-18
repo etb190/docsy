@@ -160,9 +160,6 @@ static void WebStripPaint(HDC dc, int w, int h) {
         Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
         gfade.FillRectangle(&fadeBr, fadeR);
     }
-    RECT edge{ 0, h - 1, w, h };                       // the hairline under the toolbar
-    HBRUSH eb = CreateSolidBrush(wvb::Edge);
-    FillRect(dc, &edge, eb); DeleteObject(eb);
     SetBkMode(dc, TRANSPARENT);
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
@@ -236,11 +233,9 @@ static void WebStripPaint(HDC dc, int w, int h) {
                 lockX = max((int)g_webOmni.left + TABF(14), cx - (int)sz.cx / 2 - TABF(18));   // the field stops shy of the star
             }
         }
-        SelectObject(dc, WebGlyphFont(11));
+        SelectObject(dc, WebGlyphFont(12));
         SetTextColor(dc, wvb::InkDim);
-        int lkH = TABF(20);
-        int lkY = g_webOmni.top + ((g_webOmni.bottom - g_webOmni.top) - lkH) / 2;
-        RECT lk{ lockX, lkY - 1, lockX + TABF(14), lkY + lkH - 1 };
+        RECT lk{ lockX, g_webOmni.top, lockX + TABF(16), g_webOmni.bottom };
         DrawTextW(dc, L"\uE72E", -1, &lk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     // reload at rest, stop/reset while loading - a round tile under the cursor
@@ -252,9 +247,7 @@ static void WebStripPaint(HDC dc, int w, int h) {
     // Refresh (\uE72C) and Reset/Cancel (\uE711) rendered with matching visual optical size:
     SelectObject(dc, WebGlyphFont(loading ? 11 : 12));
     SetTextColor(dc, wvb::Ink);
-    RECT rfg = rf;
-    rfg.top -= 1; rfg.bottom -= 1;
-    DrawTextW(dc, loading ? L"\uE711" : L"\uE72C", -1, &rfg,
+    DrawTextW(dc, loading ? L"\uE711" : L"\uE72C", -1, &rf,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     // the bookmark star, left of the reload: an outline while this page is a
     // stranger, the accent's fill once it is one of the list's own - the state
@@ -264,10 +257,10 @@ static void WebStripPaint(HDC dc, int w, int h) {
         WebTileC(dc, st, Gdiplus::Color(255, GetRValue(wvb::Hover), GetGValue(wvb::Hover),
                                         GetBValue(wvb::Hover)), 12.0f);
     bool saved = t && BmFindUrl(t->url) >= 0;
-    SelectObject(dc, WebGlyphFont(12));
+    SelectObject(dc, WebGlyphFont(14));
     SetTextColor(dc, g_webFail ? wvb::InkOff : (saved ? wvb::Blue : wvb::Ink));
     RECT stg = st;
-    stg.top -= 1; stg.bottom -= 1;
+    stg.top += 1; stg.bottom += 1;
     DrawTextW(dc, saved ? L"\uE735" : L"\uE734", -1, &stg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     if (t && t->loading) {                             // the progress line: a blue segment sweeping
         int inset = TABF(16);                          // along the capsule's foot
@@ -607,9 +600,6 @@ static void WebBarDraw(HDC dc, int w, int h) {
         Gdiplus::LinearGradientBrush fadeBr(fadeR, c0, c1, Gdiplus::LinearGradientModeVertical);
         gfade.FillRectangle(&fadeBr, fadeR);
     }
-    RECT edge{ 0, h - 1, w, h };                       // the hairline above the page
-    HBRUSH eb = CreateSolidBrush(wvb::Edge);
-    FillRect(dc, &edge, eb); DeleteObject(eb);
     SetBkMode(dc, TRANSPARENT);
     WebTabGeo G = WebTabLayout(w);
     Gdiplus::Graphics gs(dc);
@@ -671,7 +661,7 @@ static void WebBarClick(int id) {
     case WB_SIDE:
         g_webSide = !g_webSide;
         if (g.side) ShowWindow(g.side, g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE);
-        LayoutMain(); WebRepaintChrome();
+        LayoutMain(); WebPlace(); WebRepaintChrome();
         return;
     case WB_BACK: if (t && t->web && t->canBack) t->web->GoBack(); return;
     case WB_FWD: if (t && t->web && t->canFwd) t->web->GoForward(); return;
@@ -1389,7 +1379,39 @@ static void WebRoundWebView() {
     while ((hw = FindWindowExW(g.view, hw, nullptr, nullptr)) != nullptr) {
         WCHAR cls[32]{};
         if (!GetClassNameW(hw, cls, 32) || wcsncmp(cls, L"Chrome_WidgetWin", 16) != 0) continue;
-        SetWindowRgn(hw, nullptr, TRUE);
+        if (!g_webSide) {
+            SetWindowRgn(hw, nullptr, TRUE);
+            continue;
+        }
+        RECT r;
+        GetClientRect(hw, &r);
+        int w = r.right - r.left, h = r.bottom - r.top;
+        if (w <= 0 || h <= 0) {
+            SetWindowRgn(hw, nullptr, TRUE);
+            continue;
+        }
+        int rad = max(2, (int)(8 * g.dpi));
+        HRGN rgn = CreateRectRgn(0, 0, w, h);
+
+        HRGN tlBox = CreateRectRgn(0, 0, rad, rad);
+        HRGN tlCircle = CreateEllipticRgn(0, 0, 2 * rad, 2 * rad);
+        HRGN tlNotch = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(tlNotch, tlBox, tlCircle, RGN_DIFF);
+        CombineRgn(rgn, rgn, tlNotch, RGN_DIFF);
+        DeleteObject(tlBox);
+        DeleteObject(tlCircle);
+        DeleteObject(tlNotch);
+
+        HRGN blBox = CreateRectRgn(0, h - rad, rad, h);
+        HRGN blCircle = CreateEllipticRgn(0, h - 2 * rad, 2 * rad, h);
+        HRGN blNotch = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(blNotch, blBox, blCircle, RGN_DIFF);
+        CombineRgn(rgn, rgn, blNotch, RGN_DIFF);
+        DeleteObject(blBox);
+        DeleteObject(blCircle);
+        DeleteObject(blNotch);
+
+        SetWindowRgn(hw, rgn, TRUE);
     }
 }
 
@@ -1462,11 +1484,9 @@ static void WebShutdown() {
 
 // ---- the sidebar: the reader's page rail, showing the web tabs ----
 
-static int WebSideTH(int i) {
-    const WebTab& t = g_wt[i];
-    if (t.thumb && t.thumbW > 0) return max(1, (int)std::lround((double)ws.tw * t.thumbH / t.thumbW));
-    return max(24, ws.tw * 2 / 3);                 // a viewport-ish placeholder until the
-}                                                  // first capture lands
+static int WebSideTH(int /*i*/) {
+    return max(24, (int)std::lround(ws.tw * 0.625));
+}
 
 static void WebSideLayout() {
     int n = (int)g_wt.size();

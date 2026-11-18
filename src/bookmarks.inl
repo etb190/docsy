@@ -335,8 +335,8 @@ static void BmBarRows(int w) {
             if (!b.folder.empty()) {
                 int fi = FolderAt(b.folder);
                 if (!Seated(fi)) {
-                    int tw = (int)(7 * g.dpi) + (int)(16 * g.dpi) + (int)(5 * g.dpi)
-                           + textW(g_bmRowFolders[fi], 128) + (int)(4 * g.dpi) + (int)(10 * g.dpi) + (int)(14 * g.dpi);
+                    int tw = (int)(7 * g.dpi) + (int)(16 * g.dpi) + (int)(6 * g.dpi)
+                           + textW(g_bmRowFolders[fi], (int)(150 * g.dpi)) + (int)(14 * g.dpi);
                     if (Full()) {
                         g_bmRows.push_back({ 2, i, { lim - moreW, y0 + (int)(3 * g.dpi), lim, y1 - (int)(3 * g.dpi) } });
                         break;
@@ -350,8 +350,8 @@ static void BmBarRows(int w) {
         if (!b.folder.empty()) {                         // an item wearing a folder seats that
             int fi = FolderAt(b.folder);                 // folder the moment it is first reached
             if (Seated(fi)) continue;                    // (already on the bar: its items are the
-            int tw = (int)(7 * g.dpi) + (int)(16 * g.dpi) + (int)(5 * g.dpi)   // folder menu's)
-                   + textW(g_bmRowFolders[fi], 128) + (int)(4 * g.dpi) + (int)(10 * g.dpi) + (int)(14 * g.dpi);
+            int tw = (int)(7 * g.dpi) + (int)(16 * g.dpi) + (int)(6 * g.dpi)
+                   + textW(g_bmRowFolders[fi], (int)(150 * g.dpi)) + (int)(14 * g.dpi);
             if (Full()) {
                 g_bmRows.push_back({ 2, i, { lim - moreW, y0 + (int)(3 * g.dpi), lim, y1 - (int)(3 * g.dpi) } });
                 break;
@@ -413,11 +413,8 @@ static void BmBarDraw(HDC dc, int w, int h) {
     if (y0 >= h) return;
     BmBarRows(w);
     RECT band{ 0, y0, w, h };
-    HBRUSH bg = CreateSolidBrush(wvb::StripBg);   // the toolbar's fade ends at the band's top:
-    FillRect(dc, &band, bg); DeleteObject(bg);    // the bar paints over it - one flat sheet
-    RECT edge{ 0, h - 1, w, h };
-    HBRUSH eb = CreateSolidBrush(wvb::Edge);      // the hairline the toolbar drew was covered:
-    FillRect(dc, &edge, eb); DeleteObject(eb);    // it is the card's boundary, it comes back
+    HBRUSH bg = CreateSolidBrush(wvb::StripBg);   // one flat sheet
+    FillRect(dc, &band, bg); DeleteObject(bg);
     SetBkMode(dc, TRANSPARENT);
     Gdiplus::Graphics gx(dc);
     gx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
@@ -443,21 +440,15 @@ static void BmBarDraw(HDC dc, int w, int h) {
         }
         RECT ir{ rc.left + (int)(7 * g.dpi), rc.top + (rc.bottom - rc.top - is) / 2,
                  rc.left + (int)(7 * g.dpi) + is, rc.top + (rc.bottom - rc.top + is) / 2 };
-        SelectObject(dc, g_webEditFont ? g_webEditFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
-        if (r.kind == 1) {                        // a folder: the library glyph, the name, the
-            SelectObject(dc, WebGlyphFont(11));   // open-down chevron
+        if (r.kind == 1) {                        // a folder: true folder icon, matching font
+            SelectObject(dc, WebGlyphFont(12));
             SetTextColor(dc, wvb::Ink);
-            DrawTextW(dc, L"\uE8A9", -1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            RECT tr{ ir.right + (int)(5 * g.dpi), rc.top, rc.right - (int)(2 * g.dpi), rc.bottom };
+            DrawTextW(dc, L"\uE8B7", -1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            RECT tr{ ir.right + (int)(6 * g.dpi), rc.top, rc.right - (int)(4 * g.dpi), rc.bottom };
             const std::wstring& label = g_bmRowFolders[r.idx];
+            SelectObject(dc, g_webEditFont ? g_webEditFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
             SetTextColor(dc, wvb::Ink);
             DrawTextW(dc, label.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            SIZE sz{};
-            GetTextExtentPoint32W(dc, label.c_str(), (int)min((int)label.size(), 128), &sz);
-            RECT cr{ tr.left + sz.cx + (int)(2 * g.dpi), rc.top, tr.right, rc.bottom };
-            SelectObject(dc, WebGlyphFont(9));
-            SetTextColor(dc, wvb::InkDim);
-            DrawTextW(dc, L"\uE70D", -1, &cr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
             continue;
         }
         Bm& b = g_bm[r.idx];
@@ -505,16 +496,30 @@ static void BmFolderMenu(const std::wstring& name, POINT screen) {
     if (!m) return;
     UINT base = 100;
     int n = 0;
+    HMENU editSub = CreatePopupMenu();
+    HMENU remSub = CreatePopupMenu();
+    UINT editBase = 1000;
+    UINT remBase = 2000;
     for (size_t i = 0; i < g_bm.size(); i++) {
         const Bm& b = g_bm[i];
         if (b.folder == name && !b.url.empty()) {
             std::wstring label;
             for (wchar_t ch : b.title) { label += ch; if (ch == L'&') label += ch; }
             AppendMenuW(m, MF_STRING, base + (UINT)i, label.c_str());
+            AppendMenuW(editSub, MF_STRING, editBase + (UINT)i, label.c_str());
+            AppendMenuW(remSub, MF_STRING, remBase + (UINT)i, label.c_str());
             n++;
         }
     }
     if (!n) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"(empty)");
+    if (n > 0) {
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)editSub, L"Edit bookmark");
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)remSub, L"Remove bookmark");
+    } else {
+        if (editSub) DestroyMenu(editSub);
+        if (remSub) DestroyMenu(remSub);
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, 2, L"Remove folder");
     SetForegroundWindow(g.main);
@@ -527,7 +532,13 @@ static void BmFolderMenu(const std::wstring& name, POINT screen) {
                 g_bm.erase(g_bm.begin() + (i - 1));
         BmSave();
         BmRepaint();
-    } else if (c >= 100 && (size_t)(c - 100) < g_bm.size()) BmOpenRow(g_bm[c - 100], false);
+    } else if (c >= 2000 && (size_t)(c - 2000) < g_bm.size()) {
+        BmRemoveAt((int)(c - 2000));
+    } else if (c >= 1000 && (size_t)(c - 1000) < g_bm.size()) {
+        BmBubbleOpen(g_bm[c - 1000].id);
+    } else if (c >= 100 && (size_t)(c - 100) < g_bm.size()) {
+        BmOpenRow(g_bm[c - 100], false);
+    }
 }
 
 static void BmRowMenu(int k) {
@@ -812,7 +823,10 @@ static LRESULT CALLBACK BmPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (g_bmPop.hot) { g_bmPop.hot = 0; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_SETFOCUS:
-        if (g_bmPop.edit) SetFocus(g_bmPop.edit);    // the caret belongs to the name field from the start
+        if (g_bmPop.edit) {
+            SetFocus(g_bmPop.edit);
+            SendMessageW(g_bmPop.edit, EM_SETSEL, 0, -1);
+        }
         return 0;
     case WM_LBUTTONUP: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -932,15 +946,18 @@ static void BmBubbleOpen(unsigned long long id) {
         SetWindowTextW(g_bmPop.edit, (g_bmPop.title.empty() ? BmHostOf(g_bmPop.url) : g_bmPop.title).c_str());
     }
     ShowWindow(hw, SW_SHOW);
-    if (g_bmPop.edit) SetFocus(g_bmPop.edit);      // the caret lands once the window can take it
+    if (g_bmPop.edit) {
+        SetFocus(g_bmPop.edit);
+        SendMessageW(g_bmPop.edit, EM_SETSEL, 0, -1);
+    }
 }
 
 // ---- the star ------------------------------------------------------------
 
-static void BmStarClick() {                        // saved page: the same click takes it back.
-    WebTab* t = WebCur();                          // unsaved: the bubble opens, the name rides in
-    if (!t || t->url.empty() || g_webFail) return; // prefilled, the folder one menu away
+static void BmStarClick() {                        // saved page: bubble opens to edit or remove;
+    WebTab* t = WebCur();                          // unsaved: the bubble opens, name prefilled
+    if (!t || t->url.empty() || g_webFail) return;
     int i = BmFindUrl(t->url);
-    if (i >= 0) BmRemoveAt(i);
+    if (i >= 0) BmBubbleOpen(g_bm[i].id);
     else BmBubbleOpen(0);
 }
