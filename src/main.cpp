@@ -107,7 +107,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     RegisterClassExW(&xpc);
 
     WNDCLASSEXW bpc{ sizeof bpc };                  // the bookmark bubble: the star's save prompt,
-    bpc.style = CS_DROPSHADOW;                      // a dark card with the chrome's own manners
+    bpc.style = CS_DROPSHADOW | CS_SAVEBITS;        // a dark card with the chrome's own manners
     bpc.lpfnWndProc = BmPopProc; bpc.hInstance = hi;
     bpc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     bpc.lpszClassName = L"DocsyBmPop";

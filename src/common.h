@@ -1618,6 +1618,19 @@ static void WebToolDraw(HDC dc, int w, int h) {
     DrawTextW(dc, L"PDF", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+static HDC g_wtooldc = nullptr;
+static HBITMAP g_wtoolbm = nullptr;
+static int g_wtoolw = 0, g_wtoolh = 0;
+
+static void EnsureWebToolBack(HDC ref, int w, int h) {
+    if (g_wtooldc && g_wtoolbm && g_wtoolw == w && g_wtoolh == h) return;
+    if (g_wtoolbm) DeleteObject(g_wtoolbm);
+    if (!g_wtooldc) g_wtooldc = CreateCompatibleDC(ref);
+    g_wtoolbm = CreateCompatibleBitmap(ref, max(1, w), max(1, h));
+    SelectObject(g_wtooldc, g_wtoolbm);
+    g_wtoolw = w; g_wtoolh = h;
+}
+
 static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
@@ -1626,11 +1639,11 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
         if (r.right > 0 && r.bottom > 0) {
-            EnsureBarBack(dc, r.right, r.bottom);
+            EnsureWebToolBack(dc, r.right, r.bottom);
             POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the shared grain phase
-            SetBrushOrgEx(g_bardc, -po.x, -po.y, nullptr);
-            WebToolDraw(g_bardc, r.right, r.bottom);
-            BitBlt(dc, 0, 0, r.right, r.bottom, g_bardc, 0, 0, SRCCOPY);
+            SetBrushOrgEx(g_wtooldc, -po.x, -po.y, nullptr);
+            WebToolDraw(g_wtooldc, r.right, r.bottom);
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_wtooldc, 0, 0, SRCCOPY);
         }
         EndPaint(h, &ps);
         return 0;
@@ -1649,12 +1662,17 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (hot != g_wtoolHot) {
             g_wtoolHot = hot;
             if (hot) TrackLeave(h);
-            InvalidateRect(h, nullptr, FALSE);
+            RECT rb = b; InflateRect(&rb, 4, 4);
+            InvalidateRect(h, &rb, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g_wtoolHot) { g_wtoolHot = false; InvalidateRect(h, nullptr, FALSE); }
+        if (g_wtoolHot) {
+            g_wtoolHot = false;
+            RECT rb = WebToolBtn(); InflateRect(&rb, 4, 4);
+            InvalidateRect(h, &rb, FALSE);
+        }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
@@ -1662,7 +1680,8 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (PtInRect(&b, p)) {
             SetCapture(h);
             g_wtoolDown = true; g_wtoolHot = true;
-            InvalidateRect(h, nullptr, FALSE);
+            RECT rb = b; InflateRect(&rb, 4, 4);
+            InvalidateRect(h, &rb, FALSE);
         }
         return 0;
     }
@@ -1674,7 +1693,8 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             RECT b = WebToolBtn();
             bool inside = PtInRect(&b, p) != 0;
             g_wtoolHot = false;
-            InvalidateRect(h, nullptr, FALSE);
+            RECT rb = b; InflateRect(&rb, 4, 4);
+            InvalidateRect(h, &rb, FALSE);
             if (inside) WebToggle(false);              // back to the PDF reader
         }
         return 0;

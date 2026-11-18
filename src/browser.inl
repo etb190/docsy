@@ -238,17 +238,23 @@ static void WebStripPaint(HDC dc, int w, int h) {
         }
         SelectObject(dc, WebGlyphFont(11));
         SetTextColor(dc, wvb::InkDim);
-        RECT lk{ lockX, g_webOmni.top, lockX + TABF(14), g_webOmni.bottom };
+        int lkH = TABF(20);
+        int lkY = g_webOmni.top + ((g_webOmni.bottom - g_webOmni.top) - lkH) / 2;
+        RECT lk{ lockX, lkY - 1, lockX + TABF(14), lkY + lkH - 1 };
         DrawTextW(dc, L"\uE72E", -1, &lk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    // reload at rest, stop while loading - a round tile under the cursor
+    // reload at rest, stop/reset while loading - a round tile under the cursor
     RECT rf = g_wbR[WB_RELOAD];
     if (g.tbTabHot == WB_RELOAD)
         WebTileC(dc, rf, Gdiplus::Color(255, GetRValue(wvb::Hover), GetGValue(wvb::Hover),
                                         GetBValue(wvb::Hover)), 12.0f);
-    SelectObject(dc, WebGlyphFont(13));
+    bool loading = (t && t->loading);
+    // Refresh (\uE72C) and Reset/Cancel (\uE711) rendered with matching visual optical size:
+    SelectObject(dc, WebGlyphFont(loading ? 11 : 12));
     SetTextColor(dc, wvb::Ink);
-    DrawTextW(dc, (t && t->loading) ? L"\uE711" : L"\uE72C", -1, &rf,
+    RECT rfg = rf;
+    rfg.top -= 1; rfg.bottom -= 1;
+    DrawTextW(dc, loading ? L"\uE711" : L"\uE72C", -1, &rfg,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     // the bookmark star, left of the reload: an outline while this page is a
     // stranger, the accent's fill once it is one of the list's own - the state
@@ -258,8 +264,11 @@ static void WebStripPaint(HDC dc, int w, int h) {
         WebTileC(dc, st, Gdiplus::Color(255, GetRValue(wvb::Hover), GetGValue(wvb::Hover),
                                         GetBValue(wvb::Hover)), 12.0f);
     bool saved = t && BmFindUrl(t->url) >= 0;
+    SelectObject(dc, WebGlyphFont(12));
     SetTextColor(dc, g_webFail ? wvb::InkOff : (saved ? wvb::Blue : wvb::Ink));
-    DrawTextW(dc, saved ? L"\uE735" : L"\uE734", -1, &st, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT stg = st;
+    stg.top -= 1; stg.bottom -= 1;
+    DrawTextW(dc, saved ? L"\uE735" : L"\uE734", -1, &stg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     if (t && t->loading) {                             // the progress line: a blue segment sweeping
         int inset = TABF(16);                          // along the capsule's foot
         int pw = (int)(g_webOmni.right - g_webOmni.left) - 2 * inset;
@@ -308,6 +317,19 @@ static void WebStripSpin() {
 // under this window keeps its hover in ws.sHot instead, so the two never
 // collide), the pill answers a click by focusing the omnibox edit, and the
 // edit's WM_CTLCOLOREDIT lands here now that the edit is this window's child.
+static HDC g_stripdc = nullptr;
+static HBITMAP g_stripbm = nullptr;
+static int g_stripw = 0, g_striph = 0;
+
+static void EnsureStripBack(HDC ref, int w, int h) {
+    if (g_stripdc && g_stripbm && g_stripw == w && g_striph == h) return;
+    if (g_stripbm) DeleteObject(g_stripbm);
+    if (!g_stripdc) g_stripdc = CreateCompatibleDC(ref);
+    g_stripbm = CreateCompatibleBitmap(ref, max(1, w), max(1, h));
+    SelectObject(g_stripdc, g_stripbm);
+    g_stripw = w; g_striph = h;
+}
+
 static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
@@ -316,9 +338,9 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
         if (r.right > 0 && r.bottom > 0) {
-            EnsureBarBack(dc, r.right, r.bottom);
-            WebStripPaint(g_bardc, r.right, r.bottom);   // shares the toolbar's one buffer:
-            BitBlt(dc, 0, 0, r.right, r.bottom, g_bardc, 0, 0, SRCCOPY);   // an atomic frame
+            EnsureStripBack(dc, r.right, r.bottom);
+            WebStripPaint(g_stripdc, r.right, r.bottom);
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_stripdc, 0, 0, SRCCOPY);
         }
         EndPaint(h, &ps);
         return 0;
@@ -477,10 +499,12 @@ static void WebBarLayout() {
     int pw = max(10, min(hi - lo, TABF(560)));     // the capsule: centered in the window, capped
     int pl = std::clamp((int)r.right / 2 - pw / 2, lo, max(lo, hi - pw));
     g_webOmni = { pl, py, pl + pw, py + ph };
-    g_wbR[WB_RELOAD] = { g_webOmni.right - TABF(30), g_webOmni.top + TABF(3),
-                         g_webOmni.right - TABF(6), g_webOmni.bottom - TABF(3) };
-    g_wbR[WB_STAR] = { g_webOmni.right - TABF(58), g_webOmni.top + TABF(3),      // the star lives in
-                       g_webOmni.right - TABF(34), g_webOmni.bottom - TABF(3) };  // the pill too,
+    int btnH = TABF(24);
+    int btnY = g_webOmni.top + (ph - btnH) / 2;
+    g_wbR[WB_RELOAD] = { g_webOmni.right - TABF(30), btnY,
+                         g_webOmni.right - TABF(6), btnY + btnH };
+    g_wbR[WB_STAR] = { g_webOmni.right - TABF(58), btnY,      // the star lives in
+                       g_webOmni.right - TABF(34), btnY + btnH };  // the pill too,
     if (!g_webEditFont) g_webEditFont = CreateFontW(-(int)std::lround(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -1334,37 +1358,13 @@ static void WebCardPaint(HDC dc, int w, int h) {
         if (bm && bits) {
             HDC bdc = CreateCompatibleDC(dc);
             HGDIOBJ ob = SelectObject(bdc, bm);
-            POINT po{ 0, 0 };                                 // the grain phase: the live view's
-            if (WindowFromDC(dc) == g.view)                   // window offset - the shot composite
-                MapWindowPoints(g.view, g.main, &po, 1);      // phases itself into the globals
+            POINT po{ 0, 0 };
+            if (WindowFromDC(dc) == g.view)
+                MapWindowPoints(g.view, g.main, &po, 1);
             else { po.x = g_grainPX; po.y = g_grainPY; }
             SetBrushOrgEx(bdc, po.x, po.y, nullptr);
             RECT fr{ 0, 0, w, h };
-            FillRect(bdc, &fr, GrainBrush(1));                // the one dark chrome field
-            RECT cc; WebCardRect(cc, w, h);                   // the card inside this DIB: the
-            int m = cc.left, R = cc.right, B = cc.bottom;     // whole view, the reader's own
-            int rad = max(2, (int)(6 * g.dpi));               // corners
-            if (R - m > 2 * rad + 4 && B - m > 2 * rad + 2) {
-                WebCardShadow(bits, w, h, m, m, R, B, rad);   // the reader's PaneShadow, alive in
-                                                              // the corner notches: black,
-                                                              // BlurRadius 16, ShadowDepth 5,
-                                                              // Direction 270, Opacity 0.6 - the
-                                                              // webview covers the middle exactly
-                                                              // as pages cover it
-                Gdiplus::Graphics gs(bdc);
-                gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                Gdiplus::GraphicsPath* inner = CardPath((float)m + 0.5f, (float)m + 0.5f,
-                                                        (float)(R - m) - 1, (float)(B - m) - 1,
-                                                        (float)rad - 1, 0);   // the canvas interior,
-                if (Gdiplus::TextureBrush* c = GrainTex(0))          // half a pixel in, the reader's
-                    gs.FillPath(c, inner);                           // own edge rule
-                else {
-                    Gdiplus::SolidBrush cb(Gdiplus::Color(255, 58, 58, 58));
-                    gs.FillPath(&cb, inner);
-                }
-                delete inner;
-                WebCardRing(bits, w, h, m, m, R, B, rad);         // the #555 ring, exact per pixel
-            }
+            FillRect(bdc, &fr, GrainBrush(0));
             SelectObject(bdc, ob);
             DeleteDC(bdc);
             if (g_wcbm) DeleteObject(g_wcbm);
@@ -1383,40 +1383,23 @@ static void WebCardPaint(HDC dc, int w, int h) {
     if (g_webFail) { WebFailCard(dc, w, h); return; }
 }
 
-// the browser window gets the card's rounding too: the webview is a square
-// child HWND, and a square page corner would sit on the ring's arc like a
-// sticker on a curved frame. A GDI region on that child - the ring's own
-// inner silhouette, the radius the container rounds by - carves the page's
-// corners to the card's arc, so the glass is rounded exactly where the card
-// is and the #555 ring draws the frame all the way around. Every
-// Chrome_WidgetWin child of the view is carved (one per controller, all
-// riding the card's bounds), so a background tab arrives rounded when its
-// turn on top comes; the region rides the window's own size, and WebPlace
-// re-cuts it on every resize and every freshly born controller.
 static void WebRoundWebView() {
     if (!g.view) return;
-    int ew = 2 * (max(2, (int)(6 * g.dpi)) - 1);       // the ring's inner arc: the same
-    if (ew < 4) ew = 4;                                // radius the container rounds by
     HWND hw = nullptr;
     while ((hw = FindWindowExW(g.view, hw, nullptr, nullptr)) != nullptr) {
         WCHAR cls[32]{};
         if (!GetClassNameW(hw, cls, 32) || wcsncmp(cls, L"Chrome_WidgetWin", 16) != 0) continue;
-        RECT rc{};
-        if (!GetWindowRect(hw, &rc)) continue;
-        int vw = rc.right - rc.left, vh = rc.bottom - rc.top;
-        if (vw < 16 || vh < 16) continue;
-        SetWindowRgn(hw, CreateRoundRectRgn(0, 0, vw, vh, ew, ew), TRUE);   // the system owns
-    }                                                   // the region from here on
+        SetWindowRgn(hw, nullptr, TRUE);
+    }
 }
 
 static void WebPlace() {
     if (!g.view) return;
     RECT c; WebCardRect(c, g.cw, g.ch);
     if (c.right <= c.left || c.bottom <= c.top) return;
-    c.left++; c.top++; c.right--; c.bottom--;   // one pixel in: the #555 ring stays visible the
-    for (auto& t : g_wt)                        // whole way around, and the page sits INSIDE the
-        if (t.ctr) t.ctr->put_Bounds(c);        // card exactly where the PDF pages sit in theirs -
-    WebRoundWebView();                          // and the glass itself is carved to the card's
+    for (auto& t : g_wt)
+        if (t.ctr) t.ctr->put_Bounds(c);
+    WebRoundWebView();
 }                                               // arc - none is left at the parent's raw default
 
 static void WebResizeDeb() {                       // a resize re-captures the visible thumb

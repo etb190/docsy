@@ -332,8 +332,20 @@ static void BmBarRows(int w) {
     for (int i = 0; i < (int)g_bm.size(); i++) {
         const Bm& b = g_bm[i];
         if (b.url.empty()) {
-            if (!b.folder.empty()) FolderAt(b.folder);   // a seat line registers the folder -
-            continue;                                    // its row comes at its first mention
+            if (!b.folder.empty()) {
+                int fi = FolderAt(b.folder);
+                if (!Seated(fi)) {
+                    int tw = (int)(7 * g.dpi) + (int)(16 * g.dpi) + (int)(5 * g.dpi)
+                           + textW(g_bmRowFolders[fi], 128) + (int)(4 * g.dpi) + (int)(10 * g.dpi) + (int)(14 * g.dpi);
+                    if (Full()) {
+                        g_bmRows.push_back({ 2, i, { lim - moreW, y0 + (int)(3 * g.dpi), lim, y1 - (int)(3 * g.dpi) } });
+                        break;
+                    }
+                    g_bmRows.push_back({ 1, fi, { x, y0 + (int)(3 * g.dpi), x + tw, y1 - (int)(3 * g.dpi) } });
+                    x += tw;
+                }
+            }
+            continue;
         }
         if (!b.folder.empty()) {                         // an item wearing a folder seats that
             int fi = FolderAt(b.folder);                 // folder the moment it is first reached
@@ -582,6 +594,19 @@ static std::vector<std::wstring> BmAllFolders() {
     return v;
 }
 
+static HDC g_bmpopdc = nullptr;
+static HBITMAP g_bmpopbm = nullptr;
+static int g_bmpopw = 0, g_bmpoph = 0;
+
+static void EnsureBmPopBack(HDC ref, int w, int h) {
+    if (g_bmpopdc && g_bmpopbm && g_bmpopw == w && g_bmpoph == h) return;
+    if (g_bmpopbm) DeleteObject(g_bmpopbm);
+    if (!g_bmpopdc) g_bmpopdc = CreateCompatibleDC(ref);
+    g_bmpopbm = CreateCompatibleBitmap(ref, max(1, w), max(1, h));
+    SelectObject(g_bmpopdc, g_bmpopbm);
+    g_bmpopw = w; g_bmpoph = h;
+}
+
 static void BmPopDestroy() {                      // the window and its controls go, state clears
     HWND h = g_bmPop.h;
     g_bmPop.h = nullptr;
@@ -589,6 +614,9 @@ static void BmPopDestroy() {                      // the window and its controls
     if (g_bmPop.fedit) { DestroyWindow(g_bmPop.fedit); g_bmPop.fedit = nullptr; }
     g_bmPop.newFolder = false; g_bmPop.target = 0; g_bmPop.hot = 0;
     g_bmPop.url.clear(); g_bmPop.title.clear(); g_bmPop.folder.clear();
+    if (g_bmpopbm) { DeleteObject(g_bmpopbm); g_bmpopbm = nullptr; }
+    if (g_bmpopdc) { DeleteDC(g_bmpopdc); g_bmpopdc = nullptr; }
+    g_bmpopw = g_bmpoph = 0;
     if (h) DestroyWindow(h);
 }
 static void BmPopCommit() {                       // Enter, Done, or the click that went elsewhere:
@@ -603,7 +631,19 @@ static void BmPopCommit() {                       // Enter, Done, or the click t
     if (g_bmPop.fedit) {                          // a folder was being named when the answer came:
         wchar_t t[128] = L"";                     // what the field holds IS the choice
         GetWindowTextW(g_bmPop.fedit, t, 128);
-        if (t[0]) folder = t;
+        std::wstring fld = t;
+        while (!fld.empty() && fld[0] == L' ') fld.erase(0, 1);
+        while (!fld.empty() && fld.back() == L' ') fld.pop_back();
+        if (!fld.empty()) {
+            folder = fld;
+            bool exists = false;
+            for (const auto& b : g_bm) if (b.folder == fld) { exists = true; break; }
+            if (!exists) {
+                Bm b; b.id = g_bmIds++; b.folder = fld;
+                g_bm.push_back(std::move(b));
+                BmSave();
+            }
+        }
     }
     while (!name.empty() && name[0] == L' ') name.erase(0, 1);
     while (!name.empty() && name[name.size() - 1] == L' ') name.pop_back();
@@ -619,7 +659,20 @@ static LRESULT CALLBACK BmEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (h == g_bmPop.fedit) {                 // folder field names the folder and returns
                 wchar_t t[128] = L"";
                 GetWindowTextW(h, t, 128);
-                if (t[0]) g_bmPop.folder = t;
+                std::wstring fld = t;
+                while (!fld.empty() && fld[0] == L' ') fld.erase(0, 1);
+                while (!fld.empty() && fld.back() == L' ') fld.pop_back();
+                if (!fld.empty()) {
+                    g_bmPop.folder = fld;
+                    bool exists = false;
+                    for (const auto& b : g_bm) if (b.folder == fld) { exists = true; break; }
+                    if (!exists) {
+                        Bm b; b.id = g_bmIds++; b.folder = fld;
+                        g_bm.push_back(std::move(b));
+                        BmSave();
+                        BmRepaint();
+                    }
+                }
                 DestroyWindow(h);
                 g_bmPop.fedit = nullptr; g_bmPop.newFolder = false;
                 if (g_bmPop.h) {
@@ -646,16 +699,40 @@ static LRESULT CALLBACK BmEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     return CallWindowProcW(h == g_bmPop.fedit ? g_bmFEditPrev : g_bmEditPrev, h, m, wp, lp);
 }
 static void BmPopPaint(HDC dc, int w, int h) {
+    RECT full{ 0, 0, w, h };
+    POINT po{ 0, 0 };
+    if (g_bmPop.h) MapWindowPoints(g_bmPop.h, g.main, &po, 1);
+    SetBrushOrgEx(dc, -po.x, -po.y, nullptr);
+    FillRect(dc, &full, GrainBrush(1));
+
+    HPEN ep = CreatePen(PS_SOLID, 1, RGB(0x4a, 0x4a, 0x4a));
+    HGDIOBJ op = SelectObject(dc, ep);
+    HGDIOBJ ob = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, 0, 0, w, h);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(ep);
+
     SetBkMode(dc, TRANSPARENT);
     Gdiplus::Graphics gx(dc);
     gx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::GraphicsPath p;                      // the card: the chrome's own shape language
-    WebRound(p, 0.5f, 0.5f, (float)w - 1, (float)h - 1, 10.0f * (float)g.dpi);
-    Gdiplus::SolidBrush face(Gdiplus::Color(255, GetRValue(wvb::StripBg), GetGValue(wvb::StripBg),
-                                            GetBValue(wvb::StripBg)));
-    gx.FillPath(&face, &p);
-    Gdiplus::Pen ring(Gdiplus::Color(255, GetRValue(wvb::Edge), GetGValue(wvb::Edge), GetBValue(wvb::Edge)), 1.0f);
-    gx.DrawPath(&ring, &p);
+
+    auto drawBox = [&](const RECT& rc, COLORREF bgCol, COLORREF edgeCol) {
+        float rr = (float)(4 * g.dpi);
+        float fx = (float)rc.left + 0.5f, fy = (float)rc.top + 0.5f;
+        float fw = (float)(rc.right - rc.left) - 1.0f, fh = (float)(rc.bottom - rc.top) - 1.0f;
+        Gdiplus::GraphicsPath bp;
+        bp.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+        bp.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+        bp.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+        bp.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+        bp.CloseFigure();
+        Gdiplus::SolidBrush fill(Gdiplus::Color(255, GetRValue(bgCol), GetGValue(bgCol), GetBValue(bgCol)));
+        gx.FillPath(&fill, &bp);
+        Gdiplus::Pen edge(Gdiplus::Color(255, GetRValue(edgeCol), GetGValue(edgeCol), GetBValue(edgeCol)), 1.0f);
+        gx.DrawPath(&edge, &bp);
+    };
+
     static HFONT fl = nullptr, fb = nullptr;
     if (!fl) fl = CreateFontW(-(int)std::lround(11 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
@@ -668,37 +745,38 @@ static void BmPopPaint(HDC dc, int w, int h) {
     SetTextColor(dc, wvb::InkDim);
     RECT lr{ m, (int)(10 * g.dpi), w - m, (int)(28 * g.dpi) };
     DrawTextW(dc, L"Name", -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT nameBox{ m, (int)(32 * g.dpi), w - m, (int)(32 * g.dpi) + (int)(28 * g.dpi) };
+    drawBox(nameBox, RGB(0x10, 0x10, 0x10), RGB(0x4a, 0x4a, 0x4a));
+
     RECT fr = g_bmPop.folderR;
     RECT dr = g_bmPop.doneR, rr = g_bmPop.remR;
-    // the folder row: a tile like the omnibox, the chevron says a menu lives here
     bool fhot = g_bmPop.hot == 1;
-    Gdiplus::GraphicsPath fp;
-    WebRound(fp, (float)fr.left, (float)fr.top, (float)fr.right, (float)fr.bottom, 6.0f * (float)g.dpi);
-    COLORREF fc = fhot ? wvb::Hover : wvb::Omnibox;
-    Gdiplus::SolidBrush fb2(Gdiplus::Color(255, GetRValue(fc), GetGValue(fc), GetBValue(fc)));
-    gx.FillPath(&fb2, &fp);
-    SelectObject(dc, fb);
-    SetTextColor(dc, wvb::Ink);
-    RECT flr{ fr.left + (int)(10 * g.dpi), fr.top, fr.right - (int)(24 * g.dpi), fr.bottom };
-    const wchar_t* fname = g_bmPop.newFolder ? L"" : (g_bmPop.folder.empty() ? L"Bookmarks bar"
-                                                                          : g_bmPop.folder.c_str());
-    DrawTextW(dc, fname, -1, &flr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (!g_bmPop.newFolder) {
+    if (g_bmPop.newFolder) {
+        drawBox(fr, RGB(0x10, 0x10, 0x10), RGB(0x4a, 0x4a, 0x4a));
+    } else {
+        COLORREF fc = fhot ? RGB(0x38, 0x38, 0x38) : RGB(0x22, 0x22, 0x22);
+        drawBox(fr, fc, RGB(0x4a, 0x4a, 0x4a));
+        SelectObject(dc, fb);
+        SetTextColor(dc, wvb::Ink);
+        RECT flr{ fr.left + (int)(10 * g.dpi), fr.top, fr.right - (int)(24 * g.dpi), fr.bottom };
+        const wchar_t* fname = g_bmPop.folder.empty() ? L"Bookmarks bar" : g_bmPop.folder.c_str();
+        DrawTextW(dc, fname, -1, &flr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(dc, WebGlyphFont(9));
         SetTextColor(dc, wvb::InkDim);
         RECT cr{ fr.right - (int)(20 * g.dpi), fr.top, fr.right - (int)(4 * g.dpi), fr.bottom };
         DrawTextW(dc, L"\uE70D", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    // the buttons: Done in the accent, Remove where an edit has something to lose
+
     auto Btn = [&](const RECT& b, const wchar_t* label, bool accent, bool hot) {
-        Gdiplus::GraphicsPath bp;
-        WebRound(bp, (float)b.left, (float)b.top, (float)b.right, (float)b.bottom, 6.0f * (float)g.dpi);
-        COLORREF c = accent ? wvb::Blue : (hot ? wvb::Pressed : wvb::Omnibox);
-        Gdiplus::SolidBrush bb(Gdiplus::Color(255, GetRValue(c), GetGValue(c), GetBValue(c)));
-        gx.FillPath(&bb, &bp);
+        COLORREF bg = accent ? (hot ? RGB(0x2b, 0x93, 0xff) : wvb::Blue)
+                             : (hot ? RGB(0x38, 0x38, 0x38) : RGB(0x22, 0x22, 0x22));
+        COLORREF ed = accent ? bg : RGB(0x4a, 0x4a, 0x4a);
+        drawBox(b, bg, ed);
         SelectObject(dc, fb);
         SetTextColor(dc, accent ? RGB(0xff, 0xff, 0xff) : wvb::Ink);
         RECT tr = b;
+        tr.top -= 1; tr.bottom -= 1;
         DrawTextW(dc, label, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     };
     Btn(dr, L"Done", true, g_bmPop.hot == 2);
@@ -710,7 +788,11 @@ static LRESULT CALLBACK BmPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
-        if (r.right > 0 && r.bottom > 0) BmPopPaint(dc, r.right, r.bottom);
+        if (r.right > 0 && r.bottom > 0) {
+            EnsureBmPopBack(dc, r.right, r.bottom);
+            BmPopPaint(g_bmpopdc, r.right, r.bottom);
+            BitBlt(dc, 0, 0, r.right, r.bottom, g_bmpopdc, 0, 0, SRCCOPY);
+        }
         EndPaint(h, &ps);
         return 0;
     }
@@ -754,22 +836,25 @@ static LRESULT CALLBACK BmPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 RECT fr = g_bmPop.folderR;       // the anchor is client geometry: read it before
                 POINT a{ fr.left, fr.bottom };   // anything that could close the bubble under it
                 ClientToScreen(h, &a);
-                SetForegroundWindow(g.main);
-                g_bmPop.menuUp = true;           // the menu's activation shift is not a click-away
-                int c = TrackPopupMenu(mm, TPM_RETURNCMD | TPM_RIGHTBUTTON, a.x, a.y, 0, g.main, nullptr);
+                g_bmPop.menuUp = true;           // menuUp set BEFORE foreground change!
+                SetForegroundWindow(h);
+                int c = TrackPopupMenu(mm, TPM_RETURNCMD | TPM_RIGHTBUTTON, a.x, a.y, 0, h, nullptr);
                 g_bmPop.menuUp = false;
                 DestroyMenu(mm);
                 if (c == 1) { g_bmPop.folder.clear(); InvalidateRect(h, nullptr, FALSE); }
                 else if (c == 2) {
                     g_bmPop.newFolder = true;
+                    int feh = (int)(20 * g.dpi);
+                    int fey = g_bmPop.folderR.top + (g_bmPop.folderR.bottom - g_bmPop.folderR.top - feh) / 2;
+                    int fex = g_bmPop.folderR.left + (int)(6 * g.dpi);
+                    int few = g_bmPop.folderR.right - g_bmPop.folderR.left - (int)(12 * g.dpi);
                     g_bmPop.fedit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                                    g_bmPop.folderR.left + (int)(8 * g.dpi),
-                                                    g_bmPop.folderR.top + (int)(5 * g.dpi),
-                                                    g_bmPop.folderR.right - g_bmPop.folderR.left - (int)(16 * g.dpi),
-                                                    g_bmPop.folderR.bottom - g_bmPop.folderR.top - (int)(10 * g.dpi),
+                                                    fex, fey, few, feh,
                                                     h, nullptr, g.hinst, nullptr);
                     if (g_bmPop.fedit) {
                         SendMessageW(g_bmPop.fedit, WM_SETFONT, (WPARAM)g_webEditFont, TRUE);
+                        SendMessageW(g_bmPop.fedit, EM_SETMARGIN, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                                     MAKELPARAM((int)(2 * g.dpi), (int)(2 * g.dpi)));
                         g_bmFEditPrev = (WNDPROC)SetWindowLongPtrW(g_bmPop.fedit, GWLP_WNDPROC,
                                                                    (LONG_PTR)BmEditProc);
                         SetFocus(g_bmPop.fedit);
@@ -779,13 +864,19 @@ static LRESULT CALLBACK BmPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                     g_bmPop.folder = fl[(size_t)(c - 10)];
                     InvalidateRect(h, nullptr, FALSE);
                 }
+                if (g_bmPop.h == h) SetForegroundWindow(h);
             }
             return 0;
         }
         return 0;
     }
-    case WM_CTLCOLOREDIT:                          // both fields wear the omnibox's colors
-        return (LRESULT)WebEditColors((HDC)wp, (HWND)lp);
+    case WM_CTLCOLOREDIT: {
+        HDC cdc = (HDC)wp;
+        SetTextColor(cdc, RGB(0xe0, 0xe0, 0xe0));
+        SetBkColor(cdc, RGB(0x10, 0x10, 0x10));
+        static HBRUSH b = CreateSolidBrush(RGB(0x10, 0x10, 0x10));
+        return (LRESULT)b;
+    }
     case WM_ACTIVATE:                              // a click anywhere outside saves, Chrome's way -
         if (LOWORD(wp) == WA_INACTIVE && g_bmPop.h == h && !g_bmPop.newFolder &&   // but never while
             !g_bmPop.menuUp) BmPopCommit();        // the bubble's own menu or a folder name is up
@@ -821,15 +912,22 @@ static void BmBubbleOpen(unsigned long long id) {
                               g.main, nullptr, g.hinst, nullptr);
     if (!hw) return;
     int m = (int)(14 * g.dpi), bh = (int)(30 * g.dpi);
+    RECT nameBox{ m, (int)(32 * g.dpi), W - m, (int)(32 * g.dpi) + (int)(28 * g.dpi) };
     g_bmPop.folderR = { m, (int)(72 * g.dpi), W - m, (int)(72 * g.dpi) + bh };
     g_bmPop.doneR = { W - m - (int)(92 * g.dpi), H - m - bh, W - m, H - m };
     g_bmPop.remR = { m, H - m - bh, m + (int)(92 * g.dpi), H - m };
     g_bmPop.h = hw;
+    int eh = (int)(20 * g.dpi);
+    int ey = nameBox.top + (nameBox.bottom - nameBox.top - eh) / 2;
+    int ex = nameBox.left + (int)(6 * g.dpi);
+    int ew = nameBox.right - nameBox.left - (int)(12 * g.dpi);
     g_bmPop.edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                                   m, (int)(32 * g.dpi), W - 2 * m, (int)(28 * g.dpi),
+                                   ex, ey, ew, eh,
                                    hw, nullptr, g.hinst, nullptr);
     if (g_bmPop.edit) {
         SendMessageW(g_bmPop.edit, WM_SETFONT, (WPARAM)g_webEditFont, TRUE);
+        SendMessageW(g_bmPop.edit, EM_SETMARGIN, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                     MAKELPARAM((int)(2 * g.dpi), (int)(2 * g.dpi)));
         g_bmEditPrev = (WNDPROC)SetWindowLongPtrW(g_bmPop.edit, GWLP_WNDPROC, (LONG_PTR)BmEditProc);
         SetWindowTextW(g_bmPop.edit, (g_bmPop.title.empty() ? BmHostOf(g_bmPop.url) : g_bmPop.title).c_str());
     }
