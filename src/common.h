@@ -1276,6 +1276,7 @@ static void TfArrows(HDC dc, float x0, float y0, COLORREF c) {
     gs.DrawPath(&p, &gp);
 }
 
+static int g_barHot = -1;
 static void BarDraw(HDC dc, int w, int h) {
     if (w <= 0 || h <= 0) return;
     if (g_webOn) { WebBarDraw(dc, w, h); return; }   // browser mode: Chrome's own toolbar
@@ -1297,7 +1298,7 @@ static void BarDraw(HDC dc, int w, int h) {
         int tool = TbToolOf(i);
         bool sel = en && tool >= 0 && DVF().tool == tool;   // SetTool's SelectionBg face,
                                                             // lit on the focused pane's tool
-        bool hot = en && !sel && g.tbTabHot == i;
+        bool hot = en && !sel && g_barHot == i;
         bool pr = en && !sel && g.tbPressed == i;
         if (sel || hot || pr) {              // a face under the content: the active tool's
             Gdiplus::Graphics gs(dc);        // SelectionBg, or the hover/pressed tile
@@ -1438,8 +1439,8 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         }
         int hot = BarHit(p, r.right);
-        if (hot != g.tbTabHot) {            // repaints only on a hover flip
-            g.tbTabHot = hot;
+        if (hot != g_barHot) {            // repaints only on a hover flip
+            g_barHot = hot;
             if (hot >= 0) TrackLeave(h);
             InvalidateRect(h, nullptr, FALSE);
         }
@@ -1450,7 +1451,7 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (ws.sHot != -1 || ws.sHotX) { ws.sHot = -1; ws.sHotX = false; InvalidateRect(h, nullptr, FALSE); }
             return 0;
         }
-        if (g.tbTabHot != -1) { g.tbTabHot = -1; InvalidateRect(h, nullptr, FALSE); }
+        if (g_barHot != -1) { g_barHot = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };

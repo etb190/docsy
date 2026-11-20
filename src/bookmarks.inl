@@ -302,6 +302,16 @@ static std::vector<BmRow> g_bmRows;
 static std::vector<std::wstring> g_bmRowFolders;
 static int WebBarH() { return (g_webOn && g_webBarOn && !g_webFail) ? (int)(30 * g.dpi) : 0; }
 
+static HFONT g_bmFont = nullptr;
+static HFONT BmFont() {
+    if (!g_bmFont) {
+        g_bmFont = CreateFontW(-(int)std::lround(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    }
+    return g_bmFont;
+}
+
 static void BmBarRows(int w) {
     g_bmRows.clear();
     g_bmRowFolders.clear();
@@ -311,7 +321,7 @@ static void BmBarRows(int w) {
     int x = (int)(8 * g.dpi), lim = w - (int)(8 * g.dpi);
     int moreW = (int)(26 * g.dpi);
     HDC dc = GetDC(g_wstrip);
-    HGDIOBJ of = SelectObject(dc, g_webEditFont ? g_webEditFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+    HGDIOBJ of = SelectObject(dc, BmFont());
     auto textW = [&](const std::wstring& s, int cap) {
         SIZE sz{};
         int n = (int)s.size();
@@ -441,12 +451,12 @@ static void BmBarDraw(HDC dc, int w, int h) {
         RECT ir{ rc.left + (int)(7 * g.dpi), rc.top + (rc.bottom - rc.top - is) / 2,
                  rc.left + (int)(7 * g.dpi) + is, rc.top + (rc.bottom - rc.top + is) / 2 };
         if (r.kind == 1) {                        // a folder: true folder icon, matching font
-            SelectObject(dc, WebGlyphFont(12));
+            SelectObject(dc, WebGlyphFont(13));
             SetTextColor(dc, wvb::Ink);
             DrawTextW(dc, L"\uE8B7", -1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             RECT tr{ ir.right + (int)(6 * g.dpi), rc.top, rc.right - (int)(4 * g.dpi), rc.bottom };
             const std::wstring& label = g_bmRowFolders[r.idx];
-            SelectObject(dc, g_webEditFont ? g_webEditFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+            SelectObject(dc, BmFont());
             SetTextColor(dc, wvb::Ink);
             DrawTextW(dc, label.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             continue;
@@ -460,7 +470,8 @@ static void BmBarDraw(HDC dc, int w, int h) {
             std::wstring host = BmHostOf(b.url);
             BmTileDisc(gx, dc, ir, b.title, host.empty() ? b.title : host);
         }
-        RECT tr{ ir.right + (int)(5 * g.dpi), rc.top, rc.right - (int)(2 * g.dpi), rc.bottom };
+        RECT tr{ ir.right + (int)(6 * g.dpi), rc.top, rc.right - (int)(4 * g.dpi), rc.bottom };
+        SelectObject(dc, BmFont());
         SetTextColor(dc, wvb::Ink);
         DrawTextW(dc, b.title.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }

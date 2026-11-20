@@ -225,7 +225,9 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
         Gdiplus::GraphicsPath* inner = CardPath((float)cx + 0.5f, (float)ty + 0.5f, (float)cw - 1,
                                                 (float)h - 1 - ty, (float)rad - 1, 0);
         if (Gdiplus::TextureBrush* c = GrainTex(0)) {     // the canvas, phased like GDI's
-            c->TranslateTransform((float)-xoffScreen, 0.f);
+            c->ResetTransform();
+            c->TranslateTransform((float)((g_grainPX % 256 + 256) % 256) - (float)xoffScreen,
+                                  (float)((g_grainPY % 256 + 256) % 256));
             gs.FillPath(c, inner);
         }
         else {

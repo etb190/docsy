@@ -144,6 +144,8 @@ static void WebIconSidebar(HDC dc, const RECT& r, COLORREF c) {
     gs.DrawLine(&pen, dx, cy - hh, dx, cy + hh);
 }
 
+static int g_wbHot = -1;
+
 static void WebStripPaint(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     HBRUSH bg = CreateSolidBrush(wvb::StripBg);
@@ -164,13 +166,12 @@ static void WebStripPaint(HDC dc, int w, int h) {
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
         L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr
-    };                                                 // reload rides the field, the sidebar icon is drawn
-                                                       // by hand, and the star lives in the pill too
+    };                                                 // reload and star ride beside the field
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
-        if (i == WB_RELOAD) continue;                  // its tile draws inside the field
+        if (i == WB_RELOAD || i == WB_STAR) continue;  // custom tiles outside the field
         bool en = WebBtnEnabled(i);
-        bool hot = en && g.tbTabHot == i, pr = en && g.tbPressed == i;
+        bool hot = en && g_wbHot == i, pr = en && g.tbPressed == i;
         bool on = i == WB_SIDE && g_webSide;           // the sidebar button stays lit while it is open
         if (hot || pr || on) WebTile(dc, g_wbR[i], pr ? wvb::Pressed : (hot ? wvb::Hover : wvb::Omnibox));
         COLORREF ink = !en ? wvb::InkOff : wvb::Ink;
@@ -229,8 +230,8 @@ static void WebStripPaint(HDC dc, int w, int h) {
                 HGDIOBJ of0 = SelectObject(dc, g_webEditFont);
                 SIZE sz{}; GetTextExtentPoint32W(dc, tx, len, &sz);
                 SelectObject(dc, of0);
-                int cx = (int)(g_webOmni.left + TABF(34) + g_webOmni.right - TABF(58)) / 2;   // the edit's own center -
-                lockX = max((int)g_webOmni.left + TABF(14), cx - (int)sz.cx / 2 - TABF(18));   // the field stops shy of the star
+                int cx = (int)(g_webOmni.left + g_webOmni.right) / 2;
+                lockX = max((int)g_webOmni.left + TABF(14), cx - (int)sz.cx / 2 - TABF(18));
             }
         }
         SelectObject(dc, WebGlyphFont(12));
@@ -238,30 +239,34 @@ static void WebStripPaint(HDC dc, int w, int h) {
         RECT lk{ lockX, g_webOmni.top, lockX + TABF(16), g_webOmni.bottom };
         DrawTextW(dc, L"\uE72E", -1, &lk, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    // reload at rest, stop/reset while loading - a round tile under the cursor
+    // reload at rest, stop/reset while loading - to the right of the omnibox outside
     RECT rf = g_wbR[WB_RELOAD];
-    if (g.tbTabHot == WB_RELOAD)
-        WebTileC(dc, rf, Gdiplus::Color(255, GetRValue(wvb::Hover), GetGValue(wvb::Hover),
-                                        GetBValue(wvb::Hover)), 12.0f);
-    bool loading = (t && t->loading);
-    // Refresh (\uE72C) and Reset/Cancel (\uE711) rendered with matching visual optical size:
-    SelectObject(dc, WebGlyphFont(loading ? 11 : 12));
-    SetTextColor(dc, wvb::Ink);
-    DrawTextW(dc, loading ? L"\uE711" : L"\uE72C", -1, &rf,
-              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    // the bookmark star, left of the reload: an outline while this page is a
-    // stranger, the accent's fill once it is one of the list's own - the state
-    // flips wherever the URL changes, the omnibox's own invalidation carries it
+    if (rf.right > rf.left) {
+        bool en = WebBtnEnabled(WB_RELOAD);
+        bool hot = en && (g_wbHot == WB_RELOAD);
+        bool pr = en && (g.tbPressed == WB_RELOAD);
+        if (hot || pr) WebTile(dc, rf, pr ? wvb::Pressed : wvb::Hover);
+        bool loading = (t && t->loading);
+        // Refresh (\uE72C) and Reset/Cancel (\uE711) rendered with matching visual optical size:
+        SelectObject(dc, WebGlyphFont(loading ? 11 : 12));
+        SetTextColor(dc, !en ? wvb::InkOff : wvb::Ink);
+        DrawTextW(dc, loading ? L"\uE711" : L"\uE72C", -1, &rf,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    // the bookmark star, to the left of the omnibox outside:
     RECT st = g_wbR[WB_STAR];
-    if (g.tbTabHot == WB_STAR && !g_webFail)
-        WebTileC(dc, st, Gdiplus::Color(255, GetRValue(wvb::Hover), GetGValue(wvb::Hover),
-                                        GetBValue(wvb::Hover)), 12.0f);
-    bool saved = t && BmFindUrl(t->url) >= 0;
-    SelectObject(dc, WebGlyphFont(14));
-    SetTextColor(dc, g_webFail ? wvb::InkOff : (saved ? wvb::Blue : wvb::Ink));
-    RECT stg = st;
-    stg.top += 1; stg.bottom += 1;
-    DrawTextW(dc, saved ? L"\uE735" : L"\uE734", -1, &stg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (st.right > st.left) {
+        bool en = !g_webFail;
+        bool hot = en && (g_wbHot == WB_STAR);
+        bool pr = en && (g.tbPressed == WB_STAR);
+        if (hot || pr) WebTile(dc, st, pr ? wvb::Pressed : wvb::Hover);
+        bool saved = t && BmFindUrl(t->url) >= 0;
+        SelectObject(dc, WebGlyphFont(14));
+        SetTextColor(dc, g_webFail ? wvb::InkOff : (saved ? wvb::Blue : wvb::Ink));
+        RECT stg = st;
+        stg.top += 1; stg.bottom += 1;
+        DrawTextW(dc, saved ? L"\uE735" : L"\uE734", -1, &stg, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
     if (t && t->loading) {                             // the progress line: a blue segment sweeping
         int inset = TABF(16);                          // along the capsule's foot
         int pw = (int)(g_webOmni.right - g_webOmni.left) - 2 * inset;
@@ -284,7 +289,7 @@ static void WebStripPaint(HDC dc, int w, int h) {
     if (g_wedit && !editFocus && GetWindowTextW(g_wedit, has, 2) == 0) {
         SelectObject(dc, g_webEditFont);
         SetTextColor(dc, wvb::InkDim);
-        RECT pr{ g_webOmni.left + TABF(34), g_webOmni.top, g_webOmni.right - TABF(58), g_webOmni.bottom };   // the edit's own ground: placeholder and idle site name share one center
+        RECT pr{ g_webOmni.left + TABF(34), g_webOmni.top, g_webOmni.right - TABF(34), g_webOmni.bottom };   // symmetric centered ground
         DrawTextW(dc, L"Search or enter website name", -1, &pr,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
@@ -349,16 +354,16 @@ static LRESULT CALLBACK WebStripProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int hot = WebNavHit(p), xh = WxHit(p), bh = BmHit(p);
-        if (hot != g.tbTabHot || xh != g_wxHot || bh != g_bmHot) {
-            g.tbTabHot = hot; g_wxHot = xh; g_bmHot = bh;
+        if (hot != g_wbHot || xh != g_wxHot || bh != g_bmHot) {
+            g_wbHot = hot; g_wxHot = xh; g_bmHot = bh;
             if (hot >= 0 || xh >= 0 || bh >= 0) TrackLeave(h);
             InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g.tbTabHot != -1 || g_wxHot != -1 || g_bmHot != -1) {
-            g.tbTabHot = -1; g_wxHot = -1; g_bmHot = -1; InvalidateRect(h, nullptr, FALSE);
+        if (g_wbHot != -1 || g_wxHot != -1 || g_bmHot != -1) {
+            g_wbHot = -1; g_wxHot = -1; g_bmHot = -1; InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     case WM_LBUTTONDOWN: {
@@ -488,16 +493,14 @@ static void WebBarLayout() {
         g_wxIdx.push_back(vis[k]);
     }
     if (n) leftEdge = (int)g_wxR[0].left;
-    int lo = (int)g_wbR[WB_FWD].right + TABF(18), hi = leftEdge - TABF(18);
+    int gap = TABF(6);
+    int lo = (int)g_wbR[WB_FWD].right + TABF(10) + d + gap;
+    int hi = leftEdge - TABF(10) - d - gap;
     int pw = max(10, min(hi - lo, TABF(560)));     // the capsule: centered in the window, capped
     int pl = std::clamp((int)r.right / 2 - pw / 2, lo, max(lo, hi - pw));
     g_webOmni = { pl, py, pl + pw, py + ph };
-    int btnH = TABF(24);
-    int btnY = g_webOmni.top + (ph - btnH) / 2;
-    g_wbR[WB_RELOAD] = { g_webOmni.right - TABF(30), btnY,
-                         g_webOmni.right - TABF(6), btnY + btnH };
-    g_wbR[WB_STAR] = { g_webOmni.right - TABF(58), btnY,      // the star lives in
-                       g_webOmni.right - TABF(34), btnY + btnH };  // the pill too,
+    g_wbR[WB_STAR] = { pl - gap - d, cy, pl - gap, cy + d };      // star to the left outside omnibox
+    g_wbR[WB_RELOAD] = { pl + pw + gap, cy, pl + pw + gap + d, cy + d }; // reload to the right outside omnibox
     if (!g_webEditFont) g_webEditFont = CreateFontW(-(int)std::lround(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, 0,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -512,10 +515,7 @@ static void WebBarLayout() {
     }
     if (g_wedit) {
         int eh = max(4, TABF(18));                 // one text line, centered in the capsule
-        int ew = max(10, (int)(g_webOmni.right - g_webOmni.left) - TABF(92));   // 34 past the lock, 58 shy
-                                                   // of the right edge: the star owns that ground, and
-                                                   // the edit is a child HWND - its opaque fill paints
-                                                   // OVER whatever the pill drew underneath it
+        int ew = max(10, (int)(g_webOmni.right - g_webOmni.left) - 2 * TABF(34)); // symmetric padding
         MoveWindow(g_wedit, g_webOmni.left + TABF(34), g_webOmni.top + (ph - eh) / 2, ew, eh, TRUE);
         ShowWindow(g_wedit, g_webFail ? SW_HIDE : SW_SHOW);
     }
@@ -1349,10 +1349,12 @@ static void WebCardPaint(HDC dc, int w, int h) {
             HDC bdc = CreateCompatibleDC(dc);
             HGDIOBJ ob = SelectObject(bdc, bm);
             POINT po{ 0, 0 };
-            if (WindowFromDC(dc) == g.view)
+            if (WindowFromDC(dc) == g.view) {
                 MapWindowPoints(g.view, g.main, &po, 1);
-            else { po.x = g_grainPX; po.y = g_grainPY; }
-            SetBrushOrgEx(bdc, po.x, po.y, nullptr);
+                SetBrushOrgEx(bdc, -po.x, -po.y, nullptr);
+            } else {
+                SetBrushOrgEx(bdc, g_grainPX, g_grainPY, nullptr);
+            }
             RECT fr{ 0, 0, w, h };
             FillRect(bdc, &fr, GrainBrush(0));
             SelectObject(bdc, ob);
@@ -1379,39 +1381,7 @@ static void WebRoundWebView() {
     while ((hw = FindWindowExW(g.view, hw, nullptr, nullptr)) != nullptr) {
         WCHAR cls[32]{};
         if (!GetClassNameW(hw, cls, 32) || wcsncmp(cls, L"Chrome_WidgetWin", 16) != 0) continue;
-        if (!g_webSide) {
-            SetWindowRgn(hw, nullptr, TRUE);
-            continue;
-        }
-        RECT r;
-        GetClientRect(hw, &r);
-        int w = r.right - r.left, h = r.bottom - r.top;
-        if (w <= 0 || h <= 0) {
-            SetWindowRgn(hw, nullptr, TRUE);
-            continue;
-        }
-        int rad = max(2, (int)(8 * g.dpi));
-        HRGN rgn = CreateRectRgn(0, 0, w, h);
-
-        HRGN tlBox = CreateRectRgn(0, 0, rad, rad);
-        HRGN tlCircle = CreateEllipticRgn(0, 0, 2 * rad, 2 * rad);
-        HRGN tlNotch = CreateRectRgn(0, 0, 0, 0);
-        CombineRgn(tlNotch, tlBox, tlCircle, RGN_DIFF);
-        CombineRgn(rgn, rgn, tlNotch, RGN_DIFF);
-        DeleteObject(tlBox);
-        DeleteObject(tlCircle);
-        DeleteObject(tlNotch);
-
-        HRGN blBox = CreateRectRgn(0, h - rad, rad, h);
-        HRGN blCircle = CreateEllipticRgn(0, h - 2 * rad, 2 * rad, h);
-        HRGN blNotch = CreateRectRgn(0, 0, 0, 0);
-        CombineRgn(blNotch, blBox, blCircle, RGN_DIFF);
-        CombineRgn(rgn, rgn, blNotch, RGN_DIFF);
-        DeleteObject(blBox);
-        DeleteObject(blCircle);
-        DeleteObject(blNotch);
-
-        SetWindowRgn(hw, rgn, TRUE);
+        SetWindowRgn(hw, nullptr, TRUE);
     }
 }
 
@@ -1589,10 +1559,13 @@ static void WebSideDraw(HDC dc, int w, int h) {
         int bw = hot ? (int)(8 * g.dpi) : (int)(4 * g.dpi);
         RoundRectFill(dc, w - SBar() + (SBar() - bw) / 2, tp, bw, tl, (int)(3 * g.dpi), hot);
     }
-    if (g_webOn)                                   // the card's left halo lands here, over the
+    if (g_webOn) {                                 // the card's left halo lands here, over the
         DrawRailShadow(dc, w, h, 0);               // thumbs the way the reader's rail receives
-                                                   // its share - the shadow's pane paints last,
-                                                   // KillerPDF's own z-order
+        RECT divLine{ w - 1, 0, w, h };            // divider border on the sidebar edge only
+        HBRUSH divBr = CreateSolidBrush(RGB(0x48, 0x48, 0x48));
+        FillRect(dc, &divLine, divBr);
+        DeleteObject(divBr);
+    }
 }
 
 static bool WebSidePump() { return false; }        // thumbs arrive through CapturePreview

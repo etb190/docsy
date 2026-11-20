@@ -184,10 +184,6 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_PAINT: {   // the custom caption row; the children paint their own areas
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
-        RECT clip;                                   // a shrinking window exposes strips
-        if (GetClipBox(dc, &clip) != NULLREGION) {   // the children vacated: fill them with
-            FillRect(dc, &clip, GrainBrush(1));      // the shared grain or the last frame
-        }                                            // lingers there (the ghost button)
         RECT r; GetClientRect(h, &r);
         PaintCaptionInto(dc, r.right);
         EndPaint(h, &ps);
