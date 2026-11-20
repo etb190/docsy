@@ -1,0 +1,16 @@
+main.cpp
+D:\a\docsy\docsy\src\tabs.inl(126): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tabs.inl(130): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\annotations.inl(608): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\annotations.inl(889): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\annotations.inl(979): warning C4805: '!=': unsafe mix of type 'bool' and type 'int' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(246): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(249): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(254): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(274): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(295): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(314): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(341): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(368): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+Generating code
+Finished generating code

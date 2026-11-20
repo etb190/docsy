@@ -1,0 +1,59 @@
+﻿Docsy extension self-test  2026-11-20 20:06:39
+target: ddkjiahejlhfcafbddmgiahcphecmpfh
+runtime: 157.0.4341.46
+user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+extensions flag: on, mv2 keep-alive arguments set
+controller: created
+profile: ICoreWebView2Profile7 ok
+profile carries 4 extension(s) already
+  installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+  installed: dgiklkfkllikcanfonkcabmbdfmgleag
+  installed: dhdgffkkebhmkfjojejmpbldmpobfkfo
+  installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+check: ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' - on
+check: dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' - on
+VERDICT: PASS - the restart persists every extension the toolbar draws
+exit code: 0
+
+---- webext.log (tail) ----
+[11-20 20:06:38.270] test: Docsy extension self-test  2026-11-20 20:06:38
+[11-20 20:06:38.280] test: target: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-20 20:06:38.282] test: runtime: 157.0.4341.46
+[11-20 20:06:38.301] test: user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+[11-20 20:06:38.301] test: extensions flag: on, mv2 keep-alive arguments set
+[11-20 20:06:38.700] test: controller: created
+[11-20 20:06:38.700] test: profile: ICoreWebView2Profile7 ok
+[11-20 20:06:38.702] test: profile carries 3 extension(s) already
+[11-20 20:06:38.702] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-20 20:06:38.702] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-20 20:06:38.703] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-20 20:06:38.710] fetch: id dhdgffkkebhmkfjojejmpbldmpobfkfo, prodver 157.0.4341.46
+[11-20 20:06:38.842] dl: HTTP 200
+[11-20 20:06:39.310] fetch: unpacked 124 entries -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-20 20:06:39.310] test: download/unpack: ok -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-20 20:06:39.403] add: no stale registration under dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-20 20:06:39.677] test: AddBrowserExtension: 0x00000000 S_OK
+[11-20 20:06:39.677] test: VERDICT: PASS - dhdgffkkebhmkfjojejmpbldmpobfkfo is installed and listed
+[11-20 20:06:39.791] test: Docsy extension self-test  2026-11-20 20:06:39
+[11-20 20:06:39.793] test: target: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-20 20:06:39.795] test: runtime: 157.0.4341.46
+[11-20 20:06:39.795] test: user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+[11-20 20:06:39.795] test: extensions flag: on, mv2 keep-alive arguments set
+[11-20 20:06:40.209] test: controller: created
+[11-20 20:06:40.209] test: profile: ICoreWebView2Profile7 ok
+[11-20 20:06:40.211] test: profile carries 4 extension(s) already
+[11-20 20:06:40.211] test:   installed: ddkjiahejlhfcafbddmgiahcphecmpfh
+[11-20 20:06:40.212] test:   installed: dgiklkfkllikcanfonkcabmbdfmgleag
+[11-20 20:06:40.213] test:   installed: dhdgffkkebhmkfjojejmpbldmpobfkfo
+[11-20 20:06:40.214] test:   installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+[11-20 20:06:40.220] init: registration ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' enabled=1
+[11-20 20:06:40.220] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' enabled=1
+[11-20 20:06:40.220] init: registration dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' enabled=1
+[11-20 20:06:40.220] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' enabled=1
+[11-20 20:06:40.221] init: registration dgiklkfkllikcanfonkcabmbdfmgleag 'Microsoft Clipboard Extension' has no folder - left alone
+[11-20 20:06:40.222] init: registration mhjfbmdgcfjbbpaeojofohoefgiehjai 'Microsoft Edge PDF Viewer' has no folder - left alone
+[11-20 20:06:40.222] init: GetBrowserExtensions answered 0x00000000, 4 extension(s) registered
+[11-20 20:06:40.222] init: 4 installed, 2 folder(s), 0 to re-add
+[11-20 20:06:40.474] test: check: ddkjiahejlhfcafbddmgiahcphecmpfh 'uBlock Origin Lite' - on
+[11-20 20:06:40.476] test: check: dhdgffkkebhmkfjojejmpbldmpobfkfo 'Tampermonkey' - on
+[11-20 20:06:40.476] test: VERDICT: PASS - the restart persists every extension the toolbar draws
