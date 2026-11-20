@@ -1,3 +1,9 @@
+// ---- browsing history forward declarations ----
+static void HistAdd(const std::wstring& url, const std::wstring& title);
+static void HistUpdateTitle(const std::wstring& url, const std::wstring& title);
+static void HistDropdownToggle();
+static void HistFullOpen();
+
 // ---- small helpers the Safari chrome shares ----
 
 static HFONT WebGlyphFont(int px) {                // Segoe MDL2 at px (dpi-scaled), cached per size:
@@ -165,8 +171,8 @@ static void WebStripPaint(HDC dc, int w, int h) {
     SetBkMode(dc, TRANSPARENT);
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr
-    };                                                 // reload and star ride beside the field
+        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr, L"\uE81C"
+    };                                                 // reload and star ride beside the field; hist at far right
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
         if (i == WB_RELOAD || i == WB_STAR) continue;  // custom tiles outside the field
@@ -476,6 +482,8 @@ static void WebBarLayout() {
     x += pitch; g_wbR[WB_FWD] = { x, cy, x + d, cy + d };
     int mx = (int)r.right - TABF(10);
     g_wbR[WB_MENU] = { 0, 0, 0, 0 };               // the 3-dot is gone: the toolbar keeps only
+    g_wbR[WB_HIST] = { mx - d, cy, mx, cy + d };   // history button at the far right
+    mx -= pitch;
     g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d }; // the + and, left of it, each extension's icon
     mx -= pitch;
     g_wbR[WB_READER] = { 0, 0, 0, 0 };             // the PDF button lives on the top toolbar now
@@ -669,6 +677,7 @@ static void WebBarClick(int id) {
         if (t && t->web) { if (t->loading) t->web->Stop(); else t->web->Reload(); }
         return;
     case WB_NEWTAB: WebNewTab(L"https://www.google.com/", true); return;
+    case WB_HIST: HistDropdownToggle(); return;
     case WB_STAR: BmStarClick(); return;           // the pill's star: saved page back off the list,
                                                    // stranger to the bubble (bookmarks.inl)
     case WB_MENU: {
@@ -712,6 +721,10 @@ static void WebGo(const std::wstring& what) {
     while (!s.empty() && (s[0] == L' ' || s[0] == L'\t')) s.erase(0, 1);
     while (!s.empty() && (s[s.size() - 1] == L' ' || s[s.size() - 1] == L'\t')) s.pop_back();
     if (s.empty()) return;
+    if (s == L"docsy://history" || s == L"about:history" || s == L"history") {
+        HistFullOpen();
+        return;
+    }
     std::wstring url;
     if (s.find(L"://") != std::wstring::npos || s.rfind(L"about:", 0) == 0 || s.rfind(L"edge:", 0) == 0) {
         url = s;
@@ -1020,8 +1033,10 @@ static void WebEnsureController(int i) {
                             t->navStart = 0;                           // the watchdog stands down
                             BOOL navOk = FALSE;
                             if (a) a->get_IsSuccess(&navOk);
-                            if (navOk) WxLogf(L"nav: done %s", t->url.c_str());
-                            else {
+                            if (navOk) {
+                                WxLogf(L"nav: done %s", t->url.c_str());
+                                HistAdd(t->url, t->title);
+                            } else {
                                 COREWEBVIEW2_WEB_ERROR_STATUS es = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
                                 if (a) a->get_WebErrorStatus(&es);
                                 WxLogf(L"nav: failed %s (%s)", t->url.c_str(), WebErrName(es));
@@ -1054,6 +1069,7 @@ static void WebEnsureController(int i) {
                             LPWSTR ti = nullptr;
                             if (SUCCEEDED(s->get_DocumentTitle(&ti)) && ti) {
                                 t->title = ti; CoTaskMemFree(ti);
+                                HistUpdateTitle(t->url, t->title);
                             }
                             WebRepaintChrome();
                             if (g.side) InvalidateRect(g.side, nullptr, FALSE);
@@ -1648,6 +1664,7 @@ static std::wstring WebStatusLine() {
 }
 
 static bool WebKey(WPARAM wp, bool ctrl, bool shift) {
+    if (ctrl && wp == 'H') { HistFullOpen(); return true; }
     if (ctrl && wp == 'T') { WebNewTab(L"https://www.google.com/", true); return true; }
     if (ctrl && wp == 'W') { WebCloseTabAt(g_wtCur); return true; }
     if (ctrl && wp == 'L') {

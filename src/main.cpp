@@ -12,6 +12,7 @@
 #include "extensions.inl"
 #include "bookmarks.inl"
 #include "browser.inl"
+#include "history.inl"
 #include "find_bar.inl"
 #include "sidebar.inl"
 #include "doc_info.inl"
@@ -112,6 +113,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     bpc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     bpc.lpszClassName = L"DocsyBmPop";
     RegisterClassExW(&bpc);
+
+    HistRegister(hi);
 
     WNDCLASSEXW wbc{ sizeof wbc };                  // the browser's Safari toolbar (top): the
     wbc.style = CS_DBLCLKS;                         // logo, back/forward, the search pill,
@@ -384,6 +387,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     WxLoadDisk();
     BmLoad();                                  // the bookmarks' list: one file read, before any
                                                // window can paint the bar
+    HistLoad();
     ShowWindow(g.main, show);
     UpdateWindow(g.main);
     if (argc > 1) TabOpenInto(false, argv[1]);
