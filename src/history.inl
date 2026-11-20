@@ -3,11 +3,12 @@
 #include <vector>
 #include <ctime>
 #include <algorithm>
+#include <cstdint>
 
 // ---- browsing history data structures & persistence ----
 
 struct HistEntry {
-    uint64_t id = 0;
+    unsigned long long id = 0;
     std::wstring url;
     std::wstring title;
     time_t time = 0;
@@ -15,7 +16,7 @@ struct HistEntry {
 
 static std::vector<HistEntry> g_history;
 static bool g_histLoaded = false;
-static uint64_t g_histNextId = 1;
+static unsigned long long g_histNextId = 1;
 
 static std::wstring HistFilePath() {
     PWSTR la = nullptr;
@@ -112,7 +113,7 @@ static void HistClear() {
     HistSave();
 }
 
-static void HistDelete(uint64_t id) {
+static void HistDelete(unsigned long long id) {
     HistLoad();
     for (size_t i = 0; i < g_history.size(); i++) {
         if (g_history[i].id == id) {
@@ -927,13 +928,13 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_VSCROLL: {
         RECT r; GetClientRect(h, &r);
         int topBarH = (int)(106 * g.dpi);
-        int maxScroll = std::max(0, g_hwin.totalH - (r.bottom - topBarH));
+        int maxScroll = std::max(0, g_hwin.totalH - (int)(r.bottom - topBarH));
         int cur = g_hwin.scrollY;
         switch (LOWORD(wp)) {
         case SB_LINEUP: cur -= (int)(38 * g.dpi); break;
         case SB_LINEDOWN: cur += (int)(38 * g.dpi); break;
-        case SB_PAGEUP: cur -= (r.bottom - topBarH); break;
-        case SB_PAGEDOWN: cur += (r.bottom - topBarH); break;
+        case SB_PAGEUP: cur -= (int)(r.bottom - topBarH); break;
+        case SB_PAGEDOWN: cur += (int)(r.bottom - topBarH); break;
         case SB_THUMBPOSITION:
         case SB_THUMBTRACK: {
             SCROLLINFO si{ sizeof si, SIF_TRACKPOS };
@@ -954,7 +955,7 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         short delta = GET_WHEEL_DELTA_WPARAM(wp);
         RECT r; GetClientRect(h, &r);
         int topBarH = (int)(106 * g.dpi);
-        int maxScroll = std::max(0, g_hwin.totalH - (r.bottom - topBarH));
+        int maxScroll = std::max(0, g_hwin.totalH - (int)(r.bottom - topBarH));
         int step = (int)(40 * g.dpi);
         int cur = g_hwin.scrollY - (delta / WHEEL_DELTA) * step;
         cur = std::clamp(cur, 0, maxScroll);
