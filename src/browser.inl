@@ -1081,6 +1081,20 @@ static void WebEnsureController(int i) {
                             WebHistorySync(id);
                             return S_OK;
                         }).Get(), &t->tkHist);
+                t->web->add_NewWindowRequested(
+                    Microsoft::WRL::Callback<ICoreWebView2NewWindowRequestedEventHandler>(
+                        [](ICoreWebView2*, ICoreWebView2NewWindowRequestedEventArgs* a) -> HRESULT {
+                            if (!a) return S_OK;
+                            a->put_Handled(TRUE);
+                            LPWSTR u = nullptr;
+                            if (SUCCEEDED(a->get_Uri(&u)) && u) {
+                                std::wstring s = u; CoTaskMemFree(u);
+                                if (!s.empty() && s != L"about:blank") {
+                                    WebNewTab(s, true);
+                                }
+                            }
+                            return S_OK;
+                        }).Get(), &t->tkNewWin);
                 {   // the processes' own verdicts: a render death reloads the tab once, a
                     // second one cold-restarts the engine - deferred through WM_APP+7,
                     // never re-entrant in an event frame. The handler rides the base

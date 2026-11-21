@@ -21,6 +21,7 @@ static void WebNewTab(std::wstring url, bool makeCurrent);
 static WebTab* WebCur();
 static void WebRound(Gdiplus::GraphicsPath& p, float l, float t, float r, float b, float rr);
 static HFONT WebGlyphFont(int px);
+static void HistAdd(const std::wstring& url, const std::wstring& title);
 static void BmBubbleOpen(unsigned long long id);   // the save bubble, at the foot of this file
 
 struct Bm {
@@ -481,6 +482,7 @@ static void BmBarDraw(HDC dc, int w, int h) {
 
 static void BmOpenRow(const Bm& b, bool newTab) {
     if (b.url.empty()) return;
+    HistAdd(b.url, b.title.empty() ? BmHostOf(b.url) : b.title);
     if (newTab) WebNewTab(b.url, true);
     else WebGo(b.url);                            // the omnibox's own road: the URL is absolute,
 }                                                 // so it navigates without a search detour

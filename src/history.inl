@@ -305,6 +305,21 @@ static LRESULT CALLBACK HistPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         EndPaint(h, &ps);
         return 0;
     }
+    case WM_SETCURSOR: {
+        POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+        if (PtInRect(&g_hpop.viewAllR, p)) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        for (const auto& rc : g_hpop.rowR) {
+            if (PtInRect(&rc, p)) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+        }
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        return TRUE;
+    }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int hot = -1;
@@ -444,12 +459,23 @@ struct HistWindowState {
     int hoverIdx = -1;
     bool hoverDel = false;
     bool clearBtnHot = false;
+    bool closeBtnHot = false;
+    bool inMsgBox = false;
     RECT clearBtnR{};
+    RECT closeBtnR{};
     RECT searchCapsuleR{};
     std::vector<RECT> rowRects;
     std::vector<RECT> delRects;
 };
 static HistWindowState g_hwin;
+
+static void HistWinClose() {
+    if (g_hwin.h) {
+        HWND hw = g_hwin.h;
+        g_hwin.h = nullptr;
+        DestroyWindow(hw);
+    }
+}
 static HDC g_hwindc = nullptr;
 static HBITMAP g_hwinbm = nullptr, g_hwinold = nullptr;
 static int g_hwinw = 0, g_hwinh = 0;
@@ -504,7 +530,7 @@ static std::wstring HistDateHeader(time_t t) {
 static LRESULT CALLBACK HistSearchEditProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     if (m == WM_KEYDOWN) {
         if (wp == VK_ESCAPE) {
-            if (g_hwin.h) PostMessageW(g_hwin.h, WM_CLOSE, 0, 0);
+            HistWinClose();
             return 0;
         }
     }
@@ -721,6 +747,22 @@ static void HistWinPaint(HDC dc, int w, int h) {
     RECT ctr{ cr.left + (int)(28 * g.dpi), cr.top, cr.right - (int)(8 * g.dpi), cr.bottom };
     DrawTextW(dc, L"Clear history", -1, &ctr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
+    // Close button ("X") at top right
+    RECT clr = g_hwin.closeBtnR;
+    bool clsHot = g_hwin.closeBtnHot;
+    if (clsHot) {
+        Gdiplus::GraphicsPath clp;
+        WebRound(clp, (float)clr.left, (float)clr.top, (float)clr.right, (float)clr.bottom, 4.0f * (float)g.dpi);
+        Gdiplus::SolidBrush clb(Gdiplus::Color(255, 0x48, 0x22, 0x22));
+        gx.FillPath(&clb, &clp);
+        Gdiplus::Pen clpen(Gdiplus::Color(255, 0xaa, 0x44, 0x44), 1.0f);
+        gx.DrawPath(&clpen, &clp);
+    }
+    SelectObject(dc, WebGlyphFont(11));
+    SetTextColor(dc, clsHot ? RGB(0xff, 0x66, 0x66) : wvb::InkDim);
+    RECT clrc = clr;
+    DrawTextW(dc, L"\uE711", -1, &clrc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
     // Search Capsule
     RECT sr = g_hwin.searchCapsuleR;
     Gdiplus::GraphicsPath sp;
@@ -743,6 +785,13 @@ static void HistWinPaint(HDC dc, int w, int h) {
         DrawTextW(dc, L"Search history", -1, &phr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
+    // 1px border around the card
+    HPEN bdp = CreatePen(PS_SOLID, 1, RGB(0x42, 0x42, 0x46));
+    HGDIOBJ obdp = SelectObject(dc, bdp);
+    HGDIOBJ obdb = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, 0, 0, w, h);
+    SelectObject(dc, obdb); SelectObject(dc, obdp); DeleteObject(bdp);
+
     DeleteObject(titleF); DeleteObject(dateF); DeleteObject(rowF); DeleteObject(smallF);
 }
 
@@ -754,11 +803,15 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (w > 0 && h_ > 0) {
             int topBarH = (int)(106 * g.dpi);
             int capH = (int)(32 * g.dpi);
-            int capW = std::min(w - (int)(48 * g.dpi), (int)(520 * g.dpi));
+            int capW = w - (int)(48 * g.dpi);
+            int closeW = (int)(28 * g.dpi), closeH = (int)(28 * g.dpi);
+            g_hwin.closeBtnR = RECT{ w - (int)(16 * g.dpi) - closeW, (int)(14 * g.dpi),
+                                     w - (int)(16 * g.dpi), (int)(14 * g.dpi) + closeH };
+            int clrW = (int)(116 * g.dpi), clrH = (int)(28 * g.dpi);
+            g_hwin.clearBtnR = RECT{ g_hwin.closeBtnR.left - (int)(10 * g.dpi) - clrW, (int)(14 * g.dpi),
+                                     g_hwin.closeBtnR.left - (int)(10 * g.dpi), (int)(14 * g.dpi) + clrH };
             g_hwin.searchCapsuleR = RECT{ (int)(24 * g.dpi), (int)(54 * g.dpi),
                                           (int)(24 * g.dpi) + capW, (int)(54 * g.dpi) + capH };
-            g_hwin.clearBtnR = RECT{ w - (int)(140 * g.dpi), (int)(16 * g.dpi),
-                                     w - (int)(24 * g.dpi), (int)(16 * g.dpi) + (int)(30 * g.dpi) };
             if (g_hwin.editSearch) {
                 int eh = (int)(20 * g.dpi);
                 MoveWindow(g_hwin.editSearch,
@@ -803,9 +856,25 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         static HBRUSH s_edbr = CreateSolidBrush(RGB(0x12, 0x12, 0x14));
         return (LRESULT)s_edbr;
     }
+    case WM_SETCURSOR: {
+        POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+        if (PtInRect(&g_hwin.closeBtnR, p) || PtInRect(&g_hwin.clearBtnR, p)) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        for (size_t i = 0; i < g_hwin.rowRects.size(); i++) {
+            if (PtInRect(&g_hwin.rowRects[i], p)) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+        }
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        return TRUE;
+    }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        bool clHot = PtInRect(&g_hwin.clearBtnR, p) != 0;
+        bool clrHot = PtInRect(&g_hwin.clearBtnR, p) != 0;
+        bool clsHot = PtInRect(&g_hwin.closeBtnR, p) != 0;
         int hot = -1;
         bool hDel = false;
         for (size_t i = 0; i < g_hwin.rowRects.size(); i++) {
@@ -815,9 +884,10 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 break;
             }
         }
-        if (hot != g_hwin.hoverIdx || clHot != g_hwin.clearBtnHot || hDel != g_hwin.hoverDel) {
+        if (hot != g_hwin.hoverIdx || clrHot != g_hwin.clearBtnHot || clsHot != g_hwin.closeBtnHot || hDel != g_hwin.hoverDel) {
             g_hwin.hoverIdx = hot;
-            g_hwin.clearBtnHot = clHot;
+            g_hwin.clearBtnHot = clrHot;
+            g_hwin.closeBtnHot = clsHot;
             g_hwin.hoverDel = hDel;
             TrackLeave(h);
             InvalidateRect(h, nullptr, FALSE);
@@ -825,9 +895,10 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE: {
-        if (g_hwin.hoverIdx != -1 || g_hwin.clearBtnHot || g_hwin.hoverDel) {
+        if (g_hwin.hoverIdx != -1 || g_hwin.clearBtnHot || g_hwin.closeBtnHot || g_hwin.hoverDel) {
             g_hwin.hoverIdx = -1;
             g_hwin.clearBtnHot = false;
+            g_hwin.closeBtnHot = false;
             g_hwin.hoverDel = false;
             InvalidateRect(h, nullptr, FALSE);
         }
@@ -835,14 +906,21 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (PtInRect(&g_hwin.closeBtnR, p)) {
+            HistWinClose();
+            return 0;
+        }
         if (PtInRect(&g_hwin.clearBtnR, p)) {
-            if (MessageBoxW(h, L"Are you sure you want to clear your entire browsing history?",
-                            L"Clear Browsing History", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            g_hwin.inMsgBox = true;
+            int r = MessageBoxW(h, L"Are you sure you want to clear your entire browsing history?",
+                                L"Clear Browsing History", MB_YESNO | MB_ICONQUESTION);
+            g_hwin.inMsgBox = false;
+            if (r == IDYES) {
                 HistClear();
                 HistFilter();
-                RECT r; GetClientRect(h, &r);
+                RECT rc; GetClientRect(h, &rc);
                 g_hwin.scrollY = 0;
-                HistWinLayout(r.right, r.bottom);
+                HistWinLayout(rc.right, rc.bottom);
                 InvalidateRect(h, nullptr, FALSE);
             }
             return 0;
@@ -851,13 +929,14 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (PtInRect(&g_hwin.delRects[i], p)) {
                 HistDelete(g_hwin.filtered[i].id);
                 HistFilter();
-                RECT r; GetClientRect(h, &r);
-                HistWinLayout(r.right, r.bottom);
+                RECT rc; GetClientRect(h, &rc);
+                HistWinLayout(rc.right, rc.bottom);
                 InvalidateRect(h, nullptr, FALSE);
                 return 0;
             }
             if (PtInRect(&g_hwin.rowRects[i], p)) {
                 std::wstring u = g_hwin.filtered[i].url;
+                HistWinClose();
                 if (!g_webOn) WebToggle(true);
                 WebGo(u);
                 SetForegroundWindow(g.main);
@@ -871,6 +950,7 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         for (size_t i = 0; i < g_hwin.rowRects.size() && i < g_hwin.filtered.size(); i++) {
             if (PtInRect(&g_hwin.rowRects[i], p)) {
                 std::wstring u = g_hwin.filtered[i].url;
+                HistWinClose();
                 if (!g_webOn) WebToggle(true);
                 WebNewTab(u, true);
                 SetForegroundWindow(g.main);
@@ -893,10 +973,12 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, p.x, p.y, 0, h, nullptr);
                 DestroyMenu(m);
                 if (cmd == 1) {
+                    HistWinClose();
                     if (!g_webOn) WebToggle(true);
                     WebGo(g_hwin.filtered[i].url);
                     SetForegroundWindow(g.main);
                 } else if (cmd == 2) {
+                    HistWinClose();
                     if (!g_webOn) WebToggle(true);
                     WebNewTab(g_hwin.filtered[i].url, true);
                     SetForegroundWindow(g.main);
@@ -916,8 +998,8 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 } else if (cmd == 4) {
                     HistDelete(g_hwin.filtered[i].id);
                     HistFilter();
-                    RECT r; GetClientRect(h, &r);
-                    HistWinLayout(r.right, r.bottom);
+                    RECT rc; GetClientRect(h, &rc);
+                    HistWinLayout(rc.right, rc.bottom);
                     InvalidateRect(h, nullptr, FALSE);
                 }
                 return 0;
@@ -925,6 +1007,18 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE && !g_hwin.inMsgBox) {
+            HistWinClose();
+            return 0;
+        }
+        return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) {
+            HistWinClose();
+            return 0;
+        }
+        break;
     case WM_VSCROLL: {
         RECT r; GetClientRect(h, &r);
         int topBarH = (int)(106 * g.dpi);
@@ -988,30 +1082,34 @@ static LRESULT CALLBACK HistWinProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 
 static void HistFullOpen() {
     if (g_hwin.h) {
-        ShowWindow(g_hwin.h, SW_RESTORE);
-        SetForegroundWindow(g_hwin.h);
-        if (g_hwin.editSearch) SetFocus(g_hwin.editSearch);
+        HistWinClose();
         return;
     }
-
-    int W = (int)std::lround(720 * g.dpi);
-    int H = (int)std::lround(560 * g.dpi);
-    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
-    if (g.main) {
-        RECT mr; GetWindowRect(g.main, &mr);
-        x = mr.left + (mr.right - mr.left - W) / 2;
-        y = mr.top + (mr.bottom - mr.top - H) / 2;
-    }
+    HistDropdownClose();
+    HistLoad();
 
     g_hwin.searchStr.clear();
     g_hwin.scrollY = 0;
     g_hwin.hoverIdx = -1;
     g_hwin.hoverDel = false;
     g_hwin.clearBtnHot = false;
+    g_hwin.closeBtnHot = false;
+    g_hwin.inMsgBox = false;
     HistFilter();
 
-    HWND hw = CreateWindowExW(WS_EX_APPWINDOW, L"DocsyHistWin", L"History - Docsy",
-                              WS_OVERLAPPEDWINDOW | WS_VSCROLL, x, y, W, H, nullptr, nullptr, g.hinst, nullptr);
+    RECT mr{};
+    if (g.main) GetWindowRect(g.main, &mr);
+    else mr = { 100, 100, 900, 700 };
+    int mainW = (int)(mr.right - mr.left);
+    int mainH = (int)(mr.bottom - mr.top);
+    int W = std::clamp((int)(720 * g.dpi), (int)(320 * g.dpi), std::max((int)(320 * g.dpi), mainW - (int)(40 * g.dpi)));
+    int H = std::clamp((int)(560 * g.dpi), (int)(240 * g.dpi), std::max((int)(240 * g.dpi), mainH - (int)(60 * g.dpi)));
+    int x = mr.left + (mainW - W) / 2;
+    int y = mr.top + (mainH - H) / 2;
+
+    HWND hw = CreateWindowExW(WS_EX_TOPMOST, L"DocsyHistWin", L"",
+                              WS_POPUP | WS_CLIPCHILDREN | WS_VSCROLL, x, y, W, H,
+                              g.main, nullptr, g.hinst, nullptr);
     if (!hw) return;
     g_hwin.h = hw;
     DwmApply(hw);
@@ -1046,7 +1144,7 @@ static void HistRegister(HINSTANCE hi) {
     RegisterClassExW(&hpc);
 
     WNDCLASSEXW hwc{ sizeof hwc };
-    hwc.style = CS_HREDRAW | CS_VREDRAW;
+    hwc.style = CS_DROPSHADOW | CS_SAVEBITS;
     hwc.lpfnWndProc = HistWinProc;
     hwc.hInstance = hi;
     hwc.hCursor = LoadCursorW(nullptr, IDC_ARROW);

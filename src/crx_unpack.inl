@@ -32,7 +32,7 @@ struct WebTab {
     int renderDeaths = 0;                  // render-process failures the tab has lived through
     std::wstring pending;                  // the URL a brand-new tab opens once its
                                            // controller finishes building
-    EventRegistrationToken tkNavS{}, tkNavC{}, tkSrc{}, tkTitle{}, tkHist{}, tkDl{}, tkProc{};
+    EventRegistrationToken tkNavS{}, tkNavC{}, tkSrc{}, tkTitle{}, tkHist{}, tkDl{}, tkProc{}, tkNewWin{};
     HBITMAP thumb = nullptr; int thumbW = 0, thumbH = 0; double ar = 0.0;
 };
 static std::vector<WebTab> g_wt;
