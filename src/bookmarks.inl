@@ -22,6 +22,8 @@ static WebTab* WebCur();
 static void WebRound(Gdiplus::GraphicsPath& p, float l, float t, float r, float b, float rr);
 static HFONT WebGlyphFont(int px);
 static void HistAdd(const std::wstring& url, const std::wstring& title);
+static void HistUpdateTitle(const std::wstring& url, const std::wstring& title);
+static void HistNotifyRepaint();
 static void BmBubbleOpen(unsigned long long id);   // the save bubble, at the foot of this file
 
 struct Bm {
@@ -221,11 +223,11 @@ static void BmUpsert(unsigned long long id, const std::wstring& url, const std::
 }
 
 // ---- favicons ------------------------------------------------------------
-// The site's own /favicon.ico - no third-party service, no bytes the exe
-// does not already pay. One background thread per host, the PNG/ICO lands
-// in Docsy\Favicons\<hash>, and WM_APP+9 walks the list home on the UI
-// thread. A miss is remembered as <hash>.png.none - a dead host is never
-// re-asked, on this launch or any later one.
+// Multi-source favicon loader: direct site favicon, with Google Favicon Service
+// and DuckDuckGo fallbacks. Decoded into memory cache g_favCache, and saved to
+// Docsy\Favicons\<hash>.png. WM_APP+9 notifies the UI thread.
+
+static std::unordered_map<std::wstring, Gdiplus::Bitmap*> g_favCache;
 
 static std::wstring BmFavDir() {
     PWSTR la = nullptr;
@@ -243,10 +245,77 @@ static std::wstring BmFavPath(const std::wstring& host) {
     hex[16] = 0;
     return BmFavDir() + L"\\" + hex + L".png";
 }
+static void EnsureHostFavicon(const std::wstring& host) {
+    if (host.empty() || g.quiet) return;
+    if (std::find(g_wxFavBusy.begin(), g_wxFavBusy.end(), host) != g_wxFavBusy.end()) return;
+    std::wstring p = BmFavPath(host);
+    if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    if (GetFileAttributesW((p + L".miss").c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    g_wxFavBusy.push_back(host);
+    WxMkdirs(BmFavDir());
+    HWND main = g.main;
+    std::wstring* done = new std::wstring(host);
+    std::thread([host, p, main, done]() {
+        std::vector<unsigned char> d;
+        std::wstring err;
+        auto isValidImg = [](const std::vector<unsigned char>& data) -> bool {
+            if (data.size() < 8) return false;
+            if (data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G') return true;
+            if (data[0] == 0 && data[1] == 0 && (data[2] == 1 || data[2] == 2) && data[3] == 0) return true;
+            if (data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) return true;
+            if (data[0] == 'G' && data[1] == 'I' && data[2] == 'F') return true;
+            if (data.size() >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F'
+                && data[8] == 'W' && data[9] == 'E' && data[10] == 'B' && data[11] == 'P') return true;
+            return false;
+        };
+
+        const wchar_t* const ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+        bool ok = false;
+        // 1. Direct site favicon
+        if (WxHttpGet(L"https://" + host + L"/favicon.ico", ua, d, err) && isValidImg(d)) {
+            WxWriteFile(p, d.data(), d.size());
+            ok = true;
+        }
+        // 2. Google favicon service fallback
+        if (!ok) {
+            d.clear();
+            if (WxHttpGet(L"https://www.google.com/s2/favicons?domain=" + host + L"&sz=32", ua, d, err) && isValidImg(d)) {
+                WxWriteFile(p, d.data(), d.size());
+                ok = true;
+            }
+        }
+        // 3. DuckDuckGo fallback
+        if (!ok) {
+            d.clear();
+            if (WxHttpGet(L"https://icons.duckduckgo.com/ip3/" + host + L".ico", ua, d, err) && isValidImg(d)) {
+                WxWriteFile(p, d.data(), d.size());
+                ok = true;
+            }
+        }
+        if (!ok) {
+            WxWriteFile(p + L".miss", (const unsigned char*)"x", 1);
+        } else {
+            DeleteFileW((p + L".miss").c_str());
+            DeleteFileW((p + L".none").c_str());
+        }
+        if (!PostMessageW(main, WM_APP + 9, 0, (LPARAM)done)) delete done;
+    }).detach();
+}
 static void BmFaviconArrived(std::wstring* host) {   // WM_APP+9, the UI thread: the thread's
-    if (host)                                        // host is home, busy or not
-        for (size_t i = 0; i < g_wxFavBusy.size(); i++)
+    if (host) {
+        for (size_t i = 0; i < g_wxFavBusy.size(); i++) {
             if (g_wxFavBusy[i] == *host) { g_wxFavBusy.erase(g_wxFavBusy.begin() + i); break; }
+        }
+        std::wstring p = BmFavPath(*host);
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            auto it = g_favCache.find(*host);
+            if (it != g_favCache.end() && it->second) {
+                delete it->second;
+                it->second = nullptr;
+            }
+            g_favCache[*host] = WxLoadIcon(p);
+        }
+    }
     bool any = false;
     for (Bm& b : g_bm) {
         if (b.ico || !b.icoTried || b.url.empty()) continue;
@@ -259,35 +328,22 @@ static void BmFaviconArrived(std::wstring* host) {   // WM_APP+9, the UI thread:
     }
     delete host;
     if (any) BmRepaint();
+    WebRepaintChrome();
+    if (g_wstrip) InvalidateRect(g_wstrip, nullptr, FALSE);
+    HistNotifyRepaint();
 }
 static void BmEnsureIco(Bm& b) {
     if (b.ico || b.icoTried || b.url.empty() || g.quiet) return;
     std::wstring host = BmHostOf(b.url);
-    if (host.empty() || std::find(g_wxFavBusy.begin(), g_wxFavBusy.end(), host) != g_wxFavBusy.end()) return;
+    if (host.empty()) return;
     std::wstring p = BmFavPath(host);
-    if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {   // a past session fetched it:
-        b.ico = WxLoadIcon(p);                    // no thread, no network - the disk knows
+    if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        b.ico = WxLoadIcon(p);
         b.icoTried = true;
         return;
     }
-    if (GetFileAttributesW((p + L".none").c_str()) != INVALID_FILE_ATTRIBUTES) {
-        b.icoTried = true;                        // the miss is already on record
-        return;
-    }
-    b.icoTried = true;                            // the road runs once, whatever it answers
-    g_wxFavBusy.push_back(host);
-    WxMkdirs(BmFavDir());
-    HWND main = g.main;
-    std::wstring* done = new std::wstring(host);
-    std::thread([host, p, main, done]() {
-        std::vector<unsigned char> d;
-        std::wstring err;
-        if (WxHttpGet(L"https://" + host + L"/favicon.ico", L"Docsy/1.0", d, err) && !d.empty())
-            WxWriteFile(p, d.data(), d.size());
-        else
-            WxWriteFile(p + L".none", (const unsigned char*)"x", 1);
-        if (!PostMessageW(main, WM_APP + 9, 0, (LPARAM)done)) delete done;   // the window is gone:
-    }).detach();                                       // the next launch's load reads the cache
+    b.icoTried = true;
+    EnsureHostFavicon(host);
 }
 
 // ---- the bar's rows ------------------------------------------------------
@@ -417,6 +473,37 @@ static void BmTileDisc(Gdiplus::Graphics& gx, HDC dc, const RECT& rc, const std:
     SelectObject(dc, g_webEditFont ? g_webEditFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
     SetTextColor(dc, wvb::Ink);
     DrawTextW(dc, ch, 1, (RECT*)&rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+static void BmDrawFavicon(Gdiplus::Graphics& gx, HDC dc, const RECT& r, const std::wstring& url, const std::wstring& title) {
+    std::wstring host = BmHostOf(url);
+    if (!host.empty()) {
+        Gdiplus::Bitmap* bmp = nullptr;
+        auto it = g_favCache.find(host);
+        if (it != g_favCache.end()) {
+            bmp = it->second;
+        } else {
+            std::wstring p = BmFavPath(host);
+            if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                bmp = WxLoadIcon(p);
+                if (!bmp) {
+                    DeleteFileW(p.c_str());
+                    EnsureHostFavicon(host);
+                } else {
+                    g_favCache[host] = bmp;
+                }
+            } else {
+                g_favCache[host] = nullptr;
+                EnsureHostFavicon(host);
+            }
+        }
+        if (bmp) {
+            gx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            gx.DrawImage(bmp, (int)r.left, (int)r.top, (int)(r.right - r.left), (int)(r.bottom - r.top));
+            return;
+        }
+    }
+    BmTileDisc(gx, dc, r, title, host.empty() ? title : host);
 }
 static void BmBarDraw(HDC dc, int w, int h) {
     if (!g_webOn || !g_webBarOn) return;

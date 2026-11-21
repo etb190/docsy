@@ -80,16 +80,24 @@ static void HistAdd(const std::wstring& url, const std::wstring& title) {
     if (url.empty() || url.rfind(L"about:", 0) == 0 || url.rfind(L"edge:", 0) == 0) return;
     HistLoad();
     time_t now = time(nullptr);
-    if (!g_history.empty() && g_history[0].url == url && (now - g_history[0].time < 10)) {
-        if (!title.empty()) g_history[0].title = title;
-        g_history[0].time = now;
-        HistSave();
+    if (!g_history.empty() && g_history[0].url == url && (now - g_history[0].time < 3)) {
+        if (!title.empty() && g_history[0].title != title) {
+            g_history[0].title = title;
+            HistSave();
+        }
         return;
     }
     HistEntry item;
     item.id = g_histNextId++;
     item.url = url;
-    item.title = title.empty() ? BmHostOf(url) : title;
+    if (!title.empty()) {
+        item.title = title;
+    } else {
+        std::wstring route = url;
+        if (route.rfind(L"https://", 0) == 0) route.erase(0, 8);
+        else if (route.rfind(L"http://", 0) == 0) route.erase(0, 7);
+        item.title = route.empty() ? BmHostOf(url) : route;
+    }
     item.time = now;
     g_history.insert(g_history.begin(), item);
     HistSave();
@@ -98,13 +106,17 @@ static void HistAdd(const std::wstring& url, const std::wstring& title) {
 static void HistUpdateTitle(const std::wstring& url, const std::wstring& title) {
     if (url.empty() || title.empty()) return;
     HistLoad();
-    for (size_t i = 0; i < g_history.size() && i < 10; i++) {
+    bool updated = false;
+    for (size_t i = 0; i < g_history.size() && i < 20; i++) {
         if (g_history[i].url == url) {
-            g_history[i].title = title;
-            HistSave();
+            if (g_history[i].title != title) {
+                g_history[i].title = title;
+                updated = true;
+            }
             break;
         }
     }
+    if (updated) HistSave();
 }
 
 static void HistClear() {
@@ -133,20 +145,7 @@ static std::wstring HistFormatRelative(time_t diff) {
 }
 
 static void HistDrawIcon(Gdiplus::Graphics& gx, HDC dc, const RECT& r, const std::wstring& url, const std::wstring& title) {
-    std::wstring host = BmHostOf(url);
-    if (!host.empty()) {
-        std::wstring p = BmFavPath(host);
-        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            Gdiplus::Bitmap* ico = WxLoadIcon(p);
-            if (ico) {
-                gx.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-                gx.DrawImage(ico, (int)r.left, (int)r.top, (int)(r.right - r.left), (int)(r.bottom - r.top));
-                delete ico;
-                return;
-            }
-        }
-    }
-    BmTileDisc(gx, dc, r, title, host.empty() ? title : host);
+    BmDrawFavicon(gx, dc, r, url, title);
 }
 
 // Forward declaration
@@ -244,12 +243,20 @@ static void HistPopPaint(HDC dc, int w, int h) {
             RECT titR{ tx, rc.top + (int)(4 * g.dpi), tright, rc.top + (int)(22 * g.dpi) };
             SelectObject(dc, ft);
             SetTextColor(dc, wvb::Ink);
-            DrawTextW(dc, e.title.c_str(), -1, &titR, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            std::wstring host = BmHostOf(e.url);
+            std::wstring dispTitle = e.title;
+            if (dispTitle.empty() || dispTitle == host) {
+                std::wstring clean = e.url;
+                if (clean.rfind(L"https://", 0) == 0) clean.erase(0, 8);
+                else if (clean.rfind(L"http://", 0) == 0) clean.erase(0, 7);
+                dispTitle = clean;
+            }
+            DrawTextW(dc, dispTitle.c_str(), -1, &titR, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
             RECT subR{ tx, rc.top + (int)(22 * g.dpi), tright, rc.bottom - (int)(3 * g.dpi) };
             SelectObject(dc, fs);
             SetTextColor(dc, wvb::InkDim);
-            std::wstring sub = BmHostOf(e.url) + L" \u2022 " + HistFormatRelative(now - e.time);
+            std::wstring sub = host + L" \u2022 " + HistFormatRelative(now - e.time);
             DrawTextW(dc, sub.c_str(), -1, &subR, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
     }
@@ -469,6 +476,11 @@ struct HistWindowState {
 };
 static HistWindowState g_hwin;
 
+static void HistNotifyRepaint() {
+    if (g_hpop.h) InvalidateRect(g_hpop.h, nullptr, FALSE);
+    if (g_hwin.h) InvalidateRect(g_hwin.h, nullptr, FALSE);
+}
+
 static void HistWinClose() {
     if (g_hwin.h) {
         HWND hw = g_hwin.h;
@@ -656,13 +668,22 @@ static void HistWinPaint(HDC dc, int w, int h) {
             int tright = rc.right - (hot ? (int)(40 * g.dpi) : (int)(14 * g.dpi));
             int avail = tright - tx;
 
+            std::wstring host = BmHostOf(e.url);
+            std::wstring dispTitle = e.title;
+            if (dispTitle.empty() || dispTitle == host) {
+                std::wstring clean = e.url;
+                if (clean.rfind(L"https://", 0) == 0) clean.erase(0, 8);
+                else if (clean.rfind(L"http://", 0) == 0) clean.erase(0, 7);
+                dispTitle = clean;
+            }
+
             SelectObject(dc, rowF);
             SIZE sz{};
-            GetTextExtentPoint32W(dc, e.title.c_str(), (int)e.title.size(), &sz);
+            GetTextExtentPoint32W(dc, dispTitle.c_str(), (int)dispTitle.size(), &sz);
             int titleW = std::min((int)sz.cx, (int)(avail * 0.55));
             RECT titR{ tx, rc.top, tx + titleW, rc.bottom };
             SetTextColor(dc, wvb::Ink);
-            DrawTextW(dc, e.title.c_str(), -1, &titR, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            DrawTextW(dc, dispTitle.c_str(), -1, &titR, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
             int ux = tx + titleW + (int)(14 * g.dpi);
             if (ux < tright) {

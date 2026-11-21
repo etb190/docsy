@@ -224,11 +224,21 @@ static void WebStripPaint(HDC dc, int w, int h) {
         return;
     }
     WebTab* t = WebCur();
+    // the favicon at the capsule's left
+    if (t && !t->url.empty() && t->url != L"about:blank" && t->url.rfind(L"about:", 0) != 0) {
+        int is = (int)(16 * g.dpi);
+        int ix = (int)g_webOmni.left + TABF(10);
+        int iy = (int)g_webOmni.top + ((int)(g_webOmni.bottom - g_webOmni.top) - is) / 2;
+        RECT ir{ ix, iy, ix + is, iy + is };
+        Gdiplus::Graphics gx(dc);
+        gx.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        BmDrawFavicon(gx, dc, ir, t->url, t->title);
+    }
     // the padlock: hugging the centered site name while idle, pinned to the
     // field's left edge while it is being edited; only secure pages wear one
     bool secure = t && t->url.rfind(L"https://", 0) == 0;
     if (secure) {
-        int lockX = (int)g_webOmni.left + TABF(14);
+        int lockX = (int)g_webOmni.left + TABF(32);
         if (g_wedit) {                                 // the lock follows the centered text, idle or editing
             wchar_t tx[512] = L"";
             int len = GetWindowTextW(g_wedit, tx, 512);
@@ -237,7 +247,7 @@ static void WebStripPaint(HDC dc, int w, int h) {
                 SIZE sz{}; GetTextExtentPoint32W(dc, tx, len, &sz);
                 SelectObject(dc, of0);
                 int cx = (int)(g_webOmni.left + g_webOmni.right) / 2;
-                lockX = max((int)g_webOmni.left + TABF(14), cx - (int)sz.cx / 2 - TABF(18));
+                lockX = max((int)g_webOmni.left + TABF(32), cx - (int)sz.cx / 2 - TABF(18));
             }
         }
         SelectObject(dc, WebGlyphFont(12));
@@ -644,6 +654,18 @@ static void WebBarDraw(HDC dc, int w, int h) {
             int a0 = (int)((GetTickCount64() / 6) % 360);
             Gdiplus::Pen pen(Gdiplus::Color(255, 0x22, 0xbb, 0x56), 1.6f * (float)g.dpi);
             gs.DrawArc(&pen, cx - rr, cy - rr, 2 * rr, 2 * rr, (Gdiplus::REAL)a0, 270.0f);
+        } else {
+            int is = (int)(16 * g.dpi);
+            int ix = fl + TABF(10);
+            int iy = ft + (G.faceH - is) / 2;
+            RECT ir{ ix, iy, ix + is, iy + is };
+            if (t.url.empty() || t.url == L"about:blank") {
+                SelectObject(dc, WebGlyphFont(12));
+                SetTextColor(dc, wvb::InkDim);
+                DrawTextW(dc, L"\uE774", -1, &ir, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                BmDrawFavicon(gs, dc, ir, t.url, t.title);
+            }
         }
         std::wstring ttl = t.title;
         if (ttl.empty()) ttl = WebHostOf(t.url);
@@ -1036,6 +1058,8 @@ static void WebEnsureController(int i) {
                             if (navOk) {
                                 WxLogf(L"nav: done %s", t->url.c_str());
                                 HistAdd(t->url, t->title);
+                                std::wstring host = BmHostOf(t->url);
+                                if (!host.empty()) EnsureHostFavicon(host);
                             } else {
                                 COREWEBVIEW2_WEB_ERROR_STATUS es = COREWEBVIEW2_WEB_ERROR_STATUS_UNKNOWN;
                                 if (a) a->get_WebErrorStatus(&es);
@@ -1056,7 +1080,13 @@ static void WebEnsureController(int i) {
                             if (!t || !s) return S_OK;
                             LPWSTR u = nullptr;
                             if (SUCCEEDED(s->get_Source(&u)) && u) {
+                                std::wstring prev = t->url;
                                 t->url = u; CoTaskMemFree(u);
+                                if (!t->url.empty() && t->url != prev) {
+                                    HistAdd(t->url, t->title);
+                                    std::wstring host = BmHostOf(t->url);
+                                    if (!host.empty()) EnsureHostFavicon(host);
+                                }
                             }
                             WebRepaintChrome(); WebSyncOmnibox();
                             return S_OK;
@@ -1077,7 +1107,20 @@ static void WebEnsureController(int i) {
                         }).Get(), &t->tkTitle);
                 t->web->add_HistoryChanged(    // HistoryChanged rides the base interface
                     Microsoft::WRL::Callback<ICoreWebView2HistoryChangedEventHandler>(
-                        [id](ICoreWebView2*, IUnknown*) -> HRESULT {
+                        [id](ICoreWebView2* s, IUnknown*) -> HRESULT {
+                            WebTab* t = WebTabById(id);
+                            if (t && s) {
+                                LPWSTR u = nullptr;
+                                if (SUCCEEDED(s->get_Source(&u)) && u) {
+                                    std::wstring curUrl = u; CoTaskMemFree(u);
+                                    if (!curUrl.empty() && curUrl != t->url) {
+                                        t->url = curUrl;
+                                        HistAdd(t->url, t->title);
+                                        std::wstring host = BmHostOf(t->url);
+                                        if (!host.empty()) EnsureHostFavicon(host);
+                                    }
+                                }
+                            }
                             WebHistorySync(id);
                             return S_OK;
                         }).Get(), &t->tkHist);

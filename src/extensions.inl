@@ -349,13 +349,30 @@ static std::wstring WxPickIcon(const crxk::J* v) {          // a path, or a size
 }
 static Gdiplus::Bitmap* WxLoadIcon(const std::wstring& path) {   // decoded into memory: no file lock left behind
     Gdiplus::Bitmap* src = Gdiplus::Bitmap::FromFile(path.c_str());
-    if (!src) return nullptr;
-    if (src->GetLastStatus() != Gdiplus::Ok || src->GetWidth() == 0 || src->GetHeight() == 0) { delete src; return nullptr; }
-    UINT w = src->GetWidth(), h = src->GetHeight();
-    Gdiplus::Bitmap* c = new Gdiplus::Bitmap((INT)w, (INT)h, PixelFormat32bppPARGB);
-    { Gdiplus::Graphics gs(c); gs.SetCompositingMode(Gdiplus::CompositingModeSourceCopy); gs.DrawImage(src, 0, 0, (INT)w, (INT)h); }
-    delete src;
-    return c;
+    if (src && src->GetLastStatus() == Gdiplus::Ok && src->GetWidth() > 0 && src->GetHeight() > 0) {
+        UINT w = src->GetWidth(), h = src->GetHeight();
+        Gdiplus::Bitmap* c = new Gdiplus::Bitmap((INT)w, (INT)h, PixelFormat32bppPARGB);
+        { Gdiplus::Graphics gs(c); gs.SetCompositingMode(Gdiplus::CompositingModeSourceCopy); gs.DrawImage(src, 0, 0, (INT)w, (INT)h); }
+        delete src;
+        return c;
+    }
+    if (src) { delete src; src = nullptr; }
+
+    // Fallback: try LoadImageW for .ico files that GDI+ FromFile choked on
+    HICON hIco = (HICON)LoadImageW(nullptr, path.c_str(), IMAGE_ICON, 0, 0, LR_LOADFROMFILE);
+    if (hIco) {
+        Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromHICON(hIco);
+        DestroyIcon(hIco);
+        if (bm && bm->GetLastStatus() == Gdiplus::Ok && bm->GetWidth() > 0 && bm->GetHeight() > 0) {
+            UINT w = bm->GetWidth(), h = bm->GetHeight();
+            Gdiplus::Bitmap* c = new Gdiplus::Bitmap((INT)w, (INT)h, PixelFormat32bppPARGB);
+            { Gdiplus::Graphics gs(c); gs.SetCompositingMode(Gdiplus::CompositingModeSourceCopy); gs.DrawImage(bm, 0, 0, (INT)w, (INT)h); }
+            delete bm;
+            return c;
+        }
+        if (bm) delete bm;
+    }
+    return nullptr;
 }
 static bool WxLoadInfo(WebExt& e) {
     std::string txt; crxk::J m;
