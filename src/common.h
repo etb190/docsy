@@ -1070,6 +1070,7 @@ static int WebBarH();                    // the bar's height (bookmarks.inl)
 static int WEBSTRIPH() { return g_webOn ? (int)(44 * g.dpi) + WebBarH() : 0; }   // the toolbar band (Safari)
 static HWND g_wtool = nullptr;           // the reader's own top toolbar, carried into browser mode
 static HWND g_etool = nullptr;           // the text editor toolbar
+static int EDITOR_TOOL_H() { return (int)(38 * g.dpi); } // compact ribbon matching Avalanche
 static int WEBTOOLH() { return g_webOn ? TBH() : 0; }   // ...with one button: back to the PDF reader
 static int WEBTABH() { return (int)(34 * g.dpi); }   // the tab band: the reader's 3px inset + 29px face + 1px foot
 static void WebToggle(bool on);           // the Web / Reader buttons
@@ -1140,7 +1141,7 @@ static const wchar_t* const TbLabel[TB_COUNT] = {
     L"Transform", L"Clear All", L"Find Text"
 };
 static const wchar_t* const TbGlyph[TB_COUNT] = {
-    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE70F",
+    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE70B",
     L"\uE8B0", L"\uE8D2", L"\uE7E6", L"\uE738", L"\uE739", L"\uED63",
     L"", L"\uED62", L"\uE721"
 };   // Transform carries its composed icon, drawn in BarDraw
@@ -1610,7 +1611,7 @@ static void WebToolDraw(HDC dc, int w, int h) {
         RECT gr{ b.left, y0, b.right, y0 + gh };
         RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
         SetBkMode(dc, TRANSPARENT);
-        const wchar_t* glyph = (idx == 0) ? L"\uE8F1" : L"\uE70F";
+        const wchar_t* glyph = (idx == 0) ? L"\uE8F1" : L"\uE70B";
         SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
         SetTextColor(dc, RGB(16, 16, 16));
         RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };

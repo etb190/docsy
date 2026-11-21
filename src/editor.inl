@@ -28,7 +28,7 @@ static bool g_edInvert = false;
 
 // Toolbar buttons
 enum {
-    EB_PDF, EB_WEB,
+    EB_WEB, EB_PDF,
     EB_SEP1,
     EB_OPEN, EB_SAVE,
     EB_SEP2,
@@ -39,10 +39,11 @@ enum {
     EB_BOLD, EB_ITALIC, EB_UNDERLINE, EB_STRIKE,
     EB_SEP5,
     EB_H1, EB_H2,
-    EB_BULLET, EB_NUMBER, EB_QUOTE,
     EB_SEP6,
-    EB_ALIGN_L, EB_ALIGN_C, EB_ALIGN_J,
+    EB_BULLET, EB_NUMBER, EB_QUOTE,
     EB_SEP7,
+    EB_ALIGN_L, EB_ALIGN_C, EB_ALIGN_J,
+    EB_SEP8,
     EB_LINK, EB_IMAGE, EB_INVERT,
     EB_COUNT
 };
@@ -262,16 +263,29 @@ static void EditorHandleMessage(const wchar_t* json) {
     }
 }
 
-// Load embedded HTML template from RCDATA 301
+static void EditorRefocus() {
+    if (g_edCtr) {
+        g_edCtr->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    }
+}
+
+// Load embedded HTML template from RCDATA 301 (deflated or raw)
 static std::wstring EditorGetHtml() {
     HRSRC hs = FindResourceW(g.hinst, MAKEINTRESOURCEW(301), (LPCWSTR)RT_RCDATA);
     if (!hs) return L"";
     HGLOBAL hg = LoadResource(g.hinst, hs);
     if (!hg) return L"";
-    const char* data = (const char*)LockResource(hg);
+    const unsigned char* data = (const unsigned char*)LockResource(hg);
     DWORD len = SizeofResource(g.hinst, hs);
     if (!data || !len) return L"";
-    std::string s(data, len);
+
+    // Decompress deflated payload using crxk::Inflate (limit 2MB)
+    std::vector<unsigned char> decompressed;
+    if (crxk::Inflate(data, len, decompressed, 2 * 1024 * 1024) && !decompressed.empty()) {
+        std::string s((const char*)decompressed.data(), decompressed.size());
+        return WxW(s);
+    }
+    std::string s((const char*)data, len);
     return WxW(s);
 }
 
@@ -309,6 +323,7 @@ static void EditorEnsureInit() {
                     g_edCtr->put_IsVisible(TRUE);
                     RECT r; GetClientRect(g.view, &r);
                     g_edCtr->put_Bounds(r);
+                    EditorRefocus();
                 } else {
                     g_edCtr->put_IsVisible(FALSE);
                 }
@@ -333,6 +348,7 @@ static void EditorToggle(bool on) {
             g_edCtr->put_IsVisible(TRUE);
             RECT r; GetClientRect(g.view, &r);
             g_edCtr->put_Bounds(r);
+            EditorRefocus();
         }
     } else {
         if (g_edCtr) g_edCtr->put_IsVisible(FALSE);
@@ -349,67 +365,41 @@ static void EditorToggle(bool on) {
     UpdateTitle();
 }
 
-// Layout calculation for ribbon buttons
+static int EditorBtnWidth(int i) {
+    switch (i) {
+    case EB_SEP1: case EB_SEP2: case EB_SEP3: case EB_SEP4:
+    case EB_SEP5: case EB_SEP6: case EB_SEP7: case EB_SEP8:
+        return (int)(10 * g.dpi);
+    case EB_FONT:
+        return (int)(125 * g.dpi);
+    case EB_SIZE:
+        return (int)(32 * g.dpi);
+    case EB_SHRINK: case EB_GROW:
+        return (int)(24 * g.dpi);
+    default:
+        return (int)(28 * g.dpi);
+    }
+}
+
+// Layout calculation for ribbon buttons - centered like Avalanche
 static RECT EditorBtnRect(int id, int w, int h) {
-    int curX = (int)(6 * g.dpi);
-    int btnH = (int)(32 * g.dpi);
+    int btnH = (int)(28 * g.dpi);
     int yMid = (h - btnH) / 2;
-    int tallH = TbBtnH();
-    int yTall = (int)(2 * g.dpi);
+    int gap = (int)(2 * g.dpi);
+
+    int totalW = 0;
+    for (int i = 0; i < EB_COUNT; i++) {
+        totalW += EditorBtnWidth(i);
+        if (i < EB_COUNT - 1) totalW += gap;
+    }
+
+    int curX = max((int)(8 * g.dpi), (w - totalW) / 2);
 
     for (int i = 0; i < EB_COUNT; i++) {
-        int bw = (int)(32 * g.dpi);
-        bool isSep = false;
-        bool isTall = false;
-
-        switch (i) {
-        case EB_PDF:
-        case EB_WEB:
-            bw = (int)(54 * g.dpi);
-            isTall = true;
-            break;
-        case EB_SEP1:
-        case EB_SEP2:
-        case EB_SEP3:
-        case EB_SEP4:
-        case EB_SEP5:
-        case EB_SEP6:
-        case EB_SEP7:
-            bw = (int)(12 * g.dpi);
-            isSep = true;
-            break;
-        case EB_FONT:
-            bw = (int)(110 * g.dpi);
-            break;
-        case EB_SHRINK:
-        case EB_GROW:
-            bw = (int)(26 * g.dpi);
-            break;
-        case EB_SIZE:
-            bw = (int)(30 * g.dpi);
-            break;
-        case EB_BOLD:
-        case EB_ITALIC:
-        case EB_UNDERLINE:
-        case EB_STRIKE:
-        case EB_H1:
-        case EB_H2:
-        case EB_BULLET:
-        case EB_NUMBER:
-        case EB_QUOTE:
-        case EB_ALIGN_L:
-        case EB_ALIGN_C:
-        case EB_ALIGN_J:
-        case EB_LINK:
-        case EB_IMAGE:
-        case EB_INVERT:
-            bw = (int)(32 * g.dpi);
-            break;
-        }
-
-        RECT r{ curX, isTall ? yTall : yMid, curX + bw, isTall ? (yTall + tallH) : (yMid + btnH) };
+        int bw = EditorBtnWidth(i);
+        RECT r{ curX, yMid, curX + bw, yMid + btnH };
         if (i == id) return r;
-        curX += bw + (isSep ? 0 : (int)(3 * g.dpi));
+        curX += bw + gap;
     }
     return RECT{ 0, 0, 0, 0 };
 }
@@ -440,13 +430,13 @@ static void EditorToolDraw(HDC dc, int w, int h) {
 
         // Separator
         if (i == EB_SEP1 || i == EB_SEP2 || i == EB_SEP3 || i == EB_SEP4
-            || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7) {
+            || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7 || i == EB_SEP8) {
             int cx = (r.left + r.right) / 2;
-            int sy0 = (h - (int)(22 * g.dpi)) / 2;
-            HPEN sp = CreatePen(PS_SOLID, 1, RGB(0x45, 0x45, 0x48));
+            int sy0 = (h - (int)(18 * g.dpi)) / 2;
+            HPEN sp = CreatePen(PS_SOLID, 1, RGB(0x45, 0x48, 0x50));
             HGDIOBJ osp = SelectObject(dc, sp);
             MoveToEx(dc, cx, sy0, nullptr);
-            LineTo(dc, cx, sy0 + (int)(22 * g.dpi));
+            LineTo(dc, cx, sy0 + (int)(18 * g.dpi));
             SelectObject(dc, osp);
             DeleteObject(sp);
             continue;
@@ -456,7 +446,6 @@ static void EditorToolDraw(HDC dc, int w, int h) {
         bool pr = (g_edDown == i && hot);
         bool active = false;
 
-        // Check if format is toggled on
         switch (i) {
         case EB_BOLD: active = g_edBold; break;
         case EB_ITALIC: active = g_edItalic; break;
@@ -473,10 +462,10 @@ static void EditorToolDraw(HDC dc, int w, int h) {
         case EB_INVERT: active = g_edInvert; break;
         }
 
-        // Draw tile background
+        // Button background (subtle tile, no thick borders)
         if (active || hot || pr) {
             Gdiplus::GraphicsPath p;
-            float rr = 4.0f * (float)g.dpi;
+            float rr = 3.0f * (float)g.dpi;
             float fx = (float)r.left, fy = (float)r.top;
             float fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
             p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
@@ -484,59 +473,75 @@ static void EditorToolDraw(HDC dc, int w, int h) {
             p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
             p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
             p.CloseFigure();
+
             Gdiplus::Color col;
-            if (active) col = Gdiplus::Color(255, 0x2a, 0x48, 0x6e);
-            else if (pr) col = Gdiplus::Color(255, 0x30, 0x30, 0x30);
-            else col = Gdiplus::Color(255, 0x40, 0x40, 0x40);
+            if (active) col = Gdiplus::Color(255, 0x35, 0x3a, 0x44);
+            else if (pr) col = Gdiplus::Color(255, 0x26, 0x29, 0x30);
+            else col = Gdiplus::Color(255, 0x3c, 0x41, 0x4c);
+
             Gdiplus::SolidBrush fbr(col);
             gs.FillPath(&fbr, &p);
-            if (active) {
-                Gdiplus::Pen apen(Gdiplus::Color(255, 0x38, 0x84, 0xff), 1.0f);
-                gs.DrawPath(&apen, &p);
-            }
         }
 
-        // Mode switch buttons (PDF, Web): glyph above caption
-        if (i == EB_PDF || i == EB_WEB) {
-            int capH = 0;
-            {
-                RECT mc{ 0, 0, 0, 0 };
-                HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
-                DrawTextW(dc, i == EB_PDF ? L"PDF" : L"Web", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
-                SelectObject(dc, of);
-                capH = mc.bottom - mc.top;
+        COLORREF ink;
+        if (active) ink = RGB(0x38, 0x84, 0xff);       // vibrant blue for active tool
+        else if (hot || pr) ink = RGB(0xf2, 0xf4, 0xf8);
+        else ink = RGB(0xc4, 0xc8, 0xd0);
+
+        // Vector alignment icons matching Avalanche
+        if (i == EB_ALIGN_L || i == EB_ALIGN_C || i == EB_ALIGN_J) {
+            HBRUSH br = CreateSolidBrush(ink);
+            int barH = max(1, (int)(2 * g.dpi));
+            int lineW = (int)(15 * g.dpi);
+            int cy = (r.top + r.bottom) / 2;
+            int y0 = cy - (int)(6 * g.dpi);
+            int stepY = (int)(4 * g.dpi);
+
+            int w4[4];
+            if (i == EB_ALIGN_L) {
+                w4[0] = (int)(15 * g.dpi);
+                w4[1] = (int)(10 * g.dpi);
+                w4[2] = (int)(13 * g.dpi);
+                w4[3] = (int)(7 * g.dpi);
+                int bx0 = r.left + ((r.right - r.left) - lineW) / 2;
+                for (int k = 0; k < 4; k++) {
+                    int by = y0 + k * stepY;
+                    RECT barR{ bx0, by, bx0 + w4[k], by + barH };
+                    FillRect(dc, &barR, br);
+                }
+            } else if (i == EB_ALIGN_C) {
+                w4[0] = (int)(15 * g.dpi);
+                w4[1] = (int)(9 * g.dpi);
+                w4[2] = (int)(13 * g.dpi);
+                w4[3] = (int)(7 * g.dpi);
+                int midX = (r.left + r.right) / 2;
+                for (int k = 0; k < 4; k++) {
+                    int bx = midX - w4[k] / 2;
+                    int by = y0 + k * stepY;
+                    RECT barR{ bx, by, bx + w4[k], by + barH };
+                    FillRect(dc, &barR, br);
+                }
+            } else { // EB_ALIGN_J
+                int bx0 = r.left + ((r.right - r.left) - lineW) / 2;
+                for (int k = 0; k < 4; k++) {
+                    int by = y0 + k * stepY;
+                    RECT barR{ bx0, by, bx0 + lineW, by + barH };
+                    FillRect(dc, &barR, br);
+                }
             }
-            int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);
-            int colH = gh + gap + capH;
-            int avail = (int)(r.bottom - r.top) - colH;
-            int y0 = r.top + max(0, avail) / 2;
-            RECT gr{ r.left, y0, r.right, y0 + gh };
-            RECT cr{ r.left, y0 + gh + gap, r.right, y0 + gh + gap + capH };
-            const wchar_t* glyph = (i == EB_PDF) ? L"\uE8F1" : L"\uE774";
-            SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
-            SetTextColor(dc, RGB(16, 16, 16));
-            RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
-            DrawTextW(dc, glyph, -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-            DrawTextW(dc, glyph, -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
-            SetTextColor(dc, RGB(16, 16, 16));
-            RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
-            DrawTextW(dc, i == EB_PDF ? L"PDF" : L"Web", -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-            DrawTextW(dc, i == EB_PDF ? L"PDF" : L"Web", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DeleteObject(br);
             continue;
         }
 
         // Font Dial
         if (i == EB_FONT) {
             SelectObject(dc, CaptionFont(g_tbcap, 13, false, L"Segoe UI"));
-            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-            RECT tr{ r.left + (int)(8 * g.dpi), r.top, r.right - (int)(20 * g.dpi), r.bottom };
+            SetTextColor(dc, ink);
+            RECT tr{ r.left + (int)(6 * g.dpi), r.top, r.right - (int)(18 * g.dpi), r.bottom };
             DrawTextW(dc, g_edFont.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-            SelectObject(dc, CaptionFont(g_tbglyph, 11, false, L"Segoe MDL2 Assets"));
-            SetTextColor(dc, RGB(0xaa, 0xaa, 0xaa));
-            RECT cr{ r.right - (int)(18 * g.dpi), r.top, r.right - (int)(4 * g.dpi), r.bottom };
+            SelectObject(dc, CaptionFont(g_tbglyph, 10, false, L"Segoe MDL2 Assets"));
+            SetTextColor(dc, RGB(0x9a, 0xa0, 0xaa));
+            RECT cr{ r.right - (int)(16 * g.dpi), r.top, r.right - (int)(3 * g.dpi), r.bottom };
             DrawTextW(dc, L"\uE70D", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             continue;
         }
@@ -544,50 +549,48 @@ static void EditorToolDraw(HDC dc, int w, int h) {
         // Font Size
         if (i == EB_SIZE) {
             SelectObject(dc, CaptionFont(g_tbcap, 13, false, L"Segoe UI"));
-            SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+            SetTextColor(dc, ink);
             std::wstring szStr = std::to_wstring(g_edSize);
             DrawTextW(dc, szStr.c_str(), -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             continue;
         }
 
-        // Standard icon or letter buttons
-        static HFONT g_edF_B = nullptr, g_edF_I = nullptr, g_edF_U = nullptr, g_edF_S = nullptr;
-        static HFONT g_edF_H1 = nullptr, g_edF_H2 = nullptr, g_edF_Quote = nullptr, g_edF_Bullet = nullptr, g_edF_Num = nullptr;
+        // Icon and letter buttons - clean Segoe UI and Segoe MDL2 Assets
+        static HFONT s_edF_B = nullptr, s_edF_I = nullptr, s_edF_U = nullptr, s_edF_S = nullptr;
+        static HFONT s_edF_H1 = nullptr, s_edF_H2 = nullptr, s_edF_Txt = nullptr;
         HFONT btnF = nullptr;
         std::wstring text;
-        COLORREF ink = active ? RGB(0x38, 0x84, 0xff) : RGB(0xe0, 0xe0, 0xe0);
 
         switch (i) {
-        case EB_OPEN: text = L"\uE8DA"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
-        case EB_SAVE: text = L"\uE74E"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
-        case EB_UNDO: text = L"\uE7A7"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
-        case EB_REDO: text = L"\uE7A6"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
-        case EB_SHRINK: text = L"\uE738"; btnF = CaptionFont(g_tbglyph, 13, false, L"Segoe MDL2 Assets"); break;
-        case EB_GROW: text = L"\uE710"; btnF = CaptionFont(g_tbglyph, 13, false, L"Segoe MDL2 Assets"); break;
-        case EB_BOLD: text = L"B"; btnF = CaptionFont(g_edF_B, 16, true, L"Georgia"); break;
+        case EB_WEB: text = L"\uE774"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
+        case EB_PDF: text = L"\uE8A5"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
+        case EB_OPEN: text = L"\uE8DA"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
+        case EB_SAVE: text = L"\uE74E"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
+        case EB_UNDO: text = L"\uE7A7"; btnF = CaptionFont(g_tbglyph, 13, false, L"Segoe MDL2 Assets"); break;
+        case EB_REDO: text = L"\uE7A6"; btnF = CaptionFont(g_tbglyph, 13, false, L"Segoe MDL2 Assets"); break;
+        case EB_SHRINK: text = L"\uE738"; btnF = CaptionFont(g_tbglyph, 12, false, L"Segoe MDL2 Assets"); break;
+        case EB_GROW: text = L"\uE710"; btnF = CaptionFont(g_tbglyph, 12, false, L"Segoe MDL2 Assets"); break;
+        case EB_BOLD: text = L"B"; btnF = CaptionFont(s_edF_B, 13, true, L"Segoe UI"); break;
         case EB_ITALIC: {
-            if (!g_edF_I) g_edF_I = CreateFontW(-(int)std::lround(16 * g.dpi), 0, 0, 0, FW_NORMAL, TRUE, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Georgia");
-            text = L"I"; btnF = g_edF_I; break;
+            if (!s_edF_I) s_edF_I = CreateFontW(-(int)std::lround(13 * g.dpi), 0, 0, 0, FW_NORMAL, TRUE, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            text = L"I"; btnF = s_edF_I; break;
         }
         case EB_UNDERLINE: {
-            if (!g_edF_U) g_edF_U = CreateFontW(-(int)std::lround(16 * g.dpi), 0, 0, 0, FW_NORMAL, 0, TRUE, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Georgia");
-            text = L"U"; btnF = g_edF_U; break;
+            if (!s_edF_U) s_edF_U = CreateFontW(-(int)std::lround(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, TRUE, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            text = L"U"; btnF = s_edF_U; break;
         }
         case EB_STRIKE: {
-            if (!g_edF_S) g_edF_S = CreateFontW(-(int)std::lround(16 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, TRUE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Georgia");
-            text = L"S"; btnF = g_edF_S; break;
+            if (!s_edF_S) s_edF_S = CreateFontW(-(int)std::lround(13 * g.dpi), 0, 0, 0, FW_NORMAL, 0, 0, TRUE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            text = L"S"; btnF = s_edF_S; break;
         }
-        case EB_H1: text = L"H1"; btnF = CaptionFont(g_edF_H1, 14, true, L"Georgia"); break;
-        case EB_H2: text = L"H2"; btnF = CaptionFont(g_edF_H2, 12, true, L"Georgia"); break;
-        case EB_BULLET: text = L"\u2022"; btnF = CaptionFont(g_edF_Bullet, 18, true, L"Georgia"); break;
-        case EB_NUMBER: text = L"1."; btnF = CaptionFont(g_edF_Num, 13, true, L"Segoe UI"); break;
-        case EB_QUOTE: text = L"\u201C"; btnF = CaptionFont(g_edF_Quote, 18, true, L"Georgia"); break;
-        case EB_ALIGN_L: text = L"\uE8E4"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
-        case EB_ALIGN_C: text = L"\uE8E3"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
-        case EB_ALIGN_J: text = L"\uE8E2"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
-        case EB_LINK: text = L"\uE71B"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
-        case EB_IMAGE: text = L"\uEB9F"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
-        case EB_INVERT: text = L"\uE708"; btnF = CaptionFont(g_tbglyph, 15, false, L"Segoe MDL2 Assets"); break;
+        case EB_H1: text = L"H1"; btnF = CaptionFont(s_edF_H1, 12, true, L"Segoe UI"); break;
+        case EB_H2: text = L"H2"; btnF = CaptionFont(s_edF_H2, 11, true, L"Segoe UI"); break;
+        case EB_BULLET: text = L"\u2022"; btnF = CaptionFont(s_edF_Txt, 14, true, L"Segoe UI"); break;
+        case EB_NUMBER: text = L"1."; btnF = CaptionFont(s_edF_Txt, 12, true, L"Segoe UI"); break;
+        case EB_QUOTE: text = L"\u201C"; btnF = CaptionFont(s_edF_Txt, 14, true, L"Segoe UI"); break;
+        case EB_LINK: text = L"\uE71B"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
+        case EB_IMAGE: text = L"\uEB9F"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
+        case EB_INVERT: text = L"\uE708"; btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets"); break;
         }
 
         if (btnF && !text.empty()) {
@@ -681,6 +684,7 @@ static void EditorClick(int id, HWND h, const RECT& r) {
         EditorToggleInvert();
         break;
     }
+    EditorRefocus();
 }
 
 static HDC g_etooldc = nullptr;
@@ -725,7 +729,7 @@ static LRESULT CALLBACK EditorToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RECT cl; GetClientRect(h, &cl);
         int hot = -1;
         for (int i = 0; i < EB_COUNT; i++) {
-            if (i == EB_SEP1 || i == EB_SEP2 || i == EB_SEP3 || i == EB_SEP4 || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7 || i == EB_SIZE) continue;
+            if (i == EB_SEP1 || i == EB_SEP2 || i == EB_SEP3 || i == EB_SEP4 || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7 || i == EB_SEP8 || i == EB_SIZE) continue;
             RECT r = EditorBtnRect(i, cl.right, cl.bottom);
             if (PtInRect(&r, p)) { hot = i; break; }
         }
@@ -746,7 +750,7 @@ static LRESULT CALLBACK EditorToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT cl; GetClientRect(h, &cl);
         for (int i = 0; i < EB_COUNT; i++) {
-            if (i == EB_SEP1 || i == EB_SEP2 || i == EB_SEP3 || i == EB_SEP4 || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7 || i == EB_SIZE) continue;
+            if (i == EB_SEP1 || i == EB_SEP2 || i == EB_SEP3 || i == EB_SEP4 || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7 || i == EB_SEP8 || i == EB_SIZE) continue;
             RECT r = EditorBtnRect(i, cl.right, cl.bottom);
             if (PtInRect(&r, p)) {
                 SetCapture(h);
@@ -782,7 +786,7 @@ static LRESULT CALLBACK EditorToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             RECT cl; GetClientRect(h, &cl);
             for (int i = 0; i < EB_COUNT; i++) {
-                if (i == EB_SEP1 || i == EB_SEP2 || i == EB_SEP3 || i == EB_SEP4 || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7 || i == EB_SIZE) continue;
+                if (i == EB_SEP1 || i == EB_SEP2 || i == EB_SEP3 || i == EB_SEP4 || i == EB_SEP5 || i == EB_SEP6 || i == EB_SEP7 || i == EB_SEP8 || i == EB_SIZE) continue;
                 RECT r = EditorBtnRect(i, cl.right, cl.bottom);
                 if (PtInRect(&r, p)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));

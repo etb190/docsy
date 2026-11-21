@@ -23,7 +23,7 @@ static void LayoutMain() {
         }
     int cap0 = CAP();
     if (g_editOn) {
-        int th = TBH();
+        int th = EDITOR_TOOL_H();
         int ch = max(0, h - cap0 - th);
         if (g_etool) MoveWindow(g_etool, 0, cap0, w, th, TRUE);
         MoveWindow(g.view, 0, cap0 + th, w, ch, TRUE);
