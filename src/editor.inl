@@ -231,7 +231,7 @@ static void EditorHandleMessage(const wchar_t* json) {
         g_edItalic = m.get("i") ? m.get("i")->b : false;
         g_edUnderline = m.get("u") ? m.get("u")->b : false;
         g_edStrike = m.get("s") ? m.get("s")->b : false;
-        g_edHeader = m.get("h") ? (int)m.get("h")->num() : 0;
+        g_edHeader = m.get("h") ? (int)m.get("h")->d : 0;
         g_edQuote = m.get("quote") ? m.get("quote")->b : false;
         std::string lst = m.get("list") ? m.get("list")->str() : "";
         g_edList = (lst == "bullet") ? 1 : (lst == "ordered" ? 2 : 0);
