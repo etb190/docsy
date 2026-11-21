@@ -1264,6 +1264,7 @@ static void WebEnsureEnv() {
                 if (FAILED(hr) || !env) { g_webFail = true; WxLogf(L"env: creation failed 0x%08lX", (unsigned long)hr); WebRepaintChrome(); return S_OK; }
                 g_wvEnv = env;
                 for (int i = 0; i < (int)g_wt.size(); i++) WebEnsureController(i);
+                if (g_editOn) EditorEnsureInit();
                 WebRepaintChrome();
                 return S_OK;
             }).Get());
@@ -1477,6 +1478,7 @@ static void WebResizeDeb() {                       // a resize re-captures the v
 static void WebToggle(bool on) {
     if (on == g_webOn) return;
     if (on && g_sync) return;                      // the CI shots never browse
+    if (on && g_editOn) EditorToggle(false);
     g_webOn = on;
     if (g.side)                                    // the rail is the browser's own, closed until asked
         ShowWindow(g.side, on ? (g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE) : (g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE));

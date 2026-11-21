@@ -14,16 +14,54 @@ static void LayoutMain() {
     // owns it (the parent for whatever no child covers). The strips are thin
     // bands - a layout pass moves edges, never documents - so this stays a
     // few InvalidateRects, not a repaint.
-    struct Kid { HWND w; RECT was; } kids[7] = { { g.bar, {} }, { g_wtool, {} }, { g_wstrip, {} }, { g.side, {} }, { g.rail, {} }, { g.view, {} }, { g.status, {} } };
+    struct Kid { HWND w; RECT was; } kids[8] = { { g.bar, {} }, { g_wtool, {} }, { g_etool, {} }, { g_wstrip, {} }, { g.side, {} }, { g.rail, {} }, { g.view, {} }, { g.status, {} } };
     for (auto& k : kids)
         if (k.w) {
             GetWindowRect(k.w, &k.was);
             ScreenToClient(g.main, (POINT*)&k.was);
             ScreenToClient(g.main, ((POINT*)&k.was) + 1);
         }
+    int cap0 = CAP();
+    if (g_editOn) {
+        int th = TBH();
+        int ch = max(0, h - cap0 - th);
+        if (g_etool) MoveWindow(g_etool, 0, cap0, w, th, TRUE);
+        MoveWindow(g.view, 0, cap0 + th, w, ch, TRUE);
+        if (g_edCtr) {
+            RECT vr{ 0, 0, w, ch };
+            g_edCtr->put_Bounds(vr);
+        }
+        for (auto& k : kids) {
+            if (!k.w) continue;
+            RECT now; GetWindowRect(k.w, &now); ScreenToClient(g.main, (POINT*)&now);
+            ScreenToClient(g.main, ((POINT*)&now) + 1);
+            if (EqualRect(&k.was, &now)) continue;
+            RECT vac[4]; int nv = 0;
+            if (now.left > k.was.left)
+                vac[nv++] = { k.was.left, k.was.top, min(now.left, k.was.right), k.was.bottom };
+            if (now.right < k.was.right)
+                vac[nv++] = { max(now.right, k.was.left), k.was.top, k.was.right, k.was.bottom };
+            if (now.top > k.was.top)
+                vac[nv++] = { max(k.was.left, now.left), k.was.top,
+                              min(k.was.right, now.right), min(now.top, k.was.bottom) };
+            if (now.bottom < k.was.bottom)
+                vac[nv++] = { max(k.was.left, now.left), max(now.bottom, k.was.top),
+                              min(k.was.right, now.right), k.was.bottom };
+            for (int i = 0; i < nv; i++) {
+                RECT is;
+                for (auto& o : kids) {
+                    if (!o.w || o.w == k.w) continue;
+                    RECT o2; GetWindowRect(o.w, &o2); ScreenToClient(g.main, (POINT*)&o2);
+                    ScreenToClient(g.main, ((POINT*)&o2) + 1);
+                    if (IntersectRect(&is, &vac[i], &o2)) InvalidateRect(o.w, &is, FALSE);
+                }
+                InvalidateRect(g.main, &vac[i], FALSE);
+            }
+        }
+        return;
+    }
     int sw = g_webOn ? (g_webSide ? SW() : 0) : ((g.sideOn && DVF().n && !g.full) ? SW() : 0);   // the sidebar shows the FOCUSED
     int rw = RW();                              // pane's pages; the rail always rides between
-    int cap0 = CAP();
     int tl = WEBTOOLH();                        // browser mode: the reader's toolbar row, one button
     int cap = cap0 + tl;                        // everything below sits under caption + toolbar
     int tb = g_webOn ? WebBandH() : TBH();      // browser mode: the tab band - there only
@@ -168,6 +206,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                                  WS_CHILD | WS_VISIBLE,
                                  0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         g_wtool = CreateWindowExW(0, L"DocsyWebTool", nullptr,     // browser mode's reader toolbar
+                                  WS_CHILD, 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
+        g_etool = CreateWindowExW(0, L"DocsyEditorTool", nullptr,  // text editor toolbar
                                   WS_CHILD, 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);
         g_wstrip = CreateWindowExW(0, L"DocsyWebStrip", nullptr,   // the browser's Safari toolbar,
                                    WS_CHILD, 0, 0, 0, 0, h, nullptr, g.hinst, nullptr);   // hidden until Web

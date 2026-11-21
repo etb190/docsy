@@ -13,6 +13,7 @@
 #include "bookmarks.inl"
 #include "browser.inl"
 #include "history.inl"
+#include "editor.inl"
 #include "find_bar.inl"
 #include "sidebar.inl"
 #include "doc_info.inl"
@@ -98,6 +99,12 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     wtc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wtc.lpszClassName = L"DocsyWebTool";
     RegisterClassExW(&wtc);
+
+    WNDCLASSEXW etc{ sizeof etc };                  // text editor toolbar
+    etc.lpfnWndProc = EditorToolProc; etc.hInstance = hi;
+    etc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    etc.lpszClassName = L"DocsyEditorTool";
+    RegisterClassExW(&etc);
 
     WNDCLASSEXW xpc{ sizeof xpc };                  // an extension's popup window
     xpc.style = CS_DROPSHADOW;

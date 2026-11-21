@@ -732,6 +732,14 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     // clicks on the pages could not bring Docsy to the foreground.
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        if (g_editOn) {
+            RECT r; GetClientRect(h, &r);
+            HBRUSH br = CreateSolidBrush(RGB(0x2d, 0x30, 0x36));
+            FillRect(dc, &r, br);
+            DeleteObject(br);
+            EndPaint(h, &ps);
+            return 0;
+        }
         if (g_webOn) {                       // the browser owns the card: the view paints the
             WebCardPaint(dc, g.cw, g.ch);    // shared field, the rounded card's face and
             EndPaint(h, &ps);                // ring; the controller HWND renders the page,
@@ -862,6 +870,7 @@ static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         SendMessageW(g.main, m, wp, lp);     // swallow - a stray focus here once ate Del and
         return 0;                            // every other shortcut until the next edit
     case WM_LBUTTONDOWN: {
+        if (g_editOn) return 0;
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         if (g_webOn) { WebViewClick(p); return 0; }   // the fail card's download button, if any
         SetCapture(h);

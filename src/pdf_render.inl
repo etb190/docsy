@@ -1260,6 +1260,17 @@ static std::vector<std::wstring> g_dropQ;
 static std::vector<bool> g_dropPane;
 
 static void HandleDrop(HDROP d, HWND h) {        // the pane under the drop takes the files:
+    if (g_editOn) {
+        UINT n = DragQueryFileW(d, 0xFFFFFFFF, nullptr, 0);
+        if (n > 0) {
+            wchar_t f[MAX_PATH * 2];
+            if (DragQueryFileW(d, 0, f, (UINT)_countof(f))) {
+                EditorOpenFile(f);
+            }
+        }
+        DragFinish(d);
+        return;
+    }
     UINT n = DragQueryFileW(d, 0xFFFFFFFF, nullptr, 0);   // the view maps the point to its
     POINT p; DragQueryPoint(d, &p);              // pane, a drop on the sidebar or the frame
     bool b = FocusB();                           // goes to the pane the reader is working in

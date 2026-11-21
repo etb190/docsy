@@ -544,6 +544,10 @@ static HFONT g_uifont = nullptr, g_sidefont = nullptr;
 static HFONT g_glyphfont = nullptr, g_wordfont = nullptr;
 static bool g_webOn = false;             // the browser owns the window chrome (declared early:
                                          // the caption painter and the layout branch on it)
+static bool g_editOn = false;            // the text editor owns the window chrome
+static void EditorToggle(bool on);
+static void EditorOpenFile(const std::wstring& path);
+static void EditorEnsureInit();
 static HFONT g_tbglyph = nullptr, g_tbcap = nullptr; // toolbar: E721 at 20, the caption at Killer Sans 14
 
 static int PW(const DocState& D, int i) { return max(1, (int)std::lround(D.pw[i] * D.zoom * g.dpi)); }
@@ -1065,6 +1069,7 @@ static bool g_webBarOn = true;           // the bookmarks bar lives inside the s
 static int WebBarH();                    // the bar's height (bookmarks.inl)
 static int WEBSTRIPH() { return g_webOn ? (int)(44 * g.dpi) + WebBarH() : 0; }   // the toolbar band (Safari)
 static HWND g_wtool = nullptr;           // the reader's own top toolbar, carried into browser mode
+static HWND g_etool = nullptr;           // the text editor toolbar
 static int WEBTOOLH() { return g_webOn ? TBH() : 0; }   // ...with one button: back to the PDF reader
 static int WEBTABH() { return (int)(34 * g.dpi); }   // the tab band: the reader's 3px inset + 29px face + 1px foot
 static void WebToggle(bool on);           // the Web / Reader buttons
@@ -1126,16 +1131,16 @@ static int g_wtCur = -1;                 // the focused web tab; the tab row's p
                                          // for the press-to-switch rule, so it lives up here
 
 // (the 20px frame + four vector arrows), DrawToolbarGlyph's TransformBoxMove.
-enum { TB_CLOSE, TB_OPEN, TB_SAVE, TB_WEB,   // the file cluster; TB_WEB opens the browser
+enum { TB_CLOSE, TB_OPEN, TB_SAVE, TB_WEB, TB_EDIT,   // the file cluster; TB_WEB opens browser, TB_EDIT opens editor
        TB_SELECT, TB_TEXT, TB_HIGHLIGHT, TB_LINE, TB_SHAPE, TB_DRAW,
        TB_TRANSFORM, TB_CLEAR, TB_FIND, TB_COUNT };
 static const wchar_t* const TbLabel[TB_COUNT] = {
-    L"Close", L"Open", L"Save", L"Web",
+    L"Close", L"Open", L"Save", L"Web", L"Editor",
     L"Select", L"Text", L"Highlight", L"Line", L"Shapes", L"Draw",
     L"Transform", L"Clear All", L"Find Text"
 };
 static const wchar_t* const TbGlyph[TB_COUNT] = {
-    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774",
+    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE70F",
     L"\uE8B0", L"\uE8D2", L"\uE7E6", L"\uE738", L"\uE739", L"\uED63",
     L"", L"\uED62", L"\uE721"
 };   // Transform carries its composed icon, drawn in BarDraw
@@ -1155,6 +1160,7 @@ static bool TbEnabled(int i) {
     bool doc = DVF().n != 0;
     if (i == TB_OPEN) return true;
     if (i == TB_WEB) return true;         // the browser needs no document
+    if (i == TB_EDIT) return true;        // the text editor needs no document
     if (i == TB_CLEAR) {
         if (!doc) return false;
         for (auto& kv : DVF().annos) if (!kv.second.empty()) return true;
@@ -1494,6 +1500,7 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 case TB_OPEN: OpenDlg(); break;
                 case TB_SAVE: SaveDoc(false); break;
                 case TB_WEB: WebToggle(true); break;
+                case TB_EDIT: EditorToggle(true); break;
                 case TB_TRANSFORM: TransformPopupOpen(); break;
                 case TB_CLEAR: ClearAllAnnos(); break;
                 case TB_FIND: FindToggle(); break;
@@ -1551,19 +1558,15 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 // ---- browser mode's top toolbar: the reader's own toolbar row (same grain,
-// same button face, same glyph-over-caption layout, same height) carrying a
-// single button that returns to the PDF reader ----
-static bool g_wtoolHot = false, g_wtoolDown = false;
+// same button face, same glyph-over-caption layout, same height) carrying
+// buttons that switch back to PDF reader or to the Text Editor ----
+static int g_wtoolHot = -1, g_wtoolDown = -1;
 
-static RECT WebToolBtn() {
-    HDC dc = GetDC(g_wtool);
-    RECT rc{ 0, 0, 0, 0 };
-    HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
-    DrawTextW(dc, L"PDF", -1, &rc, DT_CALCRECT | DT_SINGLELINE);
-    SelectObject(dc, of);
-    ReleaseDC(g_wtool, dc);
-    int bw = max((int)(24 * g.dpi), (int)(rc.right - rc.left)) + (int)(12 * g.dpi);
-    int x = (int)(4 * g.dpi), y = (int)(2 * g.dpi);
+static RECT WebToolBtn(int idx) {
+    int bw = (int)(54 * g.dpi);
+    int gap = (int)(4 * g.dpi);
+    int x = (int)(4 * g.dpi) + idx * (bw + gap);
+    int y = (int)(2 * g.dpi);
     return RECT{ x, y, x + bw, y + TbBtnH() };
 }
 
@@ -1571,52 +1574,56 @@ static void WebToolDraw(HDC dc, int w, int h) {
     if (w <= 0 || h <= 0) return;
     RECT bar{ 0, 0, w, h };
     FillRect(dc, &bar, GrainBrush(1));
-    RECT b = WebToolBtn();
-    bool pr = g_wtoolDown && g_wtoolHot, hot = g_wtoolHot;
-    if (hot || pr) {                                   // the reader's hover / pressed tile
-        Gdiplus::Graphics gs(dc);
-        gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::GraphicsPath p;
-        float rr = (float)(4 * g.dpi);
-        float fx = (float)b.left, fy = (float)b.top;
-        float fw = (float)(b.right - b.left), fh = (float)(b.bottom - b.top);
-        p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
-        p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
-        p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
-        p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
-        p.CloseFigure();
-        Gdiplus::SolidBrush f(pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
-                                 : Gdiplus::Color(255, 0x40, 0x40, 0x40));
-        gs.FillPath(&f, &p);
+
+    for (int idx = 0; idx < 2; idx++) {
+        RECT b = WebToolBtn(idx);
+        bool hot = (g_wtoolHot == idx);
+        bool pr = (g_wtoolDown == idx && hot);
+        if (hot || pr) {
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath p;
+            float rr = (float)(4 * g.dpi);
+            float fx = (float)b.left, fy = (float)b.top;
+            float fw = (float)(b.right - b.left), fh = (float)(b.bottom - b.top);
+            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            Gdiplus::SolidBrush f(pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
+                                     : Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            gs.FillPath(&f, &p);
+        }
+        int capH = 0;
+        {
+            RECT mc{ 0, 0, 0, 0 };
+            HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+            DrawTextW(dc, idx == 0 ? L"PDF" : L"Editor", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
+            SelectObject(dc, of);
+            capH = mc.bottom - mc.top;
+        }
+        int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);
+        int colH = gh + gap + capH;
+        int avail = (int)(b.bottom - b.top) - colH;
+        int y0 = b.top + max(0, avail) / 2;
+        RECT gr{ b.left, y0, b.right, y0 + gh };
+        RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
+        SetBkMode(dc, TRANSPARENT);
+        const wchar_t* glyph = (idx == 0) ? L"\uE8F1" : L"\uE70F";
+        SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
+        SetTextColor(dc, RGB(16, 16, 16));
+        RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
+        DrawTextW(dc, glyph, -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        DrawTextW(dc, glyph, -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        SetTextColor(dc, RGB(16, 16, 16));
+        RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
+        DrawTextW(dc, idx == 0 ? L"PDF" : L"Editor", -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        DrawTextW(dc, idx == 0 ? L"PDF" : L"Editor", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
-    int capH = 0;
-    {   RECT mc{ 0, 0, 0, 0 };
-        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
-        DrawTextW(dc, L"Find Text", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
-        SelectObject(dc, of);
-        capH = mc.bottom - mc.top;
-    }
-    int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);
-    int colH = gh + gap + capH;
-    int avail = (int)(b.bottom - b.top) - colH;
-    int y0 = b.top + max(0, avail) / 2;
-    RECT gr{ b.left, y0, b.right, y0 + gh };
-    RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
-    SetBkMode(dc, TRANSPARENT);
-    const wchar_t* glyph = L"\uE8F1";                  // the library shelf - the reading room,
-                                                       // not one more document among the tabs'
-    SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
-    SetTextColor(dc, RGB(16, 16, 16));
-    RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
-    DrawTextW(dc, glyph, -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-    DrawTextW(dc, glyph, -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
-    SetTextColor(dc, RGB(16, 16, 16));
-    RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
-    DrawTextW(dc, L"PDF", -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-    DrawTextW(dc, L"PDF", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 static HDC g_wtooldc = nullptr;
@@ -1658,59 +1665,69 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT b = WebToolBtn();
-        bool hot = PtInRect(&b, p) != 0;
+        int hot = -1;
+        for (int i = 0; i < 2; i++) {
+            RECT b = WebToolBtn(i);
+            if (PtInRect(&b, p)) { hot = i; break; }
+        }
         if (hot != g_wtoolHot) {
             g_wtoolHot = hot;
-            if (hot) TrackLeave(h);
-            RECT rb = b; InflateRect(&rb, 4, 4);
-            InvalidateRect(h, &rb, FALSE);
+            if (hot >= 0) TrackLeave(h);
+            InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        if (g_wtoolHot) {
-            g_wtoolHot = false;
-            RECT rb = WebToolBtn(); InflateRect(&rb, 4, 4);
-            InvalidateRect(h, &rb, FALSE);
+        if (g_wtoolHot >= 0) {
+            g_wtoolHot = -1;
+            InvalidateRect(h, nullptr, FALSE);
         }
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT b = WebToolBtn();
-        if (PtInRect(&b, p)) {
-            SetCapture(h);
-            g_wtoolDown = true; g_wtoolHot = true;
-            RECT rb = b; InflateRect(&rb, 4, 4);
-            InvalidateRect(h, &rb, FALSE);
+        for (int i = 0; i < 2; i++) {
+            RECT b = WebToolBtn(i);
+            if (PtInRect(&b, p)) {
+                SetCapture(h);
+                g_wtoolDown = i; g_wtoolHot = i;
+                InvalidateRect(h, nullptr, FALSE);
+                break;
+            }
         }
         return 0;
     }
     case WM_LBUTTONUP: {
-        if (g_wtoolDown) {
-            g_wtoolDown = false;
+        if (g_wtoolDown >= 0) {
+            int down = g_wtoolDown;
+            g_wtoolDown = -1;
             if (GetCapture() == h) ReleaseCapture();
             POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            RECT b = WebToolBtn();
+            RECT b = WebToolBtn(down);
             bool inside = PtInRect(&b, p) != 0;
-            g_wtoolHot = false;
-            RECT rb = b; InflateRect(&rb, 4, 4);
-            InvalidateRect(h, &rb, FALSE);
-            if (inside) WebToggle(false);              // back to the PDF reader
+            g_wtoolHot = -1;
+            InvalidateRect(h, nullptr, FALSE);
+            if (inside) {
+                if (down == 0) WebToggle(false);                       // back to PDF reader
+                else if (down == 1) { WebToggle(false); EditorToggle(true); } // to Text Editor!
+            }
         }
         return 0;
     }
     case WM_CAPTURECHANGED:
-        if (g_wtoolDown) { g_wtoolDown = false; InvalidateRect(h, nullptr, FALSE); }
+        if (g_wtoolDown >= 0) { g_wtoolDown = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
     case WM_MOUSEWHEEL:
         return SendMessageW(g.main, m, wp, lp);
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
-            RECT b = WebToolBtn();
-            SetCursor(LoadCursorW(nullptr, PtInRect(&b, p) ? IDC_HAND : IDC_ARROW));
-            return TRUE;
+            for (int i = 0; i < 2; i++) {
+                RECT b = WebToolBtn(i);
+                if (PtInRect(&b, p)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
         }
         break;
     }
