@@ -6,7 +6,6 @@ static void WebToggle(bool on);
 static void LayoutMain();
 static void UpdateTitle();
 static void WebEnsureEnv();
-static void EditorCaptureThumb();
 
 // ---- Text Editor State ----
 static wrl::ComPtr<ICoreWebView2Controller> g_edCtr;
@@ -71,8 +70,7 @@ static void EditorPostFont(const std::wstring& font) {
     g_edFont = font;
     std::wstring msg = L"{\"cmd\":\"font\",\"name\":\"" + font + L"\"}";
     g_edWeb->PostWebMessageAsJson(msg.c_str());
-    if (g_etool) InvalidateRect(g_etool, nullptr, FALSE);
-    EditorCaptureThumb();
+    if (g_etool) InvalidateRect(g_etool, nullptr, FALSE);   // the thumb answers through the
 }
 
 static void EditorToggleInvert() {
@@ -234,41 +232,10 @@ static std::vector<unsigned char> Base64Decode(const std::string& in) {
 }
 
 
-static bool g_edCapturing = false;
-static bool g_edCapturePending = false;
-
-static void EditorCaptureThumb() {
-    if (!g_edWeb || !g_editOn || !g_edSide) return;
-    if (g_edCapturing) { g_edCapturePending = true; return; }
-    g_edCapturing = true;
-    wrl::ComPtr<IStream> st;
-    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &st))) { g_edCapturing = false; return; }
-    wrl::ComPtr<ICoreWebView2CapturePreviewCompletedHandler> cb =
-        Microsoft::WRL::Callback<ICoreWebView2CapturePreviewCompletedHandler>(
-            [st](HRESULT hr) -> HRESULT {
-                g_edCapturing = false;
-                if (SUCCEEDED(hr)) {
-                    Gdiplus::Bitmap bmp(st.Get());
-                    if (bmp.GetLastStatus() == Gdiplus::Ok) {
-                        HBITMAP hbm = nullptr;
-                        bmp.GetHBITMAP(Gdiplus::Color(255, 255, 255, 255), &hbm);
-                        if (hbm) {
-                            if (g_edThumbBmp) DeleteObject(g_edThumbBmp);
-                            g_edThumbBmp = hbm;
-                            g_edThumbW = (int)bmp.GetWidth();
-                            g_edThumbH = (int)bmp.GetHeight();
-                            if (g.side) InvalidateRect(g.side, nullptr, FALSE);
-                        }
-                    }
-                }
-                if (g_edCapturePending) {
-                    g_edCapturePending = false;
-                    EditorCaptureThumb();
-                }
-                return S_OK;
-            });
-    g_edWeb->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, st.Get(), cb.Get());
-}
+// The sidebar's thumbnail is the page's own render, never the webview's:
+// CapturePreview photographs the whole sheet - desk, margins, floating
+// toolbar and all - while the page rasterizes its Letter-sized frame from
+// the model alone (type 'thumbs'). One source, one aspect, just the page.
 
 static void EditorSetThumb(const std::string& dataUrl) {
     size_t comma = dataUrl.find(',');
@@ -398,8 +365,9 @@ static void EditorHandleMessage(const wchar_t* json) {
             WxWriteFile(g_edPath, (const unsigned char*)fullDoc.data(), fullDoc.size());
         }
         UpdateTitle();
-    } else if (t == "dirty") {
-        EditorCaptureThumb();
+    } else if (t == "dirty") {                       // any change: ask the page for its own
+        if (g_edWeb)                                 // render - a page, not a screenshot of
+            g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"thumb\"}");   // the whole screen
     } else if (t == "title") {
         std::string title = m.get("title") ? m.get("title")->str() : "";
         if (!title.empty()) { g_edTitle = WxW(title); UpdateTitle(); }
@@ -497,9 +465,8 @@ static void EditorToggle(bool on) {
             g_edCtr->put_IsVisible(TRUE);
             RECT r; GetClientRect(g.view, &r);
             g_edCtr->put_Bounds(r);
-            EditorRefocus();
-            EditorCaptureThumb();
-        }
+            EditorRefocus();                           // the page's own thumbs ride the
+        }                                              // load and every change after it
     } else {
         if (g_edCtr) g_edCtr->put_IsVisible(FALSE);
         if (g_etool) ShowWindow(g_etool, SW_HIDE);
