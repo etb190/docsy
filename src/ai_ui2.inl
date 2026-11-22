@@ -125,6 +125,33 @@ static void AiRangeTick() {
 }
 
 // ---- the document index pump (OCR one page per tick) ----
+static void AiIndexKickoff(const std::wstring& path) {
+    if (g_aiIndexing || path.empty()) return;
+    AiLoadSettings();
+    std::string docId = AiDocSessionKey(path);
+    AiDocIndex ix;
+    if (AiIndexLoad(docId, ix) && !ix.chunks.empty()) {
+        ix.path = path;
+        g_aiIndex = std::move(ix);
+        g_aiIndexReady = true;
+        AiPanelSend(WxW(AiStatusJson("status")));
+        return;
+    }
+    g_aiIndexing = true;
+    g_aiIndexReady = false;
+    g_aiIdxPage = 0;
+    g_aiIdxKey = docId;
+    g_aiIdxPath = path;
+    if (g_aiIdxChunk) { delete g_aiIdxChunk; g_aiIdxChunk = nullptr; }
+    g_aiIdxChunk = new AiChunker();
+    g_aiIndex = AiDocIndex();
+    g_aiIndex.docId = docId;
+    g_aiIndex.path = path;
+    g_aiIndex.pageCount = DVF().n;
+    g_aiIndex.contentHash = AiFileHash(path);
+    AiPanelSend(WxW(AiStatusJson("status")));
+    SetTimer(g.main, 4713, 30, nullptr);
+}
 static void AiIndexTick() {
     if (!g_aiIndexing) { KillTimer(g.main, 4713); return; }
     DocState& D = DVF();
