@@ -6,6 +6,7 @@ static void WebToggle(bool on);
 static void LayoutMain();
 static void UpdateTitle();
 static void WebEnsureEnv();
+static void EditorCaptureThumb();
 
 // ---- Text Editor State ----
 static wrl::ComPtr<ICoreWebView2Controller> g_edCtr;
@@ -686,7 +687,6 @@ static LRESULT CALLBACK EditorToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         RECT cl; GetClientRect(h, &cl);
         int hot = -1;
         for (int i = 0; i < EB_COUNT; i++) {
-            if (i == EB_SEP1) continue;
             RECT r = EditorBtnRect(i, cl.right, cl.bottom);
             if (PtInRect(&r, p)) { hot = i; break; }
         }
@@ -707,7 +707,6 @@ static LRESULT CALLBACK EditorToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT cl; GetClientRect(h, &cl);
         for (int i = 0; i < EB_COUNT; i++) {
-            if (i == EB_SEP1) continue;
             RECT r = EditorBtnRect(i, cl.right, cl.bottom);
             if (PtInRect(&r, p)) {
                 SetCapture(h);
@@ -743,8 +742,7 @@ static LRESULT CALLBACK EditorToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             RECT cl; GetClientRect(h, &cl);
             for (int i = 0; i < EB_COUNT; i++) {
-                if (i == EB_SEP1) continue;
-                RECT r = EditorBtnRect(i, cl.right, cl.bottom);
+                    RECT r = EditorBtnRect(i, cl.right, cl.bottom);
                 if (PtInRect(&r, p)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
