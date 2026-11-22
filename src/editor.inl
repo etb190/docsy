@@ -36,7 +36,7 @@ static const wchar_t* const EbLabel[EB_COUNT] = {
     L"Close", L"Open", L"Save", L"Web", L"PDF"
 };
 static const wchar_t* const EbGlyph[EB_COUNT] = {
-    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE8F1"
+    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE8A5"
 };
 
 static int g_edHot = -1, g_edDown = -1;
@@ -308,27 +308,26 @@ static void EditorSideDraw(HDC dc, int w, int h) {
 
     int cardW = min((int)(w - 32 * g.dpi), (int)(130 * g.dpi));
     int cardH = (int)(cardW * 1.294);
-    int padT = (int)(16 * g.dpi);
+    int padT = (int)(8 * g.dpi), labH = (int)(20 * g.dpi), padB = (int)(6 * g.dpi), gap = (int)(2 * g.dpi);
     int x = (w - cardW) / 2;
     int y = padT;
 
     RECT cardR{ x, y, x + cardW, y + cardH };
 
     // Selection background band
-    int bandTop = max(0, y - (int)(6 * g.dpi));
-    int bandBot = min(h, y + cardH + (int)(26 * g.dpi));
-    RECT bandR{ 0, bandTop, w, bandBot };
+    int btop = y - padT, bbot = y + cardH + gap + labH + padB;
+    RECT bandR{ 0, max(0, btop), w, min(h, bbot) };
     {
         Gdiplus::Graphics gs(dc);
         Gdiplus::LinearGradientBrush gb(
-            Gdiplus::Rect(bandR.left, bandR.top, bandR.right - bandR.left, bandR.bottom - bandR.top),
+            Gdiplus::Rect(bandR.left, bandR.top - 1, bandR.right - bandR.left, bandR.bottom - bandR.top + 2),
             Gdiplus::Color(255, 0x38, 0x75, 0x52),
             Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
         gs.FillRectangle(&gb, (int)bandR.left, (int)bandR.top,
                          (int)(bandR.right - bandR.left), (int)(bandR.bottom - bandR.top));
     }
 
-    // Card white background & soft shadow
+    // Card white background
     HBRUSH wbr = (HBRUSH)GetStockObject(WHITE_BRUSH);
     FillRect(dc, &cardR, wbr);
 
@@ -344,17 +343,11 @@ static void EditorSideDraw(HDC dc, int w, int h) {
     }
 
     // Border around card
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x40, 0x44, 0x4c));
-    HGDIOBJ open = SelectObject(dc, pen);
-    HGDIOBJ onb = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Rectangle(dc, x, y, x + cardW, y + cardH);
-    SelectObject(dc, onb);
-    SelectObject(dc, open);
-    DeleteObject(pen);
+    FrameRect(dc, &cardR, ThumbEdgeBrush());
 
     // Label "Page 1"
-    RECT lr{ 0, y + cardH + (int)(4 * g.dpi), w, y + cardH + (int)(24 * g.dpi) };
-    SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+    RECT lr{ 0, y + cardH + gap, w, y + cardH + gap + labH };
+    SelectObject(dc, SideFont());
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(0xff, 0xff, 0xff));
     DrawTextW(dc, L"Page 1", -1, &lr, DT_CENTER | DT_TOP | DT_SINGLELINE);
