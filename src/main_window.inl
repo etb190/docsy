@@ -67,8 +67,11 @@ static void LayoutMain() {
                     if (!o.w || o.w == k.w) continue;
                     RECT o2; GetWindowRect(o.w, &o2); ScreenToClient(g.main, (POINT*)&o2);
                     ScreenToClient(g.main, ((POINT*)&o2) + 1);
-                    if (IntersectRect(&is, &vac[i], &o2)) InvalidateRect(o.w, &is, FALSE);
-                }
+                    if (IntersectRect(&is, &vac[i], &o2)) {
+                        OffsetRect(&is, -o2.left, -o2.top);   // InvalidateRect reads the CHILD's
+                        InvalidateRect(o.w, &is, FALSE);      // client coords - the strip was
+                    }                                         // computed in the parent's, so the
+                }                                             // repaint landed shifted and clipped
                 InvalidateRect(g.main, &vac[i], FALSE);
             }
         }
@@ -136,8 +139,11 @@ static void LayoutMain() {
                 if (!o.w || o.w == k.w) continue;
                 RECT o2; GetWindowRect(o.w, &o2); ScreenToClient(g.main, (POINT*)&o2);
                 ScreenToClient(g.main, ((POINT*)&o2) + 1);
-                if (IntersectRect(&is, &vac[i], &o2)) InvalidateRect(o.w, &is, FALSE);
-            }
+                if (IntersectRect(&is, &vac[i], &o2)) {
+                    OffsetRect(&is, -o2.left, -o2.top);   // InvalidateRect reads the CHILD's
+                    InvalidateRect(o.w, &is, FALSE);      // client coords - the strip was
+                }                                         // computed in the parent's, so the
+            }                                             // repaint landed shifted and clipped
             InvalidateRect(g.main, &vac[i], FALSE);   // the exposed remainder, if any
         }
     }
@@ -253,6 +259,13 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PAINT: {   // the custom caption row; the children paint their own areas
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
+        if (r.bottom > CAP()) {              // the grain mop: every strip a child leaves
+            RECT desk{ 0, CAP(), r.right, r.bottom };   // behind - a mode flip's vacated row,
+            FillRect(dc, &desk, GrainBrush(1));         // a resize's exposed edge - lands on
+        }                                    // the parent, and the parent painted only the
+                                             // caption band, so the old chrome stayed as
+                                             // ghost buttons nobody ever erased. WS_CLIPCHILDREN
+                                             // clips this fill to exactly the childless strips.
         PaintCaptionInto(dc, r.right);
         EndPaint(h, &ps);
         return 0;
@@ -260,6 +273,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_PRINTCLIENT: {   // DWM re-materializes the surface (peek, taskbar thumbnails,
         HDC dc = (HDC)wp;    // occlusion, snap previews) WITHOUT invalidating first, which
         RECT r; GetClientRect(h, &r);   // blanked the band until the next re-hover
+        if (r.bottom > CAP()) {          // the same mop: a re-materialized client carries
+            RECT desk{ 0, CAP(), r.right, r.bottom };   // the strips too (children composite
+            FillRect(dc, &desk, GrainBrush(1));         // over it, so the fill cannot smear)
+        }
         PaintCaptionInto(dc, r.right);
         return 0;
     }

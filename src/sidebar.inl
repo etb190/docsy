@@ -217,6 +217,12 @@ static void RailActivate(int id) {
 static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;
+    case WM_SIZE:                        // the stack anchors to the bottom edge: a resize
+        InvalidateRect(h, nullptr, FALSE);   // must repaint whole - every other child
+        return 0;                        // says this; the rail was the one window still
+                                         // riding MoveWindow's repaint flag alone, and
+                                         // a coalesced tick left its old frame standing
+                                         // as a ghost icon above the real stack
     case WM_PAINT: {
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);
