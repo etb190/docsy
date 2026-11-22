@@ -24,7 +24,8 @@ static void LayoutMain() {
     int cap0 = CAP();
     if (g_editOn) {
         int th = EDITOR_TOOL_H();
-        int ch = max(0, h - cap0 - th);
+        int sh = g.full ? 0 : SBH();             // the footer rides again under the editor
+        int ch = max(0, h - cap0 - th - sh);
         int sw = (g_edSide && !g.full) ? SW() : 0;
         int rw = RW();
         int vw = max(0, w - sw - rw);
@@ -39,6 +40,7 @@ static void LayoutMain() {
             ShowWindow(g.rail, SW_SHOWNOACTIVATE);
         }
         MoveWindow(g.view, sw + rw, cap0 + th, vw, ch, TRUE);
+        if (g.status) MoveWindow(g.status, 0, cap0 + th + ch, w, sh, TRUE);
         if (g_edCtr) {
             RECT vr{ 0, 0, vw, ch };
             g_edCtr->put_Bounds(vr);

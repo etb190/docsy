@@ -194,6 +194,7 @@ static void ToggleFull(HWND h) {
     LayoutMain();
     DwmApply(h);
     InvalidateRect(h, nullptr, FALSE);
+    if (g_editOn) EditorNotifyFull();    // the page's Esc gate follows every road in
 }
 
 // The moon button: KillerPDF's DocInvert flips the document images to their
@@ -214,12 +215,14 @@ static const wchar_t* ZoomLabel(int i) {
     return ls[i];
 }
 static void ZoomApply(int i) {
+    if (g_editOn) { if (i >= 2 && i <= 7) EditorZoomApplyItem(i - 2); return; }   // the editor page's zoom
     if (g_webOn) { if (i >= 2 && i <= 7) WebZoomApplyItem(i - 2); return; }   // the web page's zoom
     if (i == 0) ApplyFit(true, FocusB());
     else if (i == 1) ApplyFit(false, FocusB());
     else if (i >= 2 && i <= 7) SetZoom(ZoomPcts[i - 2], g.cw / 2, g.ch / 2);
 }
 static int ZoomCurrent() {                       // which item the closed box shows
+    if (g_editOn) return EditorZoomCurrent();    // the editor page's zoom, same 2..7 space
     if (g_webOn) return WebZoomCurrent();        // the web page's zoom, same 2..7 space
     DocState& D = DVF();
     if (D.fitMode == 1) return 0;
@@ -265,7 +268,17 @@ static void StatusRects(int w) {
     x -= (int)(5 * dpi) + 1 + (int)(5 * dpi);                // divider Margin="5,0"
     if (!g_webOn) { x -= bw24; g_stR[ST_INV] = { x, by, x + bw24, by + btnH }; }   // invert is a reader thing
     x -= bw24;  g_stR[ST_FULL] = { x, by, x + bw24, by + btnH };
-    if (!g_webOn) {
+    if (g_editOn) {
+        // the editor's sheet is one Letter page, always: the size cell wears
+        // the fixed label (the reader computes its own off the current page),
+        // and the four mode radios sit the mode out - a continuous sheet has
+        // no pages to arrange
+        x -= (int)(5 * dpi) + 1 + (int)(2 * dpi);                // first divider Margin="2,0,5,0"
+        int sw2 = max((int)(90 * dpi), TextW(StFont(), L"Letter  8.5 x 11 in") + (int)(6 * dpi));
+        x -= (int)(5 * dpi);                                 // PageSizeLabel right margin
+        g_stR[ST_SIZE] = { x - sw2, 0, x, SBH() };
+        x -= sw2 + (int)(4 * dpi);                           // PageSizeLabel left margin
+    } else if (!g_webOn) {
         x -= (int)(5 * dpi) + 1 + (int)(5 * dpi);                // divider Margin="5,0"
         int mw = (int)(25 * dpi);                                // FooterModeButton 25x20
         x -= mw;    g_stR[ST_MGRID] = { x, by, x + mw, by + btnH };
@@ -291,6 +304,8 @@ static int StatusHit(POINT p) {
     for (int i = 0; i < ST_COUNT; i++) {
         if (p.x >= g_stR[i].left && p.x < g_stR[i].right && p.y >= g_stR[i].top && p.y < g_stR[i].bottom) {
             if (g_webOn && i != ST_FULL && (i == ST_SIZE || (i >= ST_MCONT && i <= ST_INV))) return -1;
+            if (g_editOn) return i;      // every editor cell answers: status, Letter size,
+                                         // moon, fullscreen, the zoom trio, the version
             return (!DVF().n && i != ST_STATUS && i != ST_VER) ? -1 : i;
         }
     }
@@ -304,6 +319,7 @@ static void ZoomPopupClose();
 static void StatusAction(int id) {
     switch (id) {
     case ST_STATUS: {   // StatusText_Click: the FOCUSED pane's file, held while read
+        if (g_editOn) { EditorStatusHoldInfo(); break; }
         if (DVF().path.empty()) break;
         WIN32_FILE_ATTRIBUTE_DATA fa;
         if (GetFileAttributesExW(DVF().path.c_str(), GetFileExInfoStandard, &fa)) {
@@ -317,6 +333,10 @@ static void StatusAction(int id) {
         break;
     }
     case ST_SIZE: {     // the crop-size button: docsy flashes the full breakdown
+        if (g_editOn) {   // the sheet's fixed Letter geometry, the PaperLabel road
+            SetStatusHold(L"1275 x 1650 px at 150 DPI | 8.50 x 11.00 in | 215.9 x 279.4 mm | 612.0 x 792.0 pt");
+            break;
+        }
         std::wstring lbl, det; PaperLabel(lbl, det);
         if (!det.empty()) SetStatusHold(det);
         break;
@@ -326,11 +346,14 @@ static void StatusAction(int id) {
     case ST_MTWO: SetViewMode(2); break;
     case ST_MGRID: SetViewMode(3); break;
     case ST_FULL: ToggleFull(g.main); break;
-    case ST_INV: ToggleInv(); break;
-    case ST_ZOUT: if (g_webOn) WebZoomBy(0.8); else ZoomBy(0.8); break;
-    case ST_ZIN: if (g_webOn) WebZoomBy(1.25); else ZoomBy(1.25); break;
+    case ST_INV: if (g_editOn) { EditorToggleInvert(); break; } ToggleInv(); break;
+    case ST_ZOUT: if (g_editOn) { EditorZoomBy(0.8); break; }
+                  if (g_webOn) WebZoomBy(0.8); else ZoomBy(0.8); break;
+    case ST_ZIN: if (g_editOn) { EditorZoomBy(1.25); break; }
+                 if (g_webOn) WebZoomBy(1.25); else ZoomBy(1.25); break;
     case ST_COMBO: if (g.zoomOpen) ZoomPopupClose(); else ZoomPopupOpen(); break;
-    case ST_VER: SetStatusHold(L"Docsy " APP_VER L"  -  tiny native Win32 PDF reader"); break;
+    case ST_VER: SetStatusHold(g_editOn ? L"Docsy " APP_VER L"  -  tiny native Win32 editor"
+                                        : L"Docsy " APP_VER L"  -  tiny native Win32 PDF reader"); break;
     }
 }
 
@@ -452,11 +475,13 @@ static void DrawPaneShadow(HDC dc, int w, int h) {
     // the card edges in footer coords: past the sidebar AND the rail now, and
     // with the split on there are TWO cards - each casts its own shadow strip
     int vx0 = ((g_webOn || (g.sideOn && DVF().n)) && !g.full ? SW() : 0) + RW();
+    if (g_editOn) vx0 = (g_edSide && !g.full ? SW() : 0) + RW();   // the editor's own sides
     int L = vx0;
+    int R = w - (g_editOn ? (int)(12 * g.dpi) : (int)(8 * g.dpi));  // the editor's card ends at
+                                                                    // the page's scrollbar strip
     int keyL = vx0 * 4 + (g.split ? g.splitX : -1);
     if (!g_shbm || g_shw != w || g_shh != h || g_shdpi != g.dpi || g_shL != keyL) {
         int rad = max(2, (int)(6 * g.dpi));
-        int R = w - (int)(8 * g.dpi);                  // the card's right edge: the 8px window gutter
         BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
         BYTE* px = nullptr;
         HBITMAP bm = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, (void**)&px, nullptr, 0);

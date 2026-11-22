@@ -546,6 +546,10 @@ static bool g_webOn = false;             // the browser owns the window chrome (
                                          // the caption painter and the layout branch on it)
 static bool g_editOn = false;
 static bool g_edSide = true;            // the text editor owns the window chrome
+static double g_edZoom = 1.0;           // the editor page's zoom (the WebView2's own factor,
+                                        // read by the footer's combo and status line)
+static bool g_edInvert = false;         // the editor page's night mode (the footer's moon;
+                                        // the page reports every flip it makes itself)
 static void EditorToggle(bool on);
 static void EditorOpenFile(const std::wstring& path);
 static void EditorEnsureInit();
@@ -1112,6 +1116,12 @@ static std::wstring WebStatusLine();      // the footer's left cell in browser m
 static void WebZoomBy(double f);
 static int  WebZoomCurrent();             // the closed combo's nearest preset
 static void WebZoomApplyItem(int i);      // popup item 0..5 -> 50%..200%
+static void EditorZoomBy(double f);       // the editor page's zoom: the WebView2's own
+static int  EditorZoomCurrent();          // ZoomFactor, same 2..7 popup space as the web
+static void EditorZoomApplyItem(int i);
+static void EditorToggleInvert();         // the footer moon -> the page's az-inv
+static void EditorStatusHoldInfo();       // the status cell's file flash, editor world
+static void EditorNotifyFull();           // the page's Esc gate tracks the chrome
 static HBRUSH WebEditColors(HDC dc, HWND ctl);   // WM_CTLCOLOREDIT
 static void WebFailCard(HDC dc, int w, int h);   // the no-engine card in the view
 static void WebViewClick(POINT p);        // the fail card's download button

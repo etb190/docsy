@@ -1802,7 +1802,17 @@ static void StatusDraw(HDC dc, int w, int h) {
     int dpi = g.dpi;
     RECT tr = g_stR[ST_STATUS];          // the status line, ellipsized before the tools cell
     tr.left = (int)(16 * dpi); tr.right -= (int)(4 * dpi);   // FooterStatusInset 16
-    std::wstring t = g_webOn ? WebStatusLine() : StatusTextNow();
+    std::wstring t;
+    if (g_editOn) {                      // the editor's own line: the one Letter sheet,
+                                         // the page zoom - or a held message riding over
+        if (GetTickCount64() < g.statusHoldUntil) t = g.statusHoldText;
+        else {
+            wchar_t eb[64];
+            swprintf_s(eb, L"Page 1 of 1, %d%%", (int)std::lround(g_edZoom * 100));
+            t = eb;
+        }
+    }
+    else t = g_webOn ? WebStatusLine() : StatusTextNow();
     if (LatinText(t.c_str())) StText(dc, tr, t.c_str(), DT_LEFT | DT_END_ELLIPSIS,
                                      StFont(), 16 * g.dpi, StCapK, RGB(0xe0, 0xe0, 0xe0));
     else {                               // a held file name with script the subset drops:
@@ -1811,6 +1821,34 @@ static void StatusDraw(HDC dc, int w, int h) {
         DrawTextW(dc, t.c_str(), -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     DrawVersion(dc);
+    if (g_editOn) {                        // the text editor's footer: the browser's own
+        auto div = [&](int ax, int bx) {   // cell set - status, moon, fullscreen, zoom -
+            int mx = (ax + bx) / 2;        // plus the Letter sheet's fixed size cell
+            RECT d{ mx, (SBH() - (int)(14 * dpi)) / 2, mx + 1, (SBH() + (int)(14 * dpi)) / 2 };
+            FillRect(dc, &d, DividerBrush());
+        };
+        if (g_stR[ST_SIZE].right) div(g_stR[ST_FULL].left, g_stR[ST_SIZE].right);
+        div(g_stR[ST_ZOUT].left, g_stR[ST_INV].right);
+        RECT sr = g_stR[ST_SIZE];
+        StText(dc, sr, L"Letter  8.5 x 11 in", DT_CENTER | DT_END_ELLIPSIS, StFont(), 16 * dpi, StCapK,
+               g.stHot == ST_SIZE ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
+        DrawGlyph(dc, ST_FULL, L"\uE740", false);
+        DrawGlyph(dc, ST_INV, L"\uE708", g_edInvert);
+        DrawGlyph(dc, ST_ZOUT, L"\uECC9", false);
+        DrawGlyph(dc, ST_ZIN, L"\uECC8", false);
+        RECT cb = g_stR[ST_COMBO];
+        FillRect(dc, &cb, ComboFillBrush());
+        FrameRect(dc, &cb, ComboBorderBrush());
+        wchar_t zl[32];
+        swprintf_s(zl, L"%d%%", (int)std::lround(g_edZoom * 100));
+        RECT ct = cb; ct.left += (int)(6 * dpi); ct.right -= (int)(16 * dpi);
+        StText(dc, ct, zl, DT_LEFT | DT_END_ELLIPSIS, StCombo(), 10 * g.dpi, StCapU, RGB(0xe0, 0xe0, 0xe0));
+        RECT chv{ cb.right - (int)(14 * dpi), cb.top, cb.right, cb.bottom };
+        SelectObject(dc, StChevron());
+        SetTextColor(dc, RGB(0xa3, 0xa3, 0xa3));
+        DrawTextW(dc, L"\uE70D", -1, &chv, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
     if (g_webOn) {                         // browser mode: status line + zoom + fullscreen,
         auto div = [&](int ax, int bx) {   // the reader's cells sit the mode out
             int mx = (ax + bx) / 2;
@@ -1892,12 +1930,12 @@ static void ZoomPopDraw(HDC dc, int w, int h) {
     SelectObject(dc, StCombo());
     SetBkMode(dc, TRANSPARENT);
     int cur = ZoomCurrent();
-    int n = g_webOn ? 6 : 8;                       // the web page has no fit modes
+    int n = (g_webOn || g_editOn) ? 6 : 8;         // the web page and the editor have no fit modes
     for (int i = 0; i < n; i++) {
         RECT it{ 1, 1 + i * g_zoomItemH, r.right - 1, 1 + (i + 1) * g_zoomItemH };
         if (i == g.zoomHot) FillRect(dc, &it, PopHoverBrush());
         RECT tx = it; tx.left += (int)(8 * g.dpi);
-        StText(dc, tx, ZoomLabel(g_webOn ? i + 2 : i), DT_LEFT, StCombo(), 10 * g.dpi, StCapU,
+        StText(dc, tx, ZoomLabel((g_webOn || g_editOn) ? i + 2 : i), DT_LEFT, StCombo(), 10 * g.dpi, StCapU,
                i == cur ? RGB(0x22, 0xbb, 0x56) : RGB(0xe0, 0xe0, 0xe0));
     }
 }
@@ -1924,7 +1962,7 @@ static void ZoomPopupClose() {
 }
 
 static void ZoomPopupOpen() {
-    if (!g.status || (!DVF().n && !g_webOn)) return;
+    if (!g.status || (!g_editOn && !g_webOn && !DVF().n)) return;
     RECT cr; GetClientRect(g.status, &cr);
     StatusRects(cr.right);
     RECT cb = g_stR[ST_COMBO];
@@ -1933,7 +1971,7 @@ static void ZoomPopupOpen() {
     g_zoomComboScr = { tl.x, tl.y, br.x, br.y };
     g_zoomItemH = (int)(22 * g.dpi);
     g_zoomPopW = max((int)(cb.right - cb.left), (int)(96 * g.dpi));
-    int popH = (g_webOn ? 6 : 8) * g_zoomItemH + 2;
+    int popH = ((g_webOn || g_editOn) ? 6 : 8) * g_zoomItemH + 2;
     if (!g.zoomPop) {
         g.zoomPop = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"DocsyZoomPop", nullptr,
                                     WS_POPUP, tl.x, tl.y, g_zoomPopW, popH,
@@ -1967,7 +2005,7 @@ static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        int last = g_webOn ? 5 : 7;
+        int last = (g_webOn || g_editOn) ? 5 : 7;
         int it = (p.y - 1) / max(1, g_zoomItemH);
         if (it < 0 || it > last || p.x < 0 || p.x >= g_zoomPopW) it = -1;
         if (it != g.zoomHot) { g.zoomHot = it; InvalidateRect(h, nullptr, FALSE); }
@@ -1975,7 +2013,7 @@ static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        int last = g_webOn ? 5 : 7;
+        int last = (g_webOn || g_editOn) ? 5 : 7;
         int it = (p.y - 1) / max(1, g_zoomItemH);
         if (p.x >= 0 && p.x < g_zoomPopW && it >= 0 && it <= last) {
             int pick = it;
@@ -1989,7 +2027,7 @@ static LRESULT CALLBACK ZoomPopProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONUP: return 0;         // the opening click's release lands here
     case WM_MOUSEWHEEL: {
         int d = GET_WHEEL_DELTA_WPARAM(wp);
-        int last = g_webOn ? 5 : 7;
+        int last = (g_webOn || g_editOn) ? 5 : 7;
         if (g.zoomHot < 0) g.zoomHot = ZoomCurrent();
         g.zoomHot = std::clamp(g.zoomHot - (d > 0 ? 1 : -1), 0, last);
         InvalidateRect(h, nullptr, FALSE);
@@ -2055,7 +2093,7 @@ static LRESULT CALLBACK StatusProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSEWHEEL: {
-        if (DVF().n) {
+        if (DVF().n || g_editOn) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
             if (StatusHit(p) == ST_COMBO) { ZoomCycle(GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 1 : -1); return 0; }
         }

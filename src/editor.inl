@@ -24,7 +24,8 @@ static bool g_edQuote = false;
 static int g_edAlign = 0;        // 0: left, 1: center, 2: justify
 static std::wstring g_edFont = L"Segoe UI";
 static int g_edSize = 12;
-static bool g_edInvert = false;
+// g_edInvert and g_edZoom live in common.h: the footer's moon and combo read
+// them, and the footer's module is compiled before this one.
 
 // Toolbar buttons (Top Bar: navigation & document IO)
 enum {
@@ -81,6 +82,52 @@ static void EditorToggleInvert() {
         g_edWeb->PostWebMessageAsJson(msg.c_str());
     }
     if (g_etool) InvalidateRect(g_etool, nullptr, FALSE);
+}
+
+// The editor's zoom rides the WebView2's own ZoomFactor - KillerPDF's
+// browser-tab road: the sheet, its margins and the styled overlay scrollbar
+// scale as one rendering, while this window's chrome (the editor toolbar, the
+// footer) stays fixed like the reader's. 0 means "back to 100%".
+static void EditorZoomBy(double f) {
+    if (!g_edCtr) return;
+    g_edZoom = (f == 0) ? 1.0 : std::clamp(g_edZoom * f, 0.25, 5.0);
+    g_edCtr->put_ZoomFactor(g_edZoom);
+    StatusRepaint();
+}
+static int EditorZoomCurrent() {                  // the nearest preset, the 2..7 space
+    double pct = g_edZoom * 100;
+    int best = 4; double bd = 1e9;
+    for (int i = 0; i < 6; i++) {
+        double d = fabs(ZoomPcts[i] * 100 - pct);
+        if (d < bd) { bd = d; best = i + 2; }
+    }
+    return best;
+}
+static void EditorZoomApplyItem(int i) {
+    EditorZoomBy(i == 2 ? 0 : ZoomPcts[i] / std::max(0.01, g_edZoom));
+}
+
+// The status cell's click, editor world: the world's own file, held while read
+// - the reader's StatusText_Click road over the editor's path and title.
+static void EditorStatusHoldInfo() {
+    if (g_edPath.empty()) return;
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (GetFileAttributesExW(g_edPath.c_str(), GetFileExInfoStandard, &fa)) {
+        long long bytes = ((long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+        wchar_t sz[40];
+        if (bytes >= 1LL << 20) FmtNum(sz, 40, bytes / 1048576.0, 2), wcscat_s(sz, L" MB");
+        else if (bytes >= 1LL << 10) FmtNum(sz, 40, bytes / 1024.0, 1), wcscat_s(sz, L" KB");
+        else swprintf_s(sz, L"%lld B", bytes);
+        SetStatusHold(g_edTitle + L" - " + sz);
+    }
+}
+
+// Full screen told the page: whatever road toggled it - the footer's arrow,
+// F11 from the page itself, Esc - the page's own Esc gate stays honest.
+static void EditorNotifyFull() {
+    if (g_edWeb)
+        g_edWeb->PostWebMessageAsJson(g.full ? L"{\"cmd\":\"full\",\"on\":true}"
+                                             : L"{\"cmd\":\"full\",\"on\":false}");
 }
 
 static void EditorInsertImagePrompt() {
@@ -371,7 +418,12 @@ static void EditorHandleMessage(const wchar_t* json) {
     } else if (t == "title") {
         std::string title = m.get("title") ? m.get("title")->str() : "";
         if (!title.empty()) { g_edTitle = WxW(title); UpdateTitle(); }
-    } else if (t == "thumbs") {
+    } else if (t == "invert") {                      // the page's own moon (the floating
+        g_edInvert = m.get("on") ? m.get("on")->b : false;   // toolbar's button) reports
+        StatusRepaint();                             // so the footer's glyph tracks it
+    } else if (t == "fullscreen") {                  // F11 from the page: the WebView2 owns
+        ToggleFull(g.main);                          // the keys while the focus is in it;
+    } else if (t == "thumbs") {                      // ToggleFull notifies the page itself
         if (auto th = m.get("thumbs")) {
             if (th && th->t == 'a' && !th->a.empty() && th->a[0].t == 's') {
                 EditorSetThumb(th->a[0].str());
@@ -444,6 +496,15 @@ static void EditorEnsureInit() {
                 } else {
                     g_edCtr->put_IsVisible(FALSE);
                 }
+                EventRegistrationToken zkm;
+                g_edWeb->add_ZoomFactorChanged(
+                    Microsoft::WRL::Callback<ICoreWebView2ZoomFactorChangedEventHandler>(
+                        [](ICoreWebView2*, ICoreWebView2ZoomFactorChangedEventArgs* a) -> HRESULT {
+                            double f = 1.0;
+                            if (a && SUCCEEDED(a->get_ZoomFactor(&f))) g_edZoom = f;
+                            StatusRepaint();                            // the combo and the
+                            return S_OK;                                // status line follow
+                        }).Get(), &zkm);
                 return S_OK;
             }).Get());
 }
@@ -455,8 +516,8 @@ static void EditorToggle(bool on) {
         if (g_webOn) WebToggle(false);
         if (g.side) ShowWindow(g.side, (g_edSide && !g.full) ? SW_SHOWNOACTIVATE : SW_HIDE);
         if (g.rail && !g.full) ShowWindow(g.rail, SW_SHOWNOACTIVATE);
-        if (g.status) ShowWindow(g.status, SW_HIDE);
-        if (g.bar) ShowWindow(g.bar, SW_HIDE);
+        if (g.status && !g.full) ShowWindow(g.status, SW_SHOWNOACTIVATE);   // the footer
+        if (g.bar) ShowWindow(g.bar, SW_HIDE);                              // rides again
         if (g_wstrip) ShowWindow(g_wstrip, SW_HIDE);
         if (g_wtool) ShowWindow(g_wtool, SW_HIDE);
         if (g_etool) ShowWindow(g_etool, SW_SHOWNOACTIVATE);
