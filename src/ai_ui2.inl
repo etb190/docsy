@@ -663,7 +663,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
     if (AiLetters(bodyW) < 250) {
         AiEv* e = AiEvMake(AIEV_SUM_NOTEXT);
         e->gen = gen;
-        AiPost(e);
+        AiPost(e);                       // the panel learns on the pump's thread
         g_sumBusy = false;
         return;
     }

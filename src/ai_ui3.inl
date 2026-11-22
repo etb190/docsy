@@ -263,7 +263,7 @@ static void AiPanelMessage(const wchar_t* json) {
                     if (AiParseSourceId(s.id) == n) { src = &s; break; }
             if (!src) return;
             if (st->mode == 1) {
-                AiWebCiteJump(WxW(src.quote));
+                AiWebCiteJump(WxW(src->quote));
             } else if (st->mode == 0) {
                 std::lock_guard<std::mutex> lk(g_aiMtx);
                 // the rects were not persisted: re-locate against the live index
@@ -282,7 +282,7 @@ static void AiPanelMessage(const wchar_t* json) {
                         for (auto& sp : ch.pages) {
                             if (sp.page != src->pageIndex) continue;
                             size_t ws, we;
-                            if (AiLocateInText(ch.text, WxU(src.quote), ws, we) != AQH_NONE &&
+                            if (AiLocateInText(ch.text, src->quote, ws, we) != AQH_NONE &&
                                 ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
                                 rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
                                 found = true;
@@ -379,8 +379,8 @@ static void AiHandleEvent(AiEv* e) {
             st->msgs.push_back(std::move(m));
             const char* kind = st->mode == 2 ? "editor" : st->mode == 1 ? "web" : "doc";
             if (st->convId.empty())
-                st->convId = AiHistEnsure(kind, WxU(st->pathOrRef), WxU(st.title));
-            AiHistUpsert(st->convId, kind, WxU(st->pathOrRef), WxU(st.title), st->msgs);
+                st->convId = AiHistEnsure(kind, WxU(st->pathOrRef), WxU(st->title));
+            AiHistUpsert(st->convId, kind, WxU(st->pathOrRef), WxU(st->title), st->msgs);
             if (st->mode == 1 && !st->msgs.empty()) {
                 // the notes tab's save-all rides the last assistant's cards? no:
                 // g_aiNotesCards stays the notes feature's own state

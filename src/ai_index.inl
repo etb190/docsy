@@ -252,8 +252,8 @@ struct AiChunker {
             sp.b = max(sp.b, pending[i].b);
         }
         c.text = text;
-        c.id = "chunk_" + AiSha256Hex16(WxU(std::to_string(charOffset) + text)) +
-               std::to_string(done.size());
+        c.id = "chunk_" + std::to_string(done.size()) + "_" +
+               std::to_string(charOffset);
         c.heading = WxU(pendingHeading);
         c.index = (int)done.size();
         charOffset += text.size() + 1;
@@ -508,8 +508,12 @@ static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
             ix.chunks.push_back(std::move(ch));
         }
     // vectors
+    std::string binS;
     std::vector<unsigned char> bin;
-    if (ix.dim > 0 && WxReadFile(AiVecPath(docId), bin) && bin.size() > 8) {
+    if (ix.dim > 0 && WxReadFile(AiVecPath(docId), binS)) {
+        bin.assign(binS.begin(), binS.end());
+    }
+    if (ix.dim > 0 && bin.size() > 8) {
         unsigned hdr[2];
         memcpy(hdr, bin.data(), 8);
         size_t need = (size_t)hdr[0] * hdr[1] * sizeof(float) + 8;
