@@ -497,11 +497,13 @@ static void EditorEnsureInit() {
                     g_edCtr->put_IsVisible(FALSE);
                 }
                 EventRegistrationToken zkm;
-                g_edWeb->add_ZoomFactorChanged(
+                g_edCtr->add_ZoomFactorChanged(
                     Microsoft::WRL::Callback<ICoreWebView2ZoomFactorChangedEventHandler>(
-                        [](ICoreWebView2*, ICoreWebView2ZoomFactorChangedEventArgs* a) -> HRESULT {
+                        // the event's args is a bare IUnknown - the new factor rides
+                        // the sender controller's own get_ZoomFactor
+                        [](ICoreWebView2Controller*, IUnknown*) -> HRESULT {
                             double f = 1.0;
-                            if (a && SUCCEEDED(a->get_ZoomFactor(&f))) g_edZoom = f;
+                            if (g_edCtr && SUCCEEDED(g_edCtr->get_ZoomFactor(&f))) g_edZoom = f;
                             StatusRepaint();                            // the combo and the
                             return S_OK;                                // status line follow
                         }).Get(), &zkm);
