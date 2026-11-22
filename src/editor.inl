@@ -28,10 +28,14 @@ static bool g_edInvert = false;
 
 // Toolbar buttons (Top Bar: navigation & document IO)
 enum {
-    EB_WEB, EB_PDF,
-    EB_SEP1,
-    EB_OPEN, EB_SAVE,
+    EB_CLOSE, EB_OPEN, EB_SAVE, EB_WEB, EB_PDF,
     EB_COUNT
+};
+static const wchar_t* const EbLabel[EB_COUNT] = {
+    L"Close", L"Open", L"Save", L"Web", L"PDF"
+};
+static const wchar_t* const EbGlyph[EB_COUNT] = {
+    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE8F1"
 };
 
 static int g_edHot = -1, g_edDown = -1;
@@ -67,6 +71,7 @@ static void EditorPostFont(const std::wstring& font) {
     std::wstring msg = L"{\"cmd\":\"font\",\"name\":\"" + font + L"\"}";
     g_edWeb->PostWebMessageAsJson(msg.c_str());
     if (g_etool) InvalidateRect(g_etool, nullptr, FALSE);
+    EditorCaptureThumb();
 }
 
 static void EditorToggleInvert() {
@@ -227,6 +232,43 @@ static std::vector<unsigned char> Base64Decode(const std::string& in) {
     return out;
 }
 
+
+static bool g_edCapturing = false;
+static bool g_edCapturePending = false;
+
+static void EditorCaptureThumb() {
+    if (!g_edWeb || !g_editOn || !g_edSide) return;
+    if (g_edCapturing) { g_edCapturePending = true; return; }
+    g_edCapturing = true;
+    wrl::ComPtr<IStream> st;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &st))) { g_edCapturing = false; return; }
+    wrl::ComPtr<ICoreWebView2CapturePreviewCompletedHandler> cb =
+        Microsoft::WRL::Callback<ICoreWebView2CapturePreviewCompletedHandler>(
+            [st](HRESULT hr) -> HRESULT {
+                g_edCapturing = false;
+                if (SUCCEEDED(hr)) {
+                    Gdiplus::Bitmap bmp(st.Get());
+                    if (bmp.GetLastStatus() == Gdiplus::Ok) {
+                        HBITMAP hbm = nullptr;
+                        bmp.GetHBITMAP(Gdiplus::Color(255, 255, 255, 255), &hbm);
+                        if (hbm) {
+                            if (g_edThumbBmp) DeleteObject(g_edThumbBmp);
+                            g_edThumbBmp = hbm;
+                            g_edThumbW = (int)bmp.GetWidth();
+                            g_edThumbH = (int)bmp.GetHeight();
+                            if (g.side) InvalidateRect(g.side, nullptr, FALSE);
+                        }
+                    }
+                }
+                if (g_edCapturePending) {
+                    g_edCapturePending = false;
+                    EditorCaptureThumb();
+                }
+                return S_OK;
+            });
+    g_edWeb->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, st.Get(), cb.Get());
+}
+
 static void EditorSetThumb(const std::string& dataUrl) {
     size_t comma = dataUrl.find(',');
     if (comma == std::string::npos) return;
@@ -285,7 +327,7 @@ static void EditorSideDraw(HDC dc, int w, int h) {
                          (int)(bandR.right - bandR.left), (int)(bandR.bottom - bandR.top));
     }
 
-    // Card white background
+    // Card white background & soft shadow
     HBRUSH wbr = (HBRUSH)GetStockObject(WHITE_BRUSH);
     FillRect(dc, &cardR, wbr);
 
@@ -301,7 +343,7 @@ static void EditorSideDraw(HDC dc, int w, int h) {
     }
 
     // Border around card
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x55, 0x55, 0x55));
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x40, 0x44, 0x4c));
     HGDIOBJ open = SelectObject(dc, pen);
     HGDIOBJ onb = SelectObject(dc, GetStockObject(NULL_BRUSH));
     Rectangle(dc, x, y, x + cardW, y + cardH);
@@ -311,7 +353,7 @@ static void EditorSideDraw(HDC dc, int w, int h) {
 
     // Label "Page 1"
     RECT lr{ 0, y + cardH + (int)(4 * g.dpi), w, y + cardH + (int)(24 * g.dpi) };
-    SelectObject(dc, CaptionFont(g_tbcap, 13, false, L"Segoe UI"));
+    SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(0xff, 0xff, 0xff));
     DrawTextW(dc, L"Page 1", -1, &lr, DT_CENTER | DT_TOP | DT_SINGLELINE);
@@ -362,6 +404,8 @@ static void EditorHandleMessage(const wchar_t* json) {
             WxWriteFile(g_edPath, (const unsigned char*)fullDoc.data(), fullDoc.size());
         }
         UpdateTitle();
+    } else if (t == "dirty") {
+        EditorCaptureThumb();
     } else if (t == "title") {
         std::string title = m.get("title") ? m.get("title")->str() : "";
         if (!title.empty()) { g_edTitle = WxW(title); UpdateTitle(); }
@@ -447,7 +491,7 @@ static void EditorToggle(bool on) {
     g_editOn = on;
     if (on) {
         if (g_webOn) WebToggle(false);
-        if (g.side && !g.full) ShowWindow(g.side, SW_SHOWNOACTIVATE);
+        if (g.side) ShowWindow(g.side, (g_edSide && !g.full) ? SW_SHOWNOACTIVATE : SW_HIDE);
         if (g.rail && !g.full) ShowWindow(g.rail, SW_SHOWNOACTIVATE);
         if (g.status) ShowWindow(g.status, SW_HIDE);
         if (g.bar) ShowWindow(g.bar, SW_HIDE);
@@ -460,6 +504,7 @@ static void EditorToggle(bool on) {
             RECT r; GetClientRect(g.view, &r);
             g_edCtr->put_Bounds(r);
             EditorRefocus();
+            EditorCaptureThumb();
         }
     } else {
         if (g_edCtr) g_edCtr->put_IsVisible(FALSE);
@@ -467,35 +512,36 @@ static void EditorToggle(bool on) {
         if (!g_webOn) {
             if (g.bar) ShowWindow(g.bar, SW_SHOWNOACTIVATE);
             if (g.status && !g.full) ShowWindow(g.status, SW_SHOWNOACTIVATE);
-            if (g.side && g.sideOn && DVF().n && !g.full) ShowWindow(g.side, SW_SHOWNOACTIVATE);
+            if (g.side) ShowWindow(g.side, (g.sideOn && DVF().n && !g.full) ? SW_SHOWNOACTIVATE : SW_HIDE);
             if (g.rail && !g.full) ShowWindow(g.rail, SW_SHOWNOACTIVATE);
         }
     }
     LayoutMain();
+    RailRepaint();
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
 }
 
-static int EditorBtnWidth(int i) {
-    if (i == EB_SEP1) return (int)(10 * g.dpi);
-    return (int)(28 * g.dpi);
-}
-
-// Layout calculation for ribbon buttons - left-aligned
 static RECT EditorBtnRect(int id, int w, int h) {
-    int btnH = (int)(28 * g.dpi);
-    int yMid = (h - btnH) / 2;
-    int gap = (int)(4 * g.dpi);
-
-    int curX = (int)(8 * g.dpi);
-
+    HDC dc = GetDC(g.main);
+    int bh = TbBtnH();
+    int y0 = (int)(2 * g.dpi);
+    int lx = (int)(4 * g.dpi);
+    RECT res{ 0, 0, 0, 0 };
     for (int i = 0; i < EB_COUNT; i++) {
-        int bw = EditorBtnWidth(i);
-        RECT r{ curX, yMid, curX + bw, yMid + btnH };
-        if (i == id) return r;
-        curX += bw + gap;
+        RECT rc{ 0, 0, 0, 0 };
+        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        DrawTextW(dc, EbLabel[i], -1, &rc, DT_CALCRECT | DT_SINGLELINE);
+        SelectObject(dc, of);
+        int bw = max((int)(24 * g.dpi), (int)(rc.right - rc.left)) + (int)(12 * g.dpi);
+        if (i == id) {
+            res = RECT{ lx, y0, lx + bw, y0 + bh };
+            break;
+        }
+        lx += bw;
     }
-    return RECT{ 0, 0, 0, 0 };
+    ReleaseDC(g.main, dc);
+    return res;
 }
 
 static void EditorToolDraw(HDC dc, int w, int h) {
@@ -518,28 +564,25 @@ static void EditorToolDraw(HDC dc, int w, int h) {
     Gdiplus::Graphics gs(dc);
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
+    int capH = 0;
+    {
+        RECT mc{ 0, 0, 0, 0 };
+        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        DrawTextW(dc, L"Editor", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
+        SelectObject(dc, of);
+        capH = mc.bottom - mc.top;
+    }
+
     for (int i = 0; i < EB_COUNT; i++) {
         RECT r = EditorBtnRect(i, w, h);
         if (r.right <= r.left) continue;
-
-        if (i == EB_SEP1) {
-            int cx = (r.left + r.right) / 2;
-            int sy0 = (h - (int)(18 * g.dpi)) / 2;
-            HPEN sp = CreatePen(PS_SOLID, 1, RGB(0x45, 0x48, 0x50));
-            HGDIOBJ osp = SelectObject(dc, sp);
-            MoveToEx(dc, cx, sy0, nullptr);
-            LineTo(dc, cx, sy0 + (int)(18 * g.dpi));
-            SelectObject(dc, osp);
-            DeleteObject(sp);
-            continue;
-        }
 
         bool hot = (g_edHot == i);
         bool pr = (g_edDown == i && hot);
 
         if (hot || pr) {
             Gdiplus::GraphicsPath p;
-            float rr = 3.0f * (float)g.dpi;
+            float rr = (float)(4 * g.dpi);
             float fx = (float)r.left, fy = (float)r.top;
             float fw = (float)(r.right - r.left), fh = (float)(r.bottom - r.top);
             p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
@@ -548,39 +591,42 @@ static void EditorToolDraw(HDC dc, int w, int h) {
             p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
             p.CloseFigure();
 
-            Gdiplus::Color col;
-            if (pr) col = Gdiplus::Color(255, 0x26, 0x29, 0x30);
-            else col = Gdiplus::Color(255, 0x3c, 0x41, 0x4c);
-
-            Gdiplus::SolidBrush fbr(col);
+            Gdiplus::SolidBrush fbr(pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
+                                       : Gdiplus::Color(255, 0x40, 0x40, 0x40));
             gs.FillPath(&fbr, &p);
         }
 
-        COLORREF ink;
-        if (hot || pr) ink = RGB(0xf2, 0xf4, 0xf8);
-        else ink = RGB(0xc4, 0xc8, 0xd0);
+        int gh = (int)(24 * g.dpi), gap = (int)(2 * g.dpi);
+        int colH = gh + gap + capH;
+        int avail = (int)(r.bottom - r.top) - colH;
+        int y0 = r.top + max(0, avail) / 2;
+        RECT gr{ r.left, y0, r.right, y0 + gh };
+        RECT cr{ r.left, y0 + gh + gap, r.right, y0 + gh + gap + capH };
 
-        HFONT btnF = CaptionFont(g_tbglyph, 14, false, L"Segoe MDL2 Assets");
-        const wchar_t* text = L"";
+        bool accent = (i == EB_SAVE);
+        COLORREF fg = accent ? RGB(0x1e, 0xa5, 0x4c) : (hot || pr ? RGB(0xff, 0xff, 0xff) : RGB(0xe0, 0xe0, 0xe0));
 
-        switch (i) {
-        case EB_WEB: text = L"\uE774"; break;
-        case EB_PDF: text = L"\uE8F1"; break;
-        case EB_OPEN: text = L"\uE8DA"; break;
-        case EB_SAVE: text = L"\uE74E"; break;
-        }
+        // Draw Glyph
+        SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
+        SetTextColor(dc, RGB(16, 16, 16));
+        RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
+        DrawTextW(dc, EbGlyph[i], -1, &gs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(dc, fg);
+        DrawTextW(dc, EbGlyph[i], -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        if (btnF && text[0]) {
-            HGDIOBJ obf = SelectObject(dc, btnF);
-            SetTextColor(dc, ink);
-            DrawTextW(dc, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(dc, obf);
-        }
+        // Draw Label
+        SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        SetTextColor(dc, RGB(16, 16, 16));
+        RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
+        DrawTextW(dc, EbLabel[i], -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SetTextColor(dc, fg);
+        DrawTextW(dc, EbLabel[i], -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
 static void EditorClick(int id, HWND h, const RECT& r) {
     switch (id) {
+    case EB_CLOSE:
     case EB_PDF:
         EditorToggle(false);
         break;

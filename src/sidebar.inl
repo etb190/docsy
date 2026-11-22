@@ -31,12 +31,23 @@ static void RailRects(RECT r[RB_COUNT], int h) {   // 24px cells, 6px gaps, 6px 
 // not (KillerPDF's split acts on the WINDOW - pane B simply opens on its start
 // screen).
 static bool RailOn(int id) {
-    return id == RB_SPLIT ? g.split
-         : id == RB_PAGES ? (g.sideOn && DVF().n)
-         : false;
+    if (id == RB_PAGES) {
+        if (g_editOn) return g_edSide;
+        if (g_webOn) return g_webSide;
+        return g.sideOn && (DVF().n > 0);
+    }
+    return id == RB_SPLIT ? g.split : false;
 }
 static bool RailEnabled(int id) {
-    return id == RB_SPLIT ? true : (DVF().n > 0);
+    if (id == RB_PAGES) {
+        if (g_editOn || g_webOn) return true;
+        return DVF().n > 0;
+    }
+    if (id == RB_SPLIT) {
+        if (g_editOn || g_webOn) return false;
+        return true;
+    }
+    return true;
 }
 
 // KillerPDF centers the rail glyphs with GlyphInk.Center (Controls/GlyphInk.cs):

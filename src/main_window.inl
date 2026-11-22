@@ -25,14 +25,14 @@ static void LayoutMain() {
     if (g_editOn) {
         int th = EDITOR_TOOL_H();
         int ch = max(0, h - cap0 - th);
-        int sw = SW();
+        int sw = (g_edSide && !g.full) ? SW() : 0;
         int rw = RW();
         int vw = max(0, w - sw - rw);
         if (g_etool) MoveWindow(g_etool, 0, cap0, w, th, TRUE);
         if (g.side) {
             MoveWindow(g.side, 0, cap0 + th, sw, ch, TRUE);
             sd.cw = sw; sd.ch = ch;
-            ShowWindow(g.side, SW_SHOWNOACTIVATE);
+            ShowWindow(g.side, (g_edSide && !g.full) ? SW_SHOWNOACTIVATE : SW_HIDE);
         }
         if (g.rail) {
             MoveWindow(g.rail, sw, cap0 + th, rw, ch, TRUE);
@@ -167,6 +167,20 @@ static void LayoutMain() {
 }
 
 static void ToggleSide() {
+    if (g_editOn) {
+        g_edSide = !g_edSide;
+        if (g.side) ShowWindow(g.side, g_edSide ? SW_SHOWNOACTIVATE : SW_HIDE);
+        RailRepaint();
+        LayoutMain();
+        return;
+    }
+    if (g_webOn) {
+        g_webSide = !g_webSide;
+        if (g.side) ShowWindow(g.side, g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE);
+        RailRepaint();
+        LayoutMain();
+        return;
+    }
     if (!DVF().n) return;
     g.sideOn = !g.sideOn;
     ShowWindow(g.side, g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE);

@@ -544,7 +544,8 @@ static HFONT g_uifont = nullptr, g_sidefont = nullptr;
 static HFONT g_glyphfont = nullptr, g_wordfont = nullptr;
 static bool g_webOn = false;             // the browser owns the window chrome (declared early:
                                          // the caption painter and the layout branch on it)
-static bool g_editOn = false;            // the text editor owns the window chrome
+static bool g_editOn = false;
+static bool g_edSide = true;            // the text editor owns the window chrome
 static void EditorToggle(bool on);
 static void EditorOpenFile(const std::wstring& path);
 static void EditorEnsureInit();
@@ -1072,7 +1073,7 @@ static int WebBarH();                    // the bar's height (bookmarks.inl)
 static int WEBSTRIPH() { return g_webOn ? (int)(44 * g.dpi) + WebBarH() : 0; }   // the toolbar band (Safari)
 static HWND g_wtool = nullptr;           // the reader's own top toolbar, carried into browser mode
 static HWND g_etool = nullptr;           // the text editor toolbar
-static int EDITOR_TOOL_H() { return (int)(38 * g.dpi); } // compact ribbon matching Avalanche
+static int EDITOR_TOOL_H() { return TBH(); } // compact ribbon matching Avalanche
 static int WEBTOOLH() { return g_webOn ? TBH() : 0; }   // ...with one button: back to the PDF reader
 static int WEBTABH() { return (int)(34 * g.dpi); }   // the tab band: the reader's 3px inset + 29px face + 1px foot
 static void WebToggle(bool on);           // the Web / Reader buttons
