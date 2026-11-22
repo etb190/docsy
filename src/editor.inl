@@ -29,14 +29,14 @@ static int g_edSize = 12;
 
 // Toolbar buttons (Top Bar: navigation & document IO)
 enum {
-    EB_CLOSE, EB_OPEN, EB_SAVE, EB_WEB, EB_PDF,
+    EB_CLOSE, EB_OPEN, EB_SAVE, EB_WEB, EB_PDF, EB_AI,
     EB_COUNT
 };
 static const wchar_t* const EbLabel[EB_COUNT] = {
-    L"Close", L"Open", L"Save", L"Web", L"PDF"
+    L"Close", L"Open", L"Save", L"Web", L"PDF", L"AI"
 };
 static const wchar_t* const EbGlyph[EB_COUNT] = {
-    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE8A5"
+    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE8A5", L"\uE8BD"
 };
 
 static int g_edHot = -1, g_edDown = -1;
@@ -423,6 +423,11 @@ static void EditorHandleMessage(const wchar_t* json) {
         StatusRepaint();                             // so the footer's glyph tracks it
     } else if (t == "fullscreen") {                  // F11 from the page: the WebView2 owns
         ToggleFull(g.main);                          // the keys while the focus is in it;
+    } else if (t == "aitext") {                      // the AI sidechat's plain-text read
+        std::string text = m.get("text") ? m.get("text")->str() : "";
+        AiEv* e = AiEvMake(AIEV_ED_TEXT);
+        e->a = text;
+        AiPost(e);
     } else if (t == "thumbs") {                      // ToggleFull notifies the page itself
         if (auto th = m.get("thumbs")) {
             if (th && th->t == 'a' && !th->a.empty() && th->a[0].t == 's') {
@@ -514,6 +519,7 @@ static void EditorEnsureInit() {
 static void EditorToggle(bool on) {
     if (on == g_editOn) return;
     g_editOn = on;
+    AiModeChanged();                               // the panel rebinds: editor <-> reader
     if (on) {
         if (g_webOn) WebToggle(false);
         if (g.side) ShowWindow(g.side, (g_edSide && !g.full) ? SW_SHOWNOACTIVATE : SW_HIDE);
@@ -663,6 +669,9 @@ static void EditorClick(int id, HWND h, const RECT& r) {
         break;
     case EB_SAVE:
         EditorSave();
+        break;
+    case EB_AI:
+        AiChatToggle();
         break;
     }
     EditorRefocus();

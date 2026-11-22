@@ -1,5 +1,10 @@
 // ---------------- main window ----------------
 
+static void AiOverlayLayout();              // the AI panel's bounds ride every layout
+static void AiIndexTick();                  // the AI workers' pumps ride the main timer
+static void AiRangeTick();
+static void AiHandleEvent(AiEv* e);
+
 static void LayoutMain() {
     if (!g.main || !g.view) return;
     RECT r; GetClientRect(g.main, &r);
@@ -45,6 +50,7 @@ static void LayoutMain() {
             RECT vr{ 0, 0, vw, ch };
             g_edCtr->put_Bounds(vr);
         }
+        AiOverlayLayout();                   // the AI panel rides the editor's strip too
         for (auto& k : kids) {
             if (!k.w) continue;
             RECT now; GetWindowRect(k.w, &now); ScreenToClient(g.main, (POINT*)&now);
@@ -172,6 +178,7 @@ static void LayoutMain() {
         }
         UpdateTitle();
     }
+    AiOverlayLayout();                       // the AI panel re-pins to the view's right edge
 }
 
 static void ToggleSide() {
@@ -604,9 +611,12 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == 3) { InvalidateCap(h); return 0; }   // hovered-button keepalive repaint
         if (wp == 7) { WebCaptureTick(); return 0; }   // the web thumbs' capture pump
-        break;                                 // (buffered, so an unchanged band reblits
-                                               // identically and cannot strobe)
+        if (wp == 4713) { AiIndexTick(); return 0; }   // the AI index's OCR pump: one
+                                                       // page per tick, like the find scan
+        if (wp == 4714) { AiRangeTick(); return 0; }   // the AI range extraction's pump
+        break;                                 // (the find bar's pumps ride the view)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
+    case WM_APP + 71: AiHandleEvent((AiEv*)lp); return 0;   // the AI workers' event pump
     case WM_APP + 5: WxInstallDone((WxJob*)lp); return 0;   // an extension download finished
     case WM_APP + 7: WxEngineRestart(); return 0;   // the deferred engine restart: a fresh
                                                     // browser process for extension operations

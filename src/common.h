@@ -71,8 +71,15 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
+#include <map>
+#include <set>
+#include <array>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
+#include <thread>
+#include <functional>
+#include <regex>
 #include <string>
 #include <cwctype>
 #include <cmath>
@@ -628,6 +635,10 @@ static int RW();                        // the rail's column width (0 in full sc
 static void RailRepaint();              // the rail repaints when a lit state flips
 static void ToggleSplit();
 static void ToggleSide();               // defined with the main window (the Pages button)
+static void AiChatToggle();             // the AI panel's toolbar button (defined in ai_ui.inl)
+static void SumToggle(int mode);        // the Page Summary navigator (defined in ai_ui2.inl)
+static void AiPaintPage(HDC dc, const DocState& D, int page, int px, int py);   // the citation's highlight quad (ai_ui2.inl)
+static void AiOverlayLayout();          // the panel's bounds ride every layout (ai_ui.inl)
 static void InfoOpen();
 static bool InfoIsOpen();
 static void SetStatusHold(const std::wstring& t, unsigned ms = 2500);   // the footer's held line
@@ -1146,16 +1157,16 @@ static int g_wtCur = -1;                 // the focused web tab; the tab row's p
                                          // for the press-to-switch rule, so it lives up here
 
 // (the 20px frame + four vector arrows), DrawToolbarGlyph's TransformBoxMove.
-enum { TB_CLOSE, TB_OPEN, TB_SAVE, TB_WEB, TB_EDIT,   // the file cluster; TB_WEB opens browser, TB_EDIT opens editor
+enum { TB_CLOSE, TB_OPEN, TB_SAVE, TB_WEB, TB_EDIT, TB_AI, TB_SUM,   // the file cluster; TB_WEB opens browser, TB_EDIT opens editor, TB_AI the AI panel, TB_SUM the summary navigator
        TB_SELECT, TB_TEXT, TB_HIGHLIGHT, TB_LINE, TB_SHAPE, TB_DRAW,
        TB_TRANSFORM, TB_CLEAR, TB_FIND, TB_COUNT };
 static const wchar_t* const TbLabel[TB_COUNT] = {
-    L"Close", L"Open", L"Save", L"Web", L"Editor",
+    L"Close", L"Open", L"Save", L"Web", L"Editor", L"AI", L"Summarize",
     L"Select", L"Text", L"Highlight", L"Line", L"Shapes", L"Draw",
     L"Transform", L"Clear All", L"Find Text"
 };
 static const wchar_t* const TbGlyph[TB_COUNT] = {
-    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE70B",
+    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE70B", L"\uE8BD", L"\uE8A5",
     L"\uE8B0", L"\uE8D2", L"\uE7E6", L"\uE738", L"\uE739", L"\uED63",
     L"", L"\uED62", L"\uE721"
 };   // Transform carries its composed icon, drawn in BarDraw
@@ -1176,6 +1187,8 @@ static bool TbEnabled(int i) {
     if (i == TB_OPEN) return true;
     if (i == TB_WEB) return true;         // the browser needs no document
     if (i == TB_EDIT) return true;        // the text editor needs no document
+    if (i == TB_AI) return true;          // the AI panel rides every mode
+    if (i == TB_SUM) return doc;          // the navigator needs a document, like the tools
     if (i == TB_CLEAR) {
         if (!doc) return false;
         for (auto& kv : DVF().annos) if (!kv.second.empty()) return true;
@@ -1516,6 +1529,8 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 case TB_SAVE: SaveDoc(false); break;
                 case TB_WEB: WebToggle(true); break;
                 case TB_EDIT: EditorToggle(true); break;
+                case TB_AI: AiChatToggle(); break;
+                case TB_SUM: SumToggle(0); break;   // the book's digest navigator
                 case TB_TRANSFORM: TransformPopupOpen(); break;
                 case TB_CLEAR: ClearAllAnnos(); break;
                 case TB_FIND: FindToggle(); break;

@@ -1,0 +1,522 @@
+<body>
+<div id="app">
+  <div id="hdr">
+    <div class="row">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="#1ea54c" fill-rule="evenodd">
+        <rect x="4" y="7" width="16" height="12" rx="3.5"/>
+        <ellipse cx="12" cy="2.2" rx="1.35" ry="1.35"/>
+        <rect x="11.42" y="3.6" width="1.16" height="3.45" rx="0.58"/>
+        <rect x="2" y="10.6" width="1.95" height="4.6" rx="1"/>
+        <rect x="20.05" y="10.6" width="1.95" height="4.6" rx="1"/>
+        <ellipse cx="8.8" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/>
+        <ellipse cx="15.2" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/>
+        <rect x="9.2" y="15.7" width="5.6" height="1.3" rx="0.65" fill="#1c1c1c"/>
+      </svg>
+      <div class="title">AI Assistant</div>
+      <button class="ibtn" id="bSem" title="Semantic research - build a search index for this document">&#xE945;</button>
+      <button class="ibtn" id="bHist" title="Chat history">&#xE81C;</button>
+      <button class="ibtn" id="bSet" title="AI settings">&#xE713;</button>
+      <button class="ibtn" id="bNew" title="New chat">&#xE710;</button>
+      <button class="ibtn" id="bClose" title="Close AI Assistant">&#xE711;</button>
+    </div>
+    <div id="ctxTitle"></div>
+    <div id="tabs">
+      <button class="tab on" id="tabChat">Chat</button>
+      <button class="tab" id="tabNotes">Notes</button>
+    </div>
+  </div>
+
+  <div id="archive"><span id="archiveText"></span>
+    <button class="ibtn" id="bReopen" style="width:auto; padding:0 8px; color:var(--primary); font-family:inherit; font-size:11px;">Reopen</button>
+  </div>
+
+  <div id="chatWrap">
+    <div id="msgs"></div>
+    <div id="empty">
+      <svg width="42" height="42" viewBox="0 0 24 24" fill="#a0a0a0" fill-rule="evenodd" opacity=".8">
+        <rect x="4" y="7" width="16" height="12" rx="3.5"/>
+        <ellipse cx="12" cy="2.2" rx="1.35" ry="1.35"/>
+        <rect x="11.42" y="3.6" width="1.16" height="3.45" rx="0.58"/>
+        <rect x="2" y="10.6" width="1.95" height="4.6" rx="1"/>
+        <rect x="20.05" y="10.6" width="1.95" height="4.6" rx="1"/>
+        <ellipse cx="8.8" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/>
+        <ellipse cx="15.2" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/>
+        <rect x="9.2" y="15.7" width="5.6" height="1.3" rx="0.65" fill="#1c1c1c"/>
+      </svg>
+      <div class="t1">Ask about this document</div>
+      <div class="t2">Ask anything about what you are reading - the answer is grounded in the document's own passages, with sources you can jump to.</div>
+    </div>
+    <div id="idxStrip" class="strip"></div>
+    <div id="semStrip" class="strip"></div>
+    <div id="durLine" class="strip"><span id="durText"></span><span id="durModel"></span></div>
+    <div id="composer">
+      <textarea id="input" rows="1" placeholder="Ask about this PDF... (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button class="sbtn" id="bStop" title="Stop the current reply">&#xE71A;</button>
+      <button class="sbtn" id="bSend" title="Send (Enter)">&#xE724;</button>
+    </div>
+
+    <div class="ovl" id="setOvl">
+      <div class="ohead"><span style="flex:1">AI settings</span>
+        <button class="ibtn" id="bSetClose" title="Close settings">&#xE711;</button></div>
+      <div class="obody">
+        <div class="flabel">Chat Base URL</div>
+        <input class="fbox" id="sUrl" placeholder="http://localhost:11434/v1">
+        <div class="flabel">Chat API Key</div>
+        <input class="fbox" id="sKey" type="password" placeholder="(empty for local Ollama)">
+        <div class="flabel">Chat Model</div>
+        <input class="fbox" id="sModel" placeholder="gpt-oss:120b-cloud">
+        <div class="flabel">Temperature</div>
+        <input class="fbox" id="sTemp" type="number" step="0.1" min="0" max="2">
+        <div class="flabel">Max Tokens</div>
+        <input class="fbox" id="sTok" type="number" min="256">
+        <div class="flabel">Top P</div>
+        <input class="fbox" id="sTopP" type="number" step="0.05" min="0" max="1">
+        <div class="flabel">Reasoning Effort</div>
+        <select class="fbox" id="sEffort"><option value="">(none)</option><option>low</option><option>medium</option><option>high</option></select>
+        <div class="flabel">Embedding Model</div>
+        <input class="fbox" id="sEmb" placeholder="embeddinggemma:latest">
+        <div class="flabel">Passages per question (Top K)</div>
+        <input class="fbox" id="sTopK" type="number" min="1">
+        <div class="flabel">Evidence character budget</div>
+        <input class="fbox" id="sBudget" type="number" min="1000">
+        <div class="flabel">History messages sent</div>
+        <input class="fbox" id="sHist" type="number" min="2">
+        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+          <button class="abtn primary" id="bSave">Save</button>
+          <button class="abtn" id="bOllama">Ollama preset</button>
+          <button class="abtn" id="bTest">Test connection</button>
+        </div>
+        <div id="cloudNote"></div>
+        <div id="testOut"></div>
+      </div>
+    </div>
+
+    <div class="ovl" id="histOvl">
+      <div class="ohead"><button class="ibtn" id="bHistBack" title="Back to the conversation">&#xE72B;</button>
+        <span>History</span></div>
+      <div class="obody" id="histBody"><div id="histEmpty">No conversations yet.</div></div>
+    </div>
+  </div>
+
+  <div id="notesTab">
+    <div id="notesHead">
+      <div id="notesRow">
+        <label>Pages</label>
+        <input id="notesRange" placeholder="1-100" spellcheck="false">
+        <button id="notesGen">Generate</button>
+      </div>
+      <div id="notesCtl">
+        <button class="nbtn" id="bNotesSaveAll">Save All to Axo</button>
+        <button class="nbtn" id="bNotesCopyAll">Copy All Notes</button>
+      </div>
+      <div id="notesStatus"></div>
+    </div>
+    <div id="notesRule"></div>
+    <div id="notesCards"><div id="notesEmpty">Select a page range and click Generate Notes to create review cards.</div></div>
+  </div>
+</div>
+<script>
+"use strict";
+function post(o){ try{ window.chrome.webview.postMessage(o); }catch(e){} }
+var $=function(id){ return document.getElementById(id); };
+
+var S={ mode:"", streaming:false, msgs:[], displayN:{}, semReady:false, semActive:false,
+        archive:false, notesCards:[], tab:"chat" };
+
+/* ---------------- markdown (AiMarkdown.cs's grammar) ---------------- */
+function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function expandMulti(t){   // [SOURCE_1, SOURCE_2] -> [SOURCE_1] [SOURCE_2]
+  return t.replace(/\[\s*(?:SOURCE[\s_\-]*)?(\d{1,3})\s*,\s*(?:SOURCE[\s_\-]*)?(\d{1,3})\s*\]/gi,
+    "[SOURCE_$1] [SOURCE_$2]");
+}
+var CIT_RX=/[\[\uff3b\u3010(\uff08]\s*SOURCE[\s_\-]*(\d{1,3})\s*[\]\uff3d\u3011)\uff09]|\[(\d{1,3})\](?!\s*\()|SOURCE[\s_\-]*(\d{1,3})(?!\w)|[\u2460-\u2473]/gi;
+function citeNum(id){      // appearance-order display number (AiCitationNumberer)
+  if(S.displayN[id]===undefined){ var n=1; for(var k in S.displayN) n++;
+    S.displayN[id]=n; }
+  return S.displayN[id];
+}
+function inlineMd(t){
+  t=expandMulti(t);
+  var out="", last=0, m;
+  CIT_RX.lastIndex=0;
+  var parts=[];
+  while((m=CIT_RX.exec(t))){
+    parts.push({a:m.index, b:m.index+m[0].length, cite:(m[1]||m[2]||m[3])!==undefined?
+      "SOURCE_"+parseInt((m[1]||m[2]||m[3]),10) : "SOURCE_"+(t.charCodeAt(m.index)-0x2460+1)});
+  }
+  var i=0;
+  function flush(seg){
+    // inline: `code`, **bold**, *italic*, [label](url) - longest marker first
+    var s="";
+    var r=/(`[^`\n]+`)|(\*\*\*([^*\n]+?)\*\*\*)|(\*\*([^*\n]+?)\*\*)|(__([^_\n]+?)__)|(\*([^*\n]+?)\*)|(_([^_\n]+?)_)|(\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\))/g;
+    var mm, li=0;
+    while((mm=r.exec(seg))){
+      s+=seg.slice(li,mm.index);
+      if(mm[1]) s+="<code>"+esc(mm[1].slice(1,-1))+"</code>";
+      else if(mm[3]!==undefined) s+="<strong><em>"+inlinePlain(mm[3])+"</em></strong>";
+      else if(mm[5]!==undefined) s+="<strong>"+inlinePlain(mm[5])+"</strong>";
+      else if(mm[7]!==undefined) s+="<strong>"+inlinePlain(mm[7])+"</strong>";
+      else if(mm[9]!==undefined) s+="<em>"+inlinePlain(mm[9])+"</em>";
+      else if(mm[11]!==undefined) s+="<em>"+inlinePlain(mm[11])+"</em>";
+      else if(mm[12]!==undefined) s+='<a href="'+mm[13]+'" title="'+mm[13]+'">'+esc(mm[12])+"</a>";
+      li=mm.index+mm[0].length;
+    }
+    s+=seg.slice(li);
+    return s;
+  }
+  function inlinePlain(x){ return esc(x).replace(/\*\*([^*\n]+)\*\*/g,"<strong>$1</strong>"); }
+  for(var p of parts){ out+=flush(t.slice(i,p.a));
+    var n=citeNum(p.cite), dead=!S.sources[p.cite];
+    out+='<span class="cite'+(dead?" dead":"")+'" data-src="'+p.cite+'" title="'+
+      esc(citeTip(p.cite))+'">'+n+"</span>";
+    i=p.b; }
+  out+=flush(t.slice(i));
+  return out;
+}
+function citeTip(id){
+  var s=S.sources[id];
+  if(!s) return id;
+  var q=(s.quote||s.reason||"");
+  if(q.length>180) q=q.slice(0,180)+"…";
+  return (s.page?("Page "+s.page+" - "):"")+q;
+}
+S.sources={};
+function renderMd(text, el){
+  var lines=text.replace(/\r\n|\r/g,"\n").split("\n"), html="", i=0, para=[], listOpen="";
+  function flushPara(){ if(para.length){ html+="<p>"+para.join(" ")+"</p>"; para=[]; } }
+  function closeList(){ if(listOpen){ html+="</"+listOpen+">"; listOpen=""; } }
+  while(i<lines.length){
+    var ln=lines[i].replace(/\s+$/,"");
+    if(/^```/.test(ln)){ flushPara(); closeList();
+      var code=[], j=i+1;
+      for(; j<lines.length && !/^```/.test(lines[j]); j++) code.push(lines[j]);
+      html+="<pre><code>"+esc(code.join("\n"))+"</code></pre>"; i=j+1; continue; }
+    var hm=ln.match(/^(#{1,6})\s+(.*)$/);
+    if(hm){ flushPara(); closeList(); var lv=hm[1].length;
+      html+="<h"+lv+">"+inlineMd(hm[2])+"</h"+lv+">"; i++; continue; }
+    if(/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(ln)){ flushPara(); closeList(); html+="<hr>"; i++; continue; }
+    var bm=ln.match(/^\s*[-*+]\s+(.*)$/);
+    if(bm){ flushPara(); if(listOpen!=="ul"){ closeList(); html+="<ul>"; listOpen="ul"; }
+      html+="<li>"+inlineMd(bm[1])+"</li>"; i++; continue; }
+    var nm=ln.match(/^\s*(\d{1,3})[.)]\s+(.*)$/);
+    if(nm){ flushPara(); if(listOpen!=="ol"){ closeList(); html+="<ol>"; listOpen="ol"; }
+      html+="<li>"+inlineMd(nm[2])+"</li>"; i++; continue; }
+    var qm=ln.match(/^\s*>\s?(.*)$/);
+    if(qm){ flushPara(); closeList(); html+="<blockquote>"+inlineMd(qm[1])+"</blockquote>"; i++; continue; }
+    if(ln.trim()===""){ flushPara(); closeList(); i++; continue; }
+    para.push(inlineMd(ln.trim())); i++;
+  }
+  flushPara(); closeList();
+  el.innerHTML=html||"<p></p>";
+}
+
+/* ---------------- chat rendering ---------------- */
+var ROBOT='<svg width="14" height="14" viewBox="0 0 24 24" fill="#e0e0e0" fill-rule="evenodd">'+
+ '<rect x="4" y="7" width="16" height="12" rx="3.5"/><ellipse cx="12" cy="2.2" rx="1.35" ry="1.35"/>'+
+ '<rect x="11.42" y="3.6" width="1.16" height="3.45" rx="0.58"/><rect x="2" y="10.6" width="1.95" height="4.6" rx="1"/>'+
+ '<rect x="20.05" y="10.6" width="1.95" height="4.6" rx="1"/><ellipse cx="8.8" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/>'+
+ '<ellipse cx="15.2" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/><rect x="9.2" y="15.7" width="5.6" height="1.3" rx="0.65" fill="#1c1c1c"/></svg>';
+var PERSON='<svg width="14" height="14" viewBox="0 0 24 24" fill="#e0e0e0">'+
+ '<circle cx="12" cy="8" r="4"/><path d="M4 20c0-4.4 3.6-7 8-7s8 2.6 8 7v1H4z"/></svg>';
+
+function addMsg(role, content, sources){
+  var wrap=document.createElement("div");
+  wrap.className="msg "+(role==="user"?"user":"bot");
+  var ava=document.createElement("div"); ava.className="ava";
+  ava.style.background=role==="user"?"var(--user-ava)":"var(--bot-ava)";
+  ava.innerHTML=role==="user"?PERSON:ROBOT;
+  var cell=document.createElement("div"); cell.className="cell";
+  var b=document.createElement("div"); b.className="bubble";
+  if(role==="user") b.textContent=content;
+  else { renderMd(content, b); }
+  cell.appendChild(b); wrap.appendChild(ava); wrap.appendChild(cell);
+  $("msgs").appendChild(wrap);
+  scrollBottom();
+  return {wrap:wrap, bubble:b, cell:cell};
+}
+function scrollBottom(){ var m=$("msgs"); m.scrollTop=m.scrollHeight; }
+function nearBottom(){ var m=$("msgs");
+  return m.scrollHeight-m.scrollTop-m.clientHeight<48; }
+
+function addThink(text){  // the thinking box: spinner + status word
+  var wrap=document.createElement("div"); wrap.className="msg bot";
+  var ava=document.createElement("div"); ava.className="ava";
+  ava.style.background="var(--bot-ava)"; ava.innerHTML=ROBOT;
+  var cell=document.createElement("div"); cell.className="cell";
+  var t=document.createElement("div"); t.className="think";
+  t.innerHTML='<div class="spin"></div><span></span>';
+  t.lastChild.textContent=text||"Thinking…";
+  cell.appendChild(t); wrap.appendChild(ava); wrap.appendChild(cell);
+  $("msgs").appendChild(wrap); scrollBottom();
+  return {wrap:wrap, cell:cell, think:t, bubble:null};
+}
+function thinkToBubble(h){  // the first delta replaces the wait box in place
+  if(h.bubble) return;
+  if(h.think){ h.think.remove(); h.think=null; }
+  var b=document.createElement("div"); b.className="bubble";
+  b.style.background="var(--bot-bg)"; b.style.border="1px solid var(--line)";
+  b.style.borderRadius="8px"; b.style.padding="8px 10px";
+  h.cell.appendChild(b); h.bubble=b;
+}
+function setError(h,text){   // the error box: the single surface of a failure
+  if(h.think){ h.think.remove(); h.think=null; }
+  if(h.bubble){ h.bubble.remove(); h.bubble=null; }
+  var e=document.createElement("div"); e.className="errbox"; e.textContent=text;
+  h.cell.appendChild(e);
+}
+function clearMsgs(){ $("msgs").innerHTML=""; S.displayN={}; S.sources={}; }
+function setEmpty(){ var any=S.msgs.length>0 || $("msgs").children.length>0;
+  $("empty").style.display=any?"none":"flex"; }
+
+/* ---------------- statuses ---------------- */
+function paintStatus(st){
+  var ix=st.indexing||{};
+  $("idxStrip").style.display=(ix.on&&ix.status)?"block":"none";
+  $("idxStrip").textContent=ix.status||"";
+  if(ix.on && ix.progress!==undefined && ix.progress>=0){
+    $("idxStrip").textContent=ix.status+"  "+Math.round(ix.progress*100)+"%"; }
+  $("semStrip").style.display=st.semantic?"block":"none";
+  $("semStrip").textContent=st.semantic||"";
+  $("durText").textContent=st.duration||"";
+  $("durModel").textContent=st.model||"";
+  $("durLine").style.display=(st.duration||st.model)?"flex":"none";
+  $("bSem").className="ibtn"+(st.semActive?" on":(st.semReady?" ready":""));
+}
+function paintBusy(){
+  $("bStop").style.display=S.streaming?"flex":"none";
+  $("bSend").style.display=S.streaming?"none":"flex";
+  $("bSend").disabled=!$("input").value.trim();
+  $("bNew").disabled=S.streaming;
+}
+
+/* ---------------- C++ -> panel ---------------- */
+window.addEventListener("message", function(e){
+  var m=e.data; if(!m||!m.cmd) return;
+  switch(m.cmd){
+  case "init":
+    S.mode=m.mode||"doc"; $("ctxTitle").textContent=m.title||"";
+    paintStatus(m); S.streaming=false; paintBusy();
+    if(m.settings) fillSettings(m.settings);
+    setEmpty(); break;
+  case "ctx":
+    S.mode=m.mode||""; $("ctxTitle").textContent=m.title||"";
+    clearMsgs(); S.msgs=[]; S.archive=false; $("archive").style.display="none";
+    paintStatus(m); setEmpty(); break;
+  case "title":
+    $("ctxTitle").textContent=m.title||""; break;
+  case "msgs":
+    clearMsgs(); S.msgs=m.msgs||[];
+    for(var mm of S.msgs) addMsg(mm.role, mm.content, mm.sources);
+    setEmpty(); break;
+  case "user": S.msgs.push({role:"user", content:m.text}); addMsg("user", m.text); setEmpty(); break;
+  case "loading":
+    H=addThink(m.text||"Thinking…"); setEmpty(); break;
+  case "delta":
+    if(H){ thinkToBubble(H); renderMd(m.text, H.bubble);
+      if(nearBottom()) scrollBottom(); }
+    break;
+  case "answer":
+    if(H){ S.sources={}; var src=m.sources||[];
+      for(var s of src) S.sources[s.id]=s;
+      if(H.think){ H.think.remove(); H.think=null; }
+      if(H.bubble) H.bubble.remove();
+      var el=addMsg("bot", m.text||"", src);
+      H.wrap.remove(); H=el;
+    }
+    S.msgs.push({role:"assistant", content:m.text||"", sources:m.sources||[]});
+    if(m.duration!==undefined) $("durText").textContent=m.duration;
+    if(m.model) $("durModel").textContent=m.model;
+    S.streaming=false; paintBusy(); setEmpty();
+    break;
+  case "error":
+    if(H) setError(H, m.text); S.streaming=false; paintBusy(); setEmpty(); break;
+  case "stream-on": S.streaming=true; paintBusy(); break;
+  case "stop-ok": case "cancel":
+    if(H){ H.wrap.remove(); H=null; }
+    S.streaming=false; paintBusy(); setEmpty(); break;
+  case "cleared":
+    clearMsgs(); S.msgs=[]; $("durText").textContent=""; $("durModel").textContent="";
+    $("archive").style.display="none"; S.archive=false; setEmpty(); break;
+  case "status": paintStatus(m); break;
+  case "archive":
+    S.archive=true; $("archive").style.display="flex";
+    $("archiveText").textContent=m.text||"";
+    $("bReopen").style.display=m.reopen?"flex":"none"; break;
+  case "history": showHistory(m); break;
+  case "settings": fillSettings(m.settings||{}); break;
+  case "test": $("testOut").textContent=m.text||""; break;
+  case "notes-status":
+    $("notesStatus").style.display=m.text?"block":"none";
+    $("notesStatus").textContent=m.text||"";
+    $("notesGen").disabled=!!m.busy;
+    $("bNotesSaveAll").disabled=!!m.busy||!S.notesCards.length;
+    $("bNotesCopyAll").disabled=!!m.busy||!S.notesCards.length;
+    break;
+  case "notes-cards":
+    S.notesCards=m.cards||[]; renderNotes();
+    $("notesStatus").style.display="none";
+    $("notesGen").disabled=false;
+    $("bNotesSaveAll").disabled=!S.notesCards.length;
+    $("bNotesCopyAll").disabled=!S.notesCards.length;
+    break;
+  case "notes-clear":
+    S.notesCards=[]; renderNotes();
+    $("bNotesSaveAll").disabled=true; $("bNotesCopyAll").disabled=true;
+    break;
+  }
+});
+var H=null;
+
+/* ---------------- panel -> C++ ---------------- */
+$("bClose").onclick=function(){ post({type:"close"}); };
+$("bNew").onclick=function(){ if(S.streaming) return; post({type:"newchat"}); };
+$("bSem").onclick=function(){ post({type:"semantic"}); };
+$("bSet").onclick=function(){ post({type:"settings-get"}); $("setOvl").style.display="flex"; };
+$("bSetClose").onclick=function(){ $("setOvl").style.display="none"; };
+$("bSave").onclick=function(){ post({type:"settings-save", settings:readSettings()});
+  $("setOvl").style.display="none"; };
+$("bOllama").onclick=function(){ $("sUrl").value="http://localhost:11434/v1";
+  $("sKey").value="ollama"; $("sModel").value="gpt-oss:120b-cloud";
+  $("sEmb").value="embeddinggemma:latest"; $("sTemp").value="0.2"; $("sTok").value="4096";
+  $("sTopP").value="1"; $("sEffort").value="low"; };
+$("bTest").onclick=function(){ $("testOut").textContent="Testing…";
+  post({type:"settings-test", settings:readSettings()}); };
+$("bHist").onclick=function(){ post({type:"history-open"}); };
+$("bHistBack").onclick=function(){ $("histOvl").style.display="none"; post({type:"history-back"}); };
+$("bReopen").onclick=function(){ post({type:"reopen"}); };
+$("bSend").onclick=send;
+$("bStop").onclick=function(){ post({type:"stop"}); };
+$("tabChat").onclick=function(){ setTab("chat"); };
+$("tabNotes").onclick=function(){ setTab("notes"); };
+function setTab(w){ S.tab=w;
+  $("tabChat").className="tab"+(w==="chat"?" on":"");
+  $("tabNotes").className="tab"+(w==="notes"?" on":"");
+  $("chatWrap").style.display=w==="chat"?"flex":"none";
+  $("notesTab").style.display=w==="notes"?"flex":"none";
+  post({type:"tab", which:w});
+  if(w==="notes") post({type:"notes-refresh"});
+}
+var inp=$("input");
+inp.addEventListener("keydown", function(e){
+  if(e.key==="Enter"&&!e.shiftKey&&!e.ctrlKey){ e.preventDefault(); send(); }
+});
+inp.addEventListener("input", function(){ paintBusy(); autoGrow(); });
+function autoGrow(){ inp.style.height="auto";
+  inp.style.height=Math.min(120, Math.max(38, inp.scrollHeight))+"px"; }
+function send(){ var t=inp.value.trim(); if(!t||S.streaming) return;
+  inp.value=""; autoGrow(); paintBusy(); post({type:"send", text:t}); }
+
+$("msgs").addEventListener("click", function(e){
+  var c=e.target.closest(".cite");
+  if(c&&!c.classList.contains("dead")) post({type:"cite", id:c.getAttribute("data-src")});
+});
+$("setOvl").addEventListener("mousedown", function(e){
+  if(e.target===$("setOvl")) $("setOvl").style.display="none"; });
+
+/* ---------------- settings ---------------- */
+function fillSettings(s){
+  $("sUrl").value=s.baseUrl||""; $("sKey").value=s.apiKey||"";
+  $("sModel").value=s.model||""; $("sTemp").value=s.temperature!=null?s.temperature:0.5;
+  $("sTok").value=s.maxTokens!=null?s.maxTokens:16384;
+  $("sTopP").value=s.topP!=null?s.topP:0.95;
+  $("sEffort").value=s.reasoningEffort||"";
+  $("sEmb").value=s.embeddingModel||"";
+  $("sTopK").value=s.topK!=null?s.topK:24;
+  $("sBudget").value=s.evidenceBudget!=null?s.evidenceBudget:40000;
+  $("sHist").value=s.maxHistory!=null?s.maxHistory:6;
+  var local=/localhost|127\.0\.0\.1|\[::1?\]/.test($("sUrl").value)||!$("sUrl").value;
+  $("cloudNote").style.display=local?"none":"block";
+  $("cloudNote").textContent="Cloud endpoint: your questions and document passages leave this machine.";
+}
+function readSettings(){
+  return { baseUrl:$("sUrl").value.trim(), apiKey:$("sKey").value,
+    model:$("sModel").value.trim(), temperature:parseFloat($("sTemp").value)||0,
+    maxTokens:parseInt($("sTok").value,10)||16384, topP:parseFloat($("sTopP").value)||0.95,
+    reasoningEffort:$("sEffort").value, embeddingModel:$("sEmb").value.trim(),
+    topK:parseInt($("sTopK").value,10)||24, evidenceBudget:parseInt($("sBudget").value,10)||40000,
+    maxHistory:parseInt($("sHist").value,10)||6 };
+}
+
+/* ---------------- history ---------------- */
+function showHistory(m){
+  var b=$("histBody"); b.innerHTML="";
+  var ents=m.entries||[];
+  if(!ents.length){ b.innerHTML='<div id="histEmpty">No conversations yet.</div>'; }
+  else{
+    var secs={doc:"Documents", web:"Web pages", editor:"Editor"};
+    var order=["doc","web","editor"];
+    for(var k of order){
+      var rows=ents.filter(function(x){ return x.kind===k; });
+      if(!rows.length) continue;
+      var h=document.createElement("div"); h.className="hsec"; h.textContent=secs[k];
+      b.appendChild(h);
+      for(var r of rows){
+        var d=document.createElement("div"); d.className="hrow"; d.dataset.id=r.id;
+        var t=document.createElement("span"); t.className="t"; t.textContent=r.title||r.sourceRef||"(untitled)";
+        var mm=document.createElement("span"); mm.className="m";
+        mm.textContent=r.count+" messages · "+r.updated;
+        d.appendChild(t); d.appendChild(mm);
+        if(r.current){ var c=document.createElement("span"); c.className="cur";
+          c.textContent="current"; d.appendChild(c); }
+        var del=document.createElement("button"); del.className="del"; del.innerHTML="&#xE74D;";
+        del.title="Delete"; del.onclick=function(ev){ ev.stopPropagation();
+          post({type:"del-conv", id:r.id}); d.remove(); };
+        d.appendChild(del);
+        d.onclick=function(){ post({type:"open-conv", id:r.id}); $("histOvl").style.display="none"; };
+        b.appendChild(d);
+      }
+    }
+  }
+  $("histOvl").style.display="flex";
+}
+
+/* ---------------- notes ---------------- */
+function renderNotes(){
+  var host=$("notesCards"); host.innerHTML="";
+  if(!S.notesCards.length){
+    host.innerHTML='<div id="notesEmpty">Select a page range and click Generate Notes to create review cards.</div>';
+    return; }
+  for(var c of S.notesCards){
+    var d=document.createElement("div"); d.className="ncard";
+    var hd=document.createElement("div"); hd.className="nhead";
+    var t=document.createElement("div"); t.className="ntitle";
+    t.textContent="Pages "+c.first+" \u2013 "+c.last;
+    var cp=document.createElement("button"); cp.className="chip"; cp.innerHTML="&#xE8C8;";
+    cp.title="Copy card";
+    cp.onclick=function(){ copyText("**Pages "+c.first+" \u2013 "+c.last+"**\n\n"+c.content);
+      cp.innerHTML="&#x2713;"; setTimeout(function(){ cp.innerHTML="&#xE8C8;"; },1200); };
+    var sv=document.createElement("button"); sv.className="chip"; sv.innerHTML="&#xE70B;";
+    sv.title="Save to Axo Notes";
+    sv.onclick=function(){ post({type:"notes-axo", first:c.first, last:c.last, content:c.content});
+      sv.innerHTML="&#xE73E;"; setTimeout(function(){ sv.innerHTML="&#xE70B;"; },1200); };
+    var bd=document.createElement("div"); bd.className="nbody"; renderMd(c.content, bd);
+    hd.appendChild(t); hd.appendChild(sv); hd.appendChild(cp);
+    d.appendChild(hd); d.appendChild(bd); host.appendChild(d);
+  }
+}
+function copyText(t){
+  try{ navigator.clipboard.writeText(t); }catch(e){
+    var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta);
+    ta.select(); try{ document.execCommand("copy"); }catch(x){} ta.remove(); }
+}
+$("bNotesCopyAll").onclick=function(){
+  var t=S.notesCards.map(function(c){ return "**Pages "+c.first+" \u2013 "+c.last+"**\n\n"+c.content+"\n\n"; }).join("").trim();
+  if(t){ copyText(t); $("bNotesCopyAll").textContent="Copied \u2713";
+    setTimeout(function(){ $("bNotesCopyAll").textContent="Copy All Notes"; },1200); }
+};
+$("bNotesSaveAll").onclick=function(){ post({type:"notes-axo-all"}); };
+$("notesGen").onclick=function(){ post({type:"notes-gen", range:$("notesRange").value}); };
+$("notesRange").addEventListener("keydown", function(e){
+  if(e.key==="Enter") post({type:"notes-gen", range:$("notesRange").value});
+});
+$("notesRange").addEventListener("input", function(){
+  this.value=this.value.replace(/[^0-9\-\u2013 ]/g,"");
+});
+document.addEventListener("keydown", function(e){
+  if(e.ctrlKey&&e.shiftKey&&(e.key==="A"||e.key==="a")){ e.preventDefault(); post({type:"close"}); }
+});
+paintBusy();
+post({type:"ready"});
+</script>
+</body>
+</html>

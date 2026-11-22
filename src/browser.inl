@@ -171,8 +171,8 @@ static void WebStripPaint(HDC dc, int w, int h) {
     SetBkMode(dc, TRANSPARENT);
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr, L"\uE81C"
-    };                                                 // reload and star ride beside the field; hist at far right
+        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr, L"\uE81C", L"\uE8BD"
+    };                                                 // reload and star ride beside the field; hist and the AI robot at far right
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
         if (i == WB_RELOAD || i == WB_STAR) continue;  // custom tiles outside the field
@@ -494,6 +494,10 @@ static void WebBarLayout() {
     g_wbR[WB_MENU] = { 0, 0, 0, 0 };               // the 3-dot is gone: the toolbar keeps only
     g_wbR[WB_HIST] = { mx - d, cy, mx, cy + d };   // history button at the far right
     mx -= pitch;
+    g_wbR[WB_AI] = { mx - d, cy, mx, cy + d };     // the AI robot beside it: the panel's
+                                                   // toggle in browser mode, like the
+                                                   // reader toolbar's and editor's
+    mx -= pitch;
     g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d }; // the + and, left of it, each extension's icon
     mx -= pitch;
     g_wbR[WB_READER] = { 0, 0, 0, 0 };             // the PDF button lives on the top toolbar now
@@ -700,6 +704,7 @@ static void WebBarClick(int id) {
         return;
     case WB_NEWTAB: WebNewTab(L"https://www.google.com/", true); return;
     case WB_HIST: HistDropdownToggle(); return;
+    case WB_AI: AiChatToggle(); return;            // the browser sidechat's own toggle
     case WB_STAR: BmStarClick(); return;           // the pill's star: saved page back off the list,
                                                    // stranger to the bubble (bookmarks.inl)
     case WB_MENU: {
@@ -1321,6 +1326,7 @@ static void WebSwitchTo(int i) {
     WebBarLayout();
     WebSideSync();
     WebRepaintChrome();
+    AiModeChanged();                             // the sidechat follows the focused tab
 }
 
 // the page: the reader's own container, edge to edge. The webview rides in
@@ -1480,6 +1486,7 @@ static void WebToggle(bool on) {
     if (on && g_sync) return;                      // the CI shots never browse
     if (on && g_editOn) EditorToggle(false);
     g_webOn = on;
+    AiModeChanged();                               // the panel rebinds: browser <-> reader
     if (g.side)                                    // the rail is the browser's own, closed until asked
         ShowWindow(g.side, on ? (g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE) : (g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE));
     if (on) {

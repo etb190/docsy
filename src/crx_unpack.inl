@@ -52,7 +52,7 @@ static HBRUSH g_webEditBrush = nullptr;
 static RECT g_webOmni{};                   // the pill, in bar coords
 static RECT g_webFailBtn{};                // the no-engine card's button, view coords
 
-enum { WB_READER, WB_BACK, WB_FWD, WB_RELOAD, WB_NEWTAB, WB_MENU, WB_SIDE, WB_EXT, WB_STAR, WB_HIST, WB_COUNT };
+enum { WB_READER, WB_BACK, WB_FWD, WB_RELOAD, WB_NEWTAB, WB_MENU, WB_SIDE, WB_EXT, WB_STAR, WB_HIST, WB_AI, WB_COUNT };
 static RECT g_wbR[WB_COUNT];
 
 static WebTab* WebTabById(unsigned long long id) {

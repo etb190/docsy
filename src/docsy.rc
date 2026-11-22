@@ -4,3 +4,7 @@
 201 RCDATA "fonts/KillerSans-sub.ttf"
 202 RCDATA "fonts/KillerSansUI-sub.ttf"
 301 RCDATA "editor_page.deflate"
+// the AI surface (Avalanche's chat overlay + summary navigator + prompt deck)
+401 RCDATA "ai_page.deflate"
+402 RCDATA "sum_page.deflate"
+403 RCDATA "prompts.default.json"

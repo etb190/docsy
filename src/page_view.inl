@@ -646,6 +646,7 @@ static void Draw(HDC dc, int w, int h, int xoff, DocState& D, HRGN extra = nullp
                 }
             }
             if (fd.open && fd.pane == thisIsB) FindPaintPage(dc, D, i, x, y);   // highlights ride the pane they scanned
+            AiPaintPage(dc, D, i, x, y);            // the AI citation's light-blue quad
         }
     }
     DeleteDC(m);
