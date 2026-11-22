@@ -25,10 +25,22 @@ static void LayoutMain() {
     if (g_editOn) {
         int th = EDITOR_TOOL_H();
         int ch = max(0, h - cap0 - th);
+        int sw = SW();
+        int rw = RW();
+        int vw = max(0, w - sw - rw);
         if (g_etool) MoveWindow(g_etool, 0, cap0, w, th, TRUE);
-        MoveWindow(g.view, 0, cap0 + th, w, ch, TRUE);
+        if (g.side) {
+            MoveWindow(g.side, 0, cap0 + th, sw, ch, TRUE);
+            sd.cw = sw; sd.ch = ch;
+            ShowWindow(g.side, SW_SHOWNOACTIVATE);
+        }
+        if (g.rail) {
+            MoveWindow(g.rail, sw, cap0 + th, rw, ch, TRUE);
+            ShowWindow(g.rail, SW_SHOWNOACTIVATE);
+        }
+        MoveWindow(g.view, sw + rw, cap0 + th, vw, ch, TRUE);
         if (g_edCtr) {
-            RECT vr{ 0, 0, w, ch };
+            RECT vr{ 0, 0, vw, ch };
             g_edCtr->put_Bounds(vr);
         }
         for (auto& k : kids) {
@@ -726,7 +738,8 @@ static int Shot(const wchar_t* out, int w, int h) {
         HBITMAP b1 = CreateCompatibleBitmap(dc, sw, ch);
         HGDIOBJ o1 = SelectObject(m1, b1);
         SetBrushOrgEx(m1, 0, -(cap + ws_ + tb), nullptr);   // the pane's grain phase, as on screen
-        if (g_webOn) WebSideDraw(m1, sw, ch);               // the OPEN WEB TABS rail
+        if (g_webOn) WebSideDraw(m1, sw, ch);
+        else if (g_editOn) EditorSideDraw(m1, sw, ch);               // the OPEN WEB TABS rail
         else SideDraw(m1, sw, ch, 0);
         BitBlt(dc, 0, cap + ws_ + tb, sw, ch, m1, 0, 0, SRCCOPY);
         SelectObject(m1, o1); DeleteObject(b1); DeleteDC(m1);

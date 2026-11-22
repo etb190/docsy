@@ -619,6 +619,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);   // the grain tile phase:
             SetBrushOrgEx(sd.bdc, -po.x, -po.y, nullptr);           // anchored to the window, like
             if (g_webOn) WebSideDraw(sd.bdc, sd.cw, sd.ch);         // browser mode: the rail is
+            else if (g_editOn) EditorSideDraw(sd.bdc, sd.cw, sd.ch);
             else SideDraw(sd.bdc, sd.cw, sd.ch, 0);                 // the web tabs' thumbnails
             BitBlt(dc, 0, 0, sd.cw, sd.ch, sd.bdc, 0, 0, SRCCOPY);  // shared field runs unbroken
             SetTimer(h, 2, 25, nullptr);   // finish any pending thumbs
@@ -638,6 +639,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        if (g_editOn) { EditorRefocus(); return 0; }
         if (g_webOn) { WebSideDown(p); return 0; }
         SetCapture(h);
         int gb = SBar();

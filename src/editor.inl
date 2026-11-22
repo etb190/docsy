@@ -198,6 +198,125 @@ static void EditorFontMenu(HWND h, const RECT& anchor) {
 }
 
 // Receive messages from Quill
+
+static HBITMAP g_edThumbBmp = nullptr;
+static int g_edThumbW = 0, g_edThumbH = 0;
+
+static std::vector<unsigned char> Base64Decode(const std::string& in) {
+    std::vector<unsigned char> out;
+    static const int T[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1
+    };
+    int val = 0, valb = -8;
+    for (unsigned char c : in) {
+        if (T[c] == -1) break;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back((unsigned char)((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
+static void EditorSetThumb(const std::string& dataUrl) {
+    size_t comma = dataUrl.find(',');
+    if (comma == std::string::npos) return;
+    std::string b64 = dataUrl.substr(comma + 1);
+    auto bin = Base64Decode(b64);
+    if (bin.empty()) return;
+
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bin.size());
+    if (!hMem) return;
+    void* pMem = GlobalLock(hMem);
+    if (!pMem) { GlobalFree(hMem); return; }
+    memcpy(pMem, bin.data(), bin.size());
+    GlobalUnlock(hMem);
+
+    IStream* pStream = nullptr;
+    if (SUCCEEDED(CreateStreamOnHGlobal(hMem, TRUE, &pStream)) && pStream) {
+        Gdiplus::Bitmap bmp(pStream);
+        if (bmp.GetLastStatus() == Gdiplus::Ok) {
+            HBITMAP hbm = nullptr;
+            bmp.GetHBITMAP(Gdiplus::Color(255, 255, 255, 255), &hbm);
+            if (hbm) {
+                if (g_edThumbBmp) DeleteObject(g_edThumbBmp);
+                g_edThumbBmp = hbm;
+                g_edThumbW = (int)bmp.GetWidth();
+                g_edThumbH = (int)bmp.GetHeight();
+            }
+        }
+        pStream->Release();
+    }
+    if (g.side) InvalidateRect(g.side, nullptr, FALSE);
+}
+
+static void EditorSideDraw(HDC dc, int w, int h) {
+    RECT r{ 0, 0, w, h };
+    FillRect(dc, &r, GrainBrush(1)); // the shared dark chrome
+
+    int cardW = min((int)(w - 32 * g.dpi), (int)(130 * g.dpi));
+    int cardH = (int)(cardW * 1.294);
+    int padT = (int)(16 * g.dpi);
+    int x = (w - cardW) / 2;
+    int y = padT;
+
+    RECT cardR{ x, y, x + cardW, y + cardH };
+
+    // Selection background band
+    int bandTop = max(0, y - (int)(6 * g.dpi));
+    int bandBot = min(h, y + cardH + (int)(26 * g.dpi));
+    RECT bandR{ 0, bandTop, w, bandBot };
+    {
+        Gdiplus::Graphics gs(dc);
+        Gdiplus::LinearGradientBrush gb(
+            Gdiplus::Rect(bandR.left, bandR.top, bandR.right - bandR.left, bandR.bottom - bandR.top),
+            Gdiplus::Color(255, 0x38, 0x75, 0x52),
+            Gdiplus::Color(255, 0x10, 0x4e, 0x2b), 90.0f);
+        gs.FillRectangle(&gb, (int)bandR.left, (int)bandR.top,
+                         (int)(bandR.right - bandR.left), (int)(bandR.bottom - bandR.top));
+    }
+
+    // Card white background
+    HBRUSH wbr = (HBRUSH)GetStockObject(WHITE_BRUSH);
+    FillRect(dc, &cardR, wbr);
+
+    // Blit thumbnail if available
+    if (g_edThumbBmp && g_edThumbW > 0 && g_edThumbH > 0) {
+        HDC mdc = CreateCompatibleDC(dc);
+        HGDIOBJ obm = SelectObject(mdc, g_edThumbBmp);
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, nullptr);
+        StretchBlt(dc, x, y, cardW, cardH, mdc, 0, 0, g_edThumbW, g_edThumbH, SRCCOPY);
+        SelectObject(mdc, obm);
+        DeleteDC(mdc);
+    }
+
+    // Border around card
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0x55, 0x55, 0x55));
+    HGDIOBJ open = SelectObject(dc, pen);
+    HGDIOBJ onb = SelectObject(dc, GetStockObject(NULL_BRUSH));
+    Rectangle(dc, x, y, x + cardW, y + cardH);
+    SelectObject(dc, onb);
+    SelectObject(dc, open);
+    DeleteObject(pen);
+
+    // Label "Page 1"
+    RECT lr{ 0, y + cardH + (int)(4 * g.dpi), w, y + cardH + (int)(24 * g.dpi) };
+    SelectObject(dc, CaptionFont(g_tbcap, 13, false, L"Segoe UI"));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(0xff, 0xff, 0xff));
+    DrawTextW(dc, L"Page 1", -1, &lr, DT_CENTER | DT_TOP | DT_SINGLELINE);
+}
+
 static void EditorHandleMessage(const wchar_t* json) {
     if (!json) return;
     std::string u8 = WxU(json);
@@ -246,6 +365,12 @@ static void EditorHandleMessage(const wchar_t* json) {
     } else if (t == "title") {
         std::string title = m.get("title") ? m.get("title")->str() : "";
         if (!title.empty()) { g_edTitle = WxW(title); UpdateTitle(); }
+    } else if (t == "thumbs") {
+        if (auto th = m.get("thumbs")) {
+            if (th->isArr() && !th->a.empty() && th->a[0].isStr()) {
+                EditorSetThumb(th->a[0].str());
+            }
+        }
     }
 }
 
@@ -322,8 +447,8 @@ static void EditorToggle(bool on) {
     g_editOn = on;
     if (on) {
         if (g_webOn) WebToggle(false);
-        if (g.side) ShowWindow(g.side, SW_HIDE);
-        if (g.rail) ShowWindow(g.rail, SW_HIDE);
+        if (g.side && !g.full) ShowWindow(g.side, SW_SHOWNOACTIVATE);
+        if (g.rail && !g.full) ShowWindow(g.rail, SW_SHOWNOACTIVATE);
         if (g.status) ShowWindow(g.status, SW_HIDE);
         if (g.bar) ShowWindow(g.bar, SW_HIDE);
         if (g_wstrip) ShowWindow(g_wstrip, SW_HIDE);
@@ -356,19 +481,13 @@ static int EditorBtnWidth(int i) {
     return (int)(28 * g.dpi);
 }
 
-// Layout calculation for ribbon buttons - centered
+// Layout calculation for ribbon buttons - left-aligned
 static RECT EditorBtnRect(int id, int w, int h) {
     int btnH = (int)(28 * g.dpi);
     int yMid = (h - btnH) / 2;
     int gap = (int)(4 * g.dpi);
 
-    int totalW = 0;
-    for (int i = 0; i < EB_COUNT; i++) {
-        totalW += EditorBtnWidth(i);
-        if (i < EB_COUNT - 1) totalW += gap;
-    }
-
-    int curX = max((int)(8 * g.dpi), (w - totalW) / 2);
+    int curX = (int)(8 * g.dpi);
 
     for (int i = 0; i < EB_COUNT; i++) {
         int bw = EditorBtnWidth(i);
@@ -446,7 +565,7 @@ static void EditorToolDraw(HDC dc, int w, int h) {
 
         switch (i) {
         case EB_WEB: text = L"\uE774"; break;
-        case EB_PDF: text = L"\uE8A5"; break;
+        case EB_PDF: text = L"\uE8F1"; break;
         case EB_OPEN: text = L"\uE8DA"; break;
         case EB_SAVE: text = L"\uE74E"; break;
         }

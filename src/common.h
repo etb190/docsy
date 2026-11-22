@@ -1088,6 +1088,7 @@ static int  WebNavHit(POINT p);           // the nav row's buttons, strip coords
 static void WebSideLayout();              // the sidebar's web-tab thumbs
 static void WebSideSync();
 static void WebSideDraw(HDC dc, int w, int h);
+static void EditorSideDraw(HDC dc, int w, int h);
 static void WebSideScrollTo(int y);
 static void WebSideWheel(int delta);
 static void WebSideDown(const POINT& p);
