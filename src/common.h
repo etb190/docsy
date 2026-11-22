@@ -548,6 +548,8 @@ static bool g_editOn = false;            // the text editor owns the window chro
 static void EditorToggle(bool on);
 static void EditorOpenFile(const std::wstring& path);
 static void EditorEnsureInit();
+static void EditorRefocus();
+static void EditorSideDraw(HDC dc, int w, int h);
 static HFONT g_tbglyph = nullptr, g_tbcap = nullptr; // toolbar: E721 at 20, the caption at Killer Sans 14
 
 static int PW(const DocState& D, int i) { return max(1, (int)std::lround(D.pw[i] * D.zoom * g.dpi)); }

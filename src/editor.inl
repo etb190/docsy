@@ -367,7 +367,7 @@ static void EditorHandleMessage(const wchar_t* json) {
         if (!title.empty()) { g_edTitle = WxW(title); UpdateTitle(); }
     } else if (t == "thumbs") {
         if (auto th = m.get("thumbs")) {
-            if (th->isArr() && !th->a.empty() && th->a[0].isStr()) {
+            if (th && th->t == 'a' && !th->a.empty() && th->a[0].t == 's') {
                 EditorSetThumb(th->a[0].str());
             }
         }
