@@ -195,7 +195,7 @@ static void AiSemanticStart() {
                 size_t b1 = min(b0 + B, total);
                 std::vector<std::string> inputs;
                 for (size_t i = b0; i < b1; i++) {
-                    std::string inp = cfg.embDocPrefix + WxW(ix.chunks[i].text);
+                    std::string inp = WxU(cfg.embDocPrefix) + ix.chunks[i].text;
                     if (inp.size() > 1200) inp.resize(1200);
                     inputs.push_back(inp);
                 }
@@ -292,7 +292,7 @@ static void AiNotesRunModel(std::wstring rangeText, int first, int last) {
     }
     std::string user = "Blocks to cover (one card per block):\n";
     for (auto& b : blocks)
-        user += "- Pages " + std::to_string(b.first) + "-" + std::to_string(b.last) + "\n";
+        user += "- Pages " + std::to_string(b.first) + "-" + std::to_string(b.second) + "\n";
     user += "\n=== TEXT (pages " + std::to_string(first) + "-" + std::to_string(last) + ") ===\n";
     user += WxU(rangeText);
     std::string sys = PromptBodyOf("notes_standard");
@@ -306,7 +306,7 @@ static void AiNotesRunModel(std::wstring rangeText, int first, int last) {
         g_aiNotesBusy = false;
         if (g_aiNotesCancel.load()) {
             AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
-            e->a = L""; e->flag = false;
+            e->a = ""; e->flag = false;
             AiPost(e);
             return;
         }
@@ -447,8 +447,8 @@ static AiHighlight g_aiHi;
 static void AiNavigateToSource(int pageIndex, const std::vector<FRect>& rects) {
     DocState& D = DVF();
     if (pageIndex < 0 || pageIndex >= D.n) {
-        g_statusHoldText = L"The quoted passage could not be found in this document.";
-        g_statusHoldUntil = GetTickCount64() + 4000;
+        g.statusHoldText = L"The quoted passage could not be found in this document.";
+        g.statusHoldUntil = GetTickCount64() + 4000;
         StatusRepaint();
         return;
     }

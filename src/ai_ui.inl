@@ -100,6 +100,9 @@ static void AiPanelPost(const std::wstring& json) {
 static void AiPanelSend(const std::string& utf8json) {
     AiPanelPost(WxW(utf8json));
 }
+static void AiPanelSend(const std::wstring& json) {          // the already-wide frames
+    AiPanelPost(json);
+}
 static std::string AiStatusJson(const char* cmd) {
     // the status row block every paint carries
     std::string j = std::string("{\"cmd\":\"") + cmd + "\",\"indexing\":{\"on\":";
@@ -447,7 +450,7 @@ static void AiRunReply(const std::string& key, const std::string& input) {
             // the query embedding rides the same thread (network is free here)
             std::vector<float> qvec;
             std::string q = AiBuildRetrievalQuery(input, msgsSnapshot);
-            std::vector<std::string> one = { cfg.embQueryPrefix + q.substr(0, 1200) };
+            std::vector<std::string> one = { WxU(cfg.embQueryPrefix) + q.substr(0, 1200) };
             std::vector<std::vector<float>> vecs;
             AiError e2;
             if (g_aiIndex.dim > 0 && g_aiIndex.vectors.size() == g_aiIndex.chunks.size() &&
@@ -603,7 +606,7 @@ static void AiBindContext() {
         std::wstring id = g_edPath.empty() ? L"untitled" : g_edPath;
         key = AiEditorSessionKey(id);
         title = g_edTitle.empty() ? L"Document" : g_edTitle;
-        ref = WxU(title.empty() ? L"Document" : g_edTitle);
+        ref = title.empty() ? L"Document" : g_edTitle;
     } else if (g_webOn) {
         mode = 1;
         WebTab* t = (g_wtCur >= 0 && g_wtCur < (int)g_wt.size()) ? &g_wt[g_wtCur] : nullptr;
@@ -612,10 +615,10 @@ static void AiBindContext() {
         _snwprintf_s(tb, _TRUNCATE, L"%llu", t->id);
         key = AiWebSessionKey(tb);
         title = t->title.empty() ? WebHostOf(t->url) : t->title;
-        ref = WxU(t->url);
+        ref = t->url;
         std::lock_guard<std::mutex> lk(g_aiMtx);
         auto& st = g_aiCtx[key];
-        st.pageTitle = t->title; st.pageUrl = t->url;
+        st.pageTitle = WxU(t->title); st.pageUrl = WxU(t->url);
     } else {
         DocState& D = DVF();
         if (D.path.empty()) {
@@ -625,7 +628,7 @@ static void AiBindContext() {
             mode = 0;
             key = AiDocSessionKey(D.path);
             title = D.name;
-            ref = WxU(D.path);
+            ref = D.path;
         }
     }
     // same key: the title may have drifted (a tab's load finished) but the
@@ -653,7 +656,7 @@ static void AiBindContext() {
             st->key = key;
             st->mode = mode;
             st->title = title;
-            st->pathOrRef = WxW(ref);
+            st->pathOrRef = ref;
             // restore the newest conversation for this source (memory wins)
             AiConv* cv = AiHistLatest(mode == 2 ? "editor" : mode == 1 ? "web" : "doc",
                                       WxU(st->pathOrRef));
@@ -661,7 +664,7 @@ static void AiBindContext() {
         } else {
             st->mode = mode;
             st->title = title;
-            if (mode == 0) st->pathOrRef = WxW(ref);
+            if (mode == 0) st->pathOrRef = ref;
         }
         AiSendCtxFrame(*st);
     }
@@ -715,7 +718,7 @@ static void AiOverlayLayout() {
     if (!g_aiCtr) return;
     RECT r; GetClientRect(g.view, &r);
     int w = g_aiOn ? AiOverlayW(r.right) : 0;
-    RECT b{ max(0, r.right - w), 0, r.right, r.bottom };
+    RECT b{ max(0, (int)r.right - w), 0, r.right, r.bottom };
     g_aiCtr->put_Bounds(b);
     g_aiCtr->put_IsVisible(g_aiOn && r.right > (int)(100 * g.dpi) ? TRUE : FALSE);
 }

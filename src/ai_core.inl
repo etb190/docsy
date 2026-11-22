@@ -34,6 +34,27 @@ static std::string WxJsonStr(const std::wstring& w) {   // a JSON string literal
 }
 static void WxJsonEmit(const crxk::J& v, std::string& o);   // J -> JSON text
 static std::string WxJsonRaw(const crxk::J& v) { std::string o; WxJsonEmit(v, o); return o; }
+// narrow overloads: the AI payloads are already utf8 std::string, so the
+// wide-only helpers get string faces and the call sites stop converting
+static std::string WxU(const std::string& s) { return s; }
+static std::string WxJsonStr(const std::string& u) {
+    std::string out = "\"";
+    for (size_t i = 0; i < u.size(); i++) {
+        unsigned char c = (unsigned char)u[i];
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) { char b[8]; snprintf(b, sizeof b, "\\u%04x", c); out += b; }
+            else out += (char)c;
+        }
+    }
+    out += "\"";
+    return out;
+}
 
 // ---- the paths: %LocalAppData%\docsy\AI\ ----
 static std::wstring AiRootDir() {

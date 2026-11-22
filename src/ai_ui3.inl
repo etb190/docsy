@@ -5,7 +5,7 @@
 static void AiRunTest(std::string settingsJson) {
     std::thread([settingsJson]() {
         std::string out;
-        auto finish = [&out](const char* line) {
+        auto finish = [&out](const std::string& line) {
             if (!out.empty()) out += "\n";
             out += line;
         };
@@ -268,30 +268,36 @@ static void AiPanelMessage(const wchar_t* json) {
                 std::lock_guard<std::mutex> lk(g_aiMtx);
                 // the rects were not persisted: re-locate against the live index
                 if (!g_aiIndexReady || src->pageIndex < 0) {
-                    g_statusHoldText = L"The quoted passage could not be found in this document.";
-                    g_statusHoldUntil = GetTickCount64() + 4000;
+                    g.statusHoldText = L"The quoted passage could not be found in this document.";
+                    g.statusHoldUntil = GetTickCount64() + 4000;
                     StatusRepaint();
                     return;
                 }
+                // re-locate the quote against the live index: the verified span's
+                // page box when it still lands, else the cited page's own box
                 std::vector<FRect> rects;
+                bool found = false;
                 if (src->location != AQL_UNLOCATED && !src->quote.empty()) {
-                    for (auto& ch : g_aiIndex.chunks)
-                        for (auto& sp : ch.pages)
-                            if (sp.page == src->pageIndex) {
-                                size_t ws, we;
-                                if (AiLocateInText(ch.text, WxU(src.quote), ws, we) != AQH_NONE &&
-                                    ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
-                                    rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
-                                    break;
-                                }
+                    for (auto& ch : g_aiIndex.chunks) {
+                        for (auto& sp : ch.pages) {
+                            if (sp.page != src->pageIndex) continue;
+                            size_t ws, we;
+                            if (AiLocateInText(ch.text, WxU(src.quote), ws, we) != AQH_NONE &&
+                                ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
+                                rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                                found = true;
+                                break;
                             }
-                    if (!rects.empty()) break;
+                        }
+                        if (found) break;
+                    }
                 }
-                if (rects.empty())
+                if (!found)
                     for (auto& ch : g_aiIndex.chunks)
                         for (auto& sp : ch.pages)
                             if (sp.page == src->pageIndex) {
                                 rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                                found = true;
                                 break;
                             }
                 AiNavigateToSource(src->pageIndex, rects);
