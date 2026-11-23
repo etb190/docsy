@@ -640,6 +640,8 @@ static void SumToggle(int mode);        // the Page Summary navigator (defined i
 static int g_aiDockW = 0;               // the AI panel's docked strip width this pass:
                                         // LayoutMain reserves it right of the view, the
                                         // panel's bounds read it back (ai_ui.inl)
+static bool g_aiOn = false;             // the AI panel is open (ai_ui.inl owns the panel;
+                                        // the layout reads the flag to reserve the strip)
 static void AiPaintPage(HDC dc, const DocState& D, int page, int px, int py);   // the citation's highlight quad (ai_ui2.inl)
 static void AiOverlayLayout();          // the panel's bounds ride every layout (ai_ui.inl)
 static bool g_sideNotes = false;        // the sidebar's NOTES tab is the active face

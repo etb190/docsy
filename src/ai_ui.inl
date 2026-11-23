@@ -20,7 +20,7 @@ static void AiIndexKickoff(const std::wstring& path);   // defined in ai_ui2.inl
 static wrl::ComPtr<ICoreWebView2Controller> g_aiCtr;
 static wrl::ComPtr<ICoreWebView2> g_aiWeb;
 static bool g_aiBuilding = false, g_aiReady = false;
-static bool g_aiOn = false;
+// g_aiOn lives in common.h: the layout reads it to reserve the strip
 
 // ---- the per-context state (AiChatViewModel's world, one map) ----
 struct AiCtxState {
