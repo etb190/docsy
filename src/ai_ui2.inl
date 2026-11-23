@@ -219,7 +219,7 @@ static void AiSemanticStart() {
     AiDocIndex ix = g_aiIndex;
     AiCfg cfg = g_aiCfg;
     std::wstring prefixKey = cfg.embDocPrefix + L"\x01" + cfg.embQueryPrefix;
-    std::string model = WxU(cfg.embeddingModel.empty() ? L"embeddinggemma:latest"
+    std::string model = WxU(cfg.embeddingModel.empty() ? L"gemini-embedding-2"
                                                        : cfg.embeddingModel);
     std::thread([ix, cfg, prefixKey, model]() mutable {
         bool upToDate = (ix.embModel == model && ix.prefixKey == WxU(prefixKey) &&
@@ -250,8 +250,8 @@ static void AiSemanticStart() {
                     AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
                     if (e.cat == AI_ERR_MODEL_NOT_FOUND) {
                         ev->a = WxU(L"Embedding model " + e.model +
-                                    L" not found. Run: ollama pull " + e.model +
-                                    L" — using keyword search only.");
+                                    L" not found — check the Embedding Model field in AI settings."
+                                    L" Using keyword search only.");
                     } else {
                         ev->a = WxU(L"Semantic search is unavailable right now — using keyword search only.");
                     }
@@ -688,6 +688,7 @@ static void SumOpen(int mode) {
                                CW_USEDEFAULT, CW_USEDEFAULT,
                                rc.right - rc.left, rc.bottom - rc.top,
                                g.main, nullptr, g.hinst, nullptr);
+    if (g_sumWnd) DwmApply(g_sumWnd);    // the card's rounded corners + tinted border
     if (g_sumMode == 1) g_sumReady = true;
     SumEnsure();
 }
@@ -836,6 +837,16 @@ static void SumPanelMessage(const wchar_t* json) {
     } else if (t == "reset") {
         g_sumCancel = true;
         g_sumBusy = false;
+    } else if (t == "close") {
+        // the chrome's own close chip (DialogChrome's red mark)
+        if (g_sumWnd) DestroyWindow(g_sumWnd);
+    } else if (t == "drag") {
+        // the HTML title bar's drag handle: hand the move to the OS caption
+        // loop - ReleaseCapture is what lets the mouse leave the WebView2
+        if (g_sumWnd) {
+            ReleaseCapture();
+            SendMessageW(g_sumWnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        }
     } else if (t == "page") {
         const crxk::J* p = m.get("page");
         if (p && p->t == 'd' && g_sumMode == 0) {
@@ -849,11 +860,52 @@ static void SumPanelMessage(const wchar_t* json) {
 }
 static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
+    case WM_NCCALCSIZE: {   // DialogChrome: the caption row joins the client; the
+                            // OS side/bottom borders stay for the resize bands.
+                            // Maximized clamps to the work area like the main frame.
+        if (!wp || IsIconic(h)) break;
+        NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
+        RECT orig = p->rgrc[0];
+        if (IsZoomed(h)) {
+            HMONITOR mon = MonitorFromRect(&orig, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{ sizeof mi };
+            if (!mon || !GetMonitorInfoW(mon, &mi)) break;
+            p->rgrc[0].left   = max(orig.left,   mi.rcWork.left);
+            p->rgrc[0].top    = max(orig.top,    mi.rcWork.top);
+            p->rgrc[0].right  = min(orig.right,  mi.rcWork.right);
+            p->rgrc[0].bottom = min(orig.bottom, mi.rcWork.bottom);
+            return 0;
+        }
+        DefWindowProcW(h, m, wp, lp);          // the OS lays out its full frame...
+        g_sumFrame = p->rgrc[0].left - orig.left;
+        p->rgrc[0].top = orig.top;             // ...and only the caption is dropped
+        return 0;
+    }
+    case WM_NCHITTEST: {   // the top resize grip replaces the stripped OS border;
+                           // side/bottom grips come from DefWindowProc, and the
+                           // HTML bar drags itself through the "drag" message
+        POINT s{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        RECT rc; GetWindowRect(h, &rc);
+        if (!IsZoomed(h) && g_sumFrame > 0 && s.y < rc.top + g_sumFrame) {
+            if (s.x <  rc.left + g_sumFrame) return HTTOPLEFT;
+            if (s.x >= rc.right - g_sumFrame) return HTTOPRIGHT;
+            return HTTOP;
+        }
+        break;
+    }
+    case WM_GETMINMAXINFO: {   // SummaryWindow: MinWidth 460, MinHeight 390
+        DefWindowProcW(h, m, wp, lp);
+        MINMAXINFO* mmi = (MINMAXINFO*)lp;
+        mmi->ptMinTrackSize.x = (int)(460 * g.dpi);
+        mmi->ptMinTrackSize.y = (int)(390 * g.dpi);
+        return 0;
+    }
     case WM_SIZE:
         if (g_sumCtr) {
             RECT r; GetClientRect(h, &r);
             g_sumCtr->put_Bounds(r);
         }
+        DwmApply(h);       // corner rounding flips when the window maximizes
         return 0;
     case WM_DESTROY:
         g_sumCancel = true;

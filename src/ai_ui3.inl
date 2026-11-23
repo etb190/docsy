@@ -20,19 +20,16 @@ static void AiRunTest(std::string settingsJson) {
                 if ((p = j.get("model")) && p->t == 's') c.model = WxW(p->s);
             }
         }
-        // 1. the local Ollama probe (GET /api/version, 5s)
+        // 1. the door probe (GET /models, 8s - IsAvailableAsync's availability check)
         {
             std::wstring root = c.baseUrl;
-            size_t v1 = root.rfind(L"/v1");
-            if (v1 != std::wstring::npos) root.resize(v1);
-            if (root.empty()) root = L"http://localhost:11434";
-            if (AiIsLocalHost(WxU(root))) {
-                std::string resp; int status = 0;
-                bool ok = AiHttpPostRaw(root + L"/api/version", "", L"", 5000, resp, status, nullptr) &&
-                          status >= 200 && status < 300;
-                finish(ok ? "\xe2\x9c\x93 Ollama is running" :
-                           "\xe2\x9c\x97 Ollama is not reachable on localhost");
-            }
+            while (!root.empty() && root.back() == L'/') root.pop_back();
+            std::string resp; int status = 0;
+            bool ok = AiHttpGetRaw(root + L"/models", c.apiKey, 8000, resp, status) &&
+                      status >= 200 && status < 300;
+            finish(ok ? "\xe2\x9c\x93 Provider reachable" :
+                       ("\xe2\x9c\x97 Provider unreachable (HTTP " +
+                        std::to_string(status) + ")"));
         }
         // 2. a real chat completion
         {

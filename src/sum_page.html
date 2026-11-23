@@ -5,10 +5,17 @@
 <title>Page Summary</title>
 <style>
 /* Avalanche's Page Summary navigator (Features/Summary/SummaryWindow), ported.
-   Palette = Themes/Dark.xaml; the Start/Reset buttons keep their exact greens/blues. */
+   The DialogChrome.Frame card: a 40px title bar - the "docsy" wordmark in the
+   accent green, the " - Page Summary" suffix in the mono face, the digest font
+   chips and the red close mark right - over the reading navigator, all in the
+   house button language (rounded hover wash). Palette = Themes/Dark.xaml;
+   Start/Reset keep their exact greens/blues; the active range chip wears the
+   theme's SelectionBg face with the SelectionFg ring, not the flat green. */
 :root{ --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
   --primary:#1ea54c; --text:#e0e0e0; --muted:#a0a0a0; --dim:#6a6a6a; --danger:#ef4444;
-  --startbg:#1b5e20; --startline:#0f3d14; --resetbg:#0d47a1; --resetline:#08306b; }
+  --selbg:#1c5e38; --selfg:#ffffff;
+  --startbg:#1b5e20; --startline:#0f3d14; --resetbg:#0d47a1; --resetline:#08306b;
+  --digest:13px; }
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%; overflow:hidden;}
 body{background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif;
@@ -17,41 +24,69 @@ body{background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif;
 ::-webkit-scrollbar-thumb{background:#3a3a3a; border-radius:5px; border:2px solid var(--bg);}
 ::-webkit-scrollbar-thumb:hover{background:#4a4a4a;}
 #app{display:flex; flex-direction:column; height:100%;}
+#body{flex:1 1 auto; display:flex; flex-direction:column; min-height:0;}
 .row{flex:0 0 auto;}
+
+/* ---- the title bar (DialogChrome.BuildTitleBar) ---- */
+#titlebar{flex:0 0 auto; height:40px; display:flex; align-items:center;
+  border-bottom:1px solid var(--line);}
+#mark{margin-left:16px; white-space:nowrap;}
+#mark b{color:var(--primary); font-size:16.5px; font-weight:700; letter-spacing:.2px;}
+#mark span{font-family:Consolas,monospace; font-size:14px; color:var(--muted);
+  margin-left:4px; vertical-align:baseline;}
+#tbtns{margin-left:auto; display:flex; align-items:center; padding-right:5px;}
+.tbtn{width:24px; height:24px; margin-left:6px; background:var(--pane);
+  border:1px solid var(--line); border-radius:4px; color:var(--text);
+  font-family:"Segoe MDL2 Assets"; font-size:10px; line-height:1; cursor:pointer;
+  padding:0; display:flex; align-items:center; justify-content:center;}
+.tbtn:hover{background:var(--rowhover);}
+.tbtn:active{background:var(--selbg); color:var(--selfg);}
+.tbtn.close{margin-left:8px; color:var(--danger);}
+.tbtn.close:hover{background:var(--danger); color:#fff;}
+.tbtn.close:active{background:var(--danger); color:#fff;}
+
+/* ---- the reading navigator ---- */
 #nav{display:flex; align-items:center; justify-content:center; gap:0; margin:12px 14px 0;}
 #nav .gap{width:10px;}
 .nbtn{width:28px; height:28px; border:1px solid var(--line); background:transparent;
-  color:var(--text); font-family:"Segoe MDL2 Assets"; font-size:11px; cursor:pointer; border-radius:3px;}
+  color:var(--text); font-family:"Segoe MDL2 Assets"; font-size:11px; cursor:pointer; border-radius:4px;}
 .nbtn:hover{background:var(--rowhover);}
+.nbtn:active{background:var(--selbg); color:var(--selfg);}
 .nbtn:disabled{opacity:.35; cursor:default;}
 #startBox{width:82px; height:28px; margin:0 4px; background:var(--pane); color:var(--text);
-  border:1px solid var(--line); border-radius:3px; font-size:13px; font-weight:600;
+  border:1px solid var(--line); border-radius:4px; font-size:13px; font-weight:600;
   text-align:center; outline:none; user-select:text;}
-#startBox:focus{border-color:var(--primary);}
+#startBox:focus{border-color:var(--selfg);}
 #actions{display:flex; gap:8px; margin:8px 14px 0;}
 #bStart{flex:1; height:28px; background:var(--startbg); border:1px solid var(--startline);
-  color:#fff; font-weight:600; font-size:12px; border-radius:3px; cursor:pointer;}
-#bStart:hover{filter:brightness(1.12);}
+  color:#fff; font-weight:600; font-size:12px; border-radius:4px; cursor:pointer;}
+#bStart:hover{opacity:.88;}
+#bStart:active{opacity:.75;}
 #bReset{flex:1; height:28px; background:var(--resetbg); border:1px solid var(--resetline);
-  color:#fff; font-weight:600; font-size:12px; border-radius:3px; cursor:pointer;}
-#bReset:hover{filter:brightness(1.12);}
+  color:#fff; font-weight:600; font-size:12px; border-radius:4px; cursor:pointer;}
+#bReset:hover{opacity:.88;}
+#bReset:active{opacity:.75;}
+#bStart:disabled,#bReset:disabled{opacity:.35; cursor:default;}
 #chips{display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:5px;
   margin:7px 14px 2px;}
 .chip{height:28px; min-width:38px; padding:0 9px; font-size:11.5px; font-weight:600;
   border:1px solid var(--line); background:transparent; color:var(--text);
-  border-radius:3px; cursor:pointer;}
-.chip:hover{background:var(--rowhover);}
-.chip.on{background:var(--primary); border-color:var(--primary); color:#0a0a0a;}
+  border-radius:4px; cursor:pointer;}
+.chip:hover{background:var(--rowhover); color:var(--text);}
+.chip.on{background:var(--selbg); border-color:var(--selfg); color:var(--selfg);}
 .sep{width:1px; height:20px; background:var(--line); margin:0 3px;}
 select{height:28px; background:var(--pane); color:var(--text); border:1px solid var(--line);
-  border-radius:3px; font-size:11.5px; outline:none; cursor:pointer;}
+  border-radius:4px; font-size:11.5px; outline:none; cursor:pointer;}
 #words{width:90px;} #lang{width:112px;} #genre{width:150px;} #prompt{width:170px;}
+
+/* ---- the digest (Row 3, justified like a typeset page) ---- */
 #digestWrap{flex:1 1 auto; margin:6px 14px 2px; position:relative; min-height:0;}
-#digest{height:100%; overflow-y:auto; user-select:text; cursor:auto; line-height:1.5;}
+#digest{height:100%; overflow-y:auto; user-select:text; cursor:auto; line-height:1.5;
+  font-size:var(--digest);}
 #digest p{text-align:justify; margin:0 0 8px;}
 #digest h1,#digest h2,#digest h3{color:var(--primary); font-weight:600; margin:10px 0 4px;}
-#digest h1{font-size:16px;} #digest h2{font-size:14.5px;} #digest h3{font-size:13.5px;}
-#digest code{font-family:Consolas,monospace; font-size:12px; background:var(--rowhover);
+#digest h1{font-size:1.23em;} #digest h2{font-size:1.12em;} #digest h3{font-size:1.04em;}
+#digest code{font-family:Consolas,monospace; font-size:.92em; background:var(--rowhover);
   border-radius:3px; padding:1px 4px;}
 #digest pre{background:var(--rowhover); border:1px solid var(--line); border-radius:4px;
   padding:8px; margin:6px 0; overflow-x:auto;}
@@ -59,17 +94,30 @@ select{height:28px; background:var(--pane); color:var(--text); border:1px solid 
 #digest blockquote{border-left:2px solid var(--line); padding:2px 10px; margin:6px 0;
   color:var(--muted); font-style:italic;}
 #digest hr{border:0; border-top:1px solid var(--line); margin:8px 0;}
+
+/* ---- the empty state (the sidechat's invite, mirrored: the robot, a title,
+   a nudge - while a run generates, the invite yields to three pulsing dots) ---- */
+#emptyState{position:absolute; inset:0; display:none; flex-direction:column;
+  align-items:center; justify-content:center; text-align:center; pointer-events:none;}
+#emptyState svg{opacity:.8;}
+#emptyTitle{font-size:13px; font-weight:600; color:var(--text); margin-top:12px;}
+#emptySub{font-size:11px; color:var(--muted); margin-top:5px; max-width:270px; line-height:16px;}
+#emptyDots{display:none; gap:5px; margin-top:14px;}
+#emptyDots i{width:7px; height:7px; border-radius:50%; background:var(--muted); opacity:.25;
+  animation:blink 1.2s infinite;}
+#emptyDots i:nth-child(2){animation-delay:.2s;}
+#emptyDots i:nth-child(3){animation-delay:.4s;}
+@keyframes blink{0%,100%{opacity:.25}50%{opacity:.8}}
+
+/* ---- the error overlay ---- */
 #overlay{position:absolute; inset:0; display:none; flex-direction:column; align-items:center;
   justify-content:center; text-align:center; margin:0 24px; color:var(--muted); font-size:12px;}
 #overlay.err{color:var(--danger);}
-#overlay .dots{display:flex; gap:5px; margin-top:10px;}
-#overlay .dots i{width:7px; height:7px; border-radius:50%; background:var(--muted); opacity:.25;
-  animation:blink 1.2s infinite;}
-#overlay .dots i:nth-child(2){animation-delay:.2s;}
-#overlay .dots i:nth-child(3){animation-delay:.4s;}
-@keyframes blink{0%,100%{opacity:.25}50%{opacity:.8}}
+
+/* ---- the hairline + status line (Rows 4-5) ---- */
+#rule{flex:0 0 auto; height:1px; background:var(--line); opacity:.85; margin:5px 14px 0;}
 #statusRow{flex:0 0 auto; display:flex; gap:12px; padding:4px 14px 12px; font-size:11px;
-  color:var(--muted); border-top:1px solid var(--line);}
+  color:var(--muted);}
 #stStatus{flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 #stModel{flex:0 0 auto; max-width:240px; white-space:nowrap; overflow:hidden;
   text-overflow:ellipsis;}
@@ -77,39 +125,65 @@ select{height:28px; background:var(--pane); color:var(--text); border:1px solid 
 </head>
 <body>
 <div id="app">
-  <div class="row" id="nav">
-    <button class="nbtn" id="bPrev" title="Previous range (A / Left)">&#xE76B;</button>
-    <input id="startBox" spellcheck="false" title="Start page - type a page, Enter commits">
-    <button class="nbtn" id="bNext" title="Next range (D / Right)">&#xE76C;</button>
+  <div id="titlebar">
+    <div id="mark"><b>docsy</b><span> - Page Summary</span></div>
+    <div id="tbtns">
+      <button class="tbtn" id="bFontDn" title="Smaller digest text">&#xE949;</button>
+      <button class="tbtn" id="bFontUp" title="Larger digest text">&#xE94A;</button>
+      <button class="tbtn close" id="bClose" title="Close">&#xE8BB;</button>
+    </div>
   </div>
-  <div class="row" id="actions">
-    <button id="bStart">Start</button>
-    <button id="bReset">Reset</button>
+  <div id="body">
+    <div class="row" id="nav">
+      <button class="nbtn" id="bPrev" title="Previous range (A / Left)">&#xE76B;</button>
+      <input id="startBox" spellcheck="false" title="Start page - type a page, Enter commits">
+      <button class="nbtn" id="bNext" title="Next range (D / Right)">&#xE76C;</button>
+    </div>
+    <div class="row" id="actions">
+      <button id="bStart">Start</button>
+      <button id="bReset">Reset</button>
+    </div>
+    <div class="row" id="chips">
+      <button class="chip" data-p="1">1</button>
+      <button class="chip" data-p="5">5</button>
+      <button class="chip" data-p="20">20</button>
+      <button class="chip" data-p="40">40</button>
+      <button class="chip" data-p="60">60</button>
+      <button class="chip" data-p="80">80</button>
+      <button class="chip" data-p="100">100</button>
+      <button class="chip" data-p="all">All</button>
+      <span class="sep"></span>
+      <select id="words"></select>
+      <select id="lang"></select>
+      <select id="genre"></select>
+    </div>
+    <div class="row" id="chipsWeb" style="display:none">
+      <select id="prompt"></select>
+      <select id="wordsW"></select>
+      <select id="langW"></select>
+    </div>
+    <div id="digestWrap">
+      <div id="digest"></div>
+      <div id="emptyState">
+        <svg width="42" height="42" viewBox="0 0 24 24" fill="#a0a0a0" fill-rule="evenodd">
+          <rect x="4" y="7" width="16" height="12" rx="3.5"/>
+          <ellipse cx="12" cy="2.2" rx="1.35" ry="1.35"/>
+          <rect x="11.42" y="3.6" width="1.16" height="3.45" rx="0.58"/>
+          <rect x="2" y="10.6" width="1.95" height="4.6" rx="1"/>
+          <rect x="20.05" y="10.6" width="1.95" height="4.6" rx="1"/>
+          <ellipse cx="8.8" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/>
+          <ellipse cx="15.2" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/>
+          <rect x="9.2" y="15.7" width="5.6" height="1.3" rx="0.65" fill="#1c1c1c"/>
+        </svg>
+        <div id="emptyTitle">Nothing summarized yet</div>
+        <div id="emptySub">Pick a range and press Start - the AI reads those pages and writes the digest here.</div>
+        <div id="emptyDots"><i></i><i></i><i></i></div>
+      </div>
+      <div id="overlay"><div id="ovText"></div></div>
+    </div>
+    <div id="rule"></div>
+    <div id="statusRow"><span id="stStatus"></span><span id="stModel"></span></div>
   </div>
-  <div class="row" id="chips">
-    <button class="chip" data-p="1">1</button>
-    <button class="chip" data-p="5">5</button>
-    <button class="chip" data-p="20">20</button>
-    <button class="chip" data-p="40">40</button>
-    <button class="chip" data-p="60">60</button>
-    <button class="chip" data-p="80">80</button>
-    <button class="chip" data-p="100">100</button>
-    <button class="chip" data-p="all">All</button>
-    <span class="sep"></span>
-    <select id="words"></select>
-    <select id="lang"></select>
-    <select id="genre"></select>
-  </div>
-  <div class="row" id="chipsWeb" style="display:none">
-    <select id="prompt"></select>
-    <select id="wordsW"></select>
-    <select id="langW"></select>
-  </div>
-  <div id="digestWrap">
-    <div id="digest"></div>
-    <div id="overlay"><div id="ovText"></div><div class="dots" id="ovDots"><i></i><i></i><i></i></div></div>
-  </div>
-  <div id="statusRow"><span id="stStatus"></span><span id="stModel"></span></div>
 </div>
 <script>
 "use strict";
@@ -117,6 +191,22 @@ function post(o){ try{ window.chrome.webview.postMessage(o); }catch(e){} }
 var $=function(id){ return document.getElementById(id); };
 var S={ mode:"doc", pageCount:1, start:1, rangePages:20, generating:false, gen:0,
         full:"", shown:0, incoming:[], typeTimer:null, lastPaint:0, busy:false };
+
+/* ---- the chrome: drag handle, close chip, Escape, the digest font dial ---- */
+$("titlebar").addEventListener("mousedown", function(e){
+  if(e.button!==0 || e.target.closest(".tbtn")) return;
+  post({type:"drag"});
+});
+$("bClose").onclick=function(){ post({type:"close"}); };
+var F=13;
+try{ F=Math.min(24,Math.max(10,parseInt(localStorage.getItem("summary.font")||"13",10)||13)); }catch(e){}
+function applyFont(){
+  document.documentElement.style.setProperty("--digest",F+"px");
+  try{ localStorage.setItem("summary.font",String(F)); }catch(e){}
+}
+$("bFontDn").onclick=function(){ F=Math.max(10,F-1); applyFont(); };
+$("bFontUp").onclick=function(){ F=Math.min(24,F+1); applyFont(); };
+applyFont();
 
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function inline(t){
@@ -170,9 +260,16 @@ function paintAll(){ S.full+S.incoming.join("");
   while(S.incoming.length) S.full+=S.incoming.shift();
   S.shown=S.full.length; typeStop(); paint(); }
 
-function overlay(text, err, busy){
+/* ---- the card's three faces: the digest, the invite, the error ---- */
+function emptyState(idle, busy){
+  var es=$("emptyState");
+  es.style.display=idle?"flex":"none";
+  $("emptyTitle").style.display=(idle&&!busy)?"block":"none";
+  $("emptySub").style.display=(idle&&!busy)?"block":"none";
+  $("emptyDots").style.display=busy?"flex":"none";
+}
+function overlay(text, err){
   $("ovText").textContent=text||"";
-  $("ovDots").style.display=busy?"flex":"none";
   $("overlay").className=err?"err":"";
   $("overlay").style.display=text?"flex":"none";
 }
@@ -208,27 +305,29 @@ window.addEventListener("message", function(e){
     fillCombos(m);
     refreshNav(); $("stModel").textContent=m.model?("Model: "+m.model):"";
     if(m.digest){ S.full=m.digest; S.shown=S.full.length; paint(); status(m.status||""); }
-    else { S.full=""; S.shown=0; $("digest").innerHTML=""; }
+    else { S.full=""; S.shown=0; $("digest").innerHTML=""; emptyState(true,false); }
     break;
   case "progress": status(m.text||""); break;
   case "delta":
     if(S.gen!==m.gen) return;
-    S.incoming.push(m.text); typeStart();
+    S.incoming.push(m.text); typeStart(); emptyState(false,false);
     break;
   case "done":
     if(S.gen!==m.gen) return;
     S.incoming=[]; S.full=m.text||""; S.shown=S.full.length; typeStop(); paint();
-    setBusy(false); overlay("",false,false);
+    setBusy(false); emptyState(false,false); overlay("",false);
     status(m.status||"");
     $("stModel").textContent=m.model?("Model: "+m.model):"";
     break;
   case "notext": if(S.gen!==m.gen) return;
-    setBusy(false); typeStop(); overlay("The selected pages have no readable text to summarize.",false,false);
+    setBusy(false); typeStop(); emptyState(false,false);
+    overlay("The selected pages have no readable text to summarize.",false);
     status(""); break;
   case "error": if(S.gen!==m.gen) return;
-    setBusy(false); typeStop(); overlay(m.text||"Summary failed.",true,false); status(""); break;
+    setBusy(false); typeStop(); emptyState(false,false);
+    overlay(m.text||"Summary failed.",true); status(""); break;
   case "stopped": if(S.gen!==m.gen) return;
-    paintAll(); setBusy(false); overlay("",false,false); status("Stopped"); break;
+    paintAll(); setBusy(false); emptyState(false,false); overlay("",false); status("Stopped"); break;
   case "nav": S.start=m.start; refreshNav(); break;
   }
 });
@@ -264,7 +363,7 @@ function curSel(){
 function startGen(bypass){
   var c=curSel();
   S.gen++; S.generating=true; S.full=""; S.shown=0; S.incoming=[];
-  $("digest").innerHTML=""; overlay("",false,false);
+  $("digest").innerHTML=""; overlay("",false); emptyState(true,true);
   $("stModel").textContent="Model: ...";
   setBusy(true);
   post({type:"start", gen:S.gen, start:S.start, range:S.rangePages,
@@ -273,7 +372,8 @@ function startGen(bypass){
 $("bStart").onclick=function(){ startGen(false); };
 $("bReset").onclick=function(){
   S.gen++; S.generating=false; S.full=""; S.shown=0; S.incoming=[]; typeStop();
-  $("digest").innerHTML=""; overlay("",false,false); status(""); $("stModel").textContent="";
+  $("digest").innerHTML=""; overlay("",false); emptyState(true,false);
+  status(""); $("stModel").textContent="";
   setBusy(false); post({type:"reset"});
 };
 $("bPrev").onclick=function(){ if(S.start<=1) return;
@@ -294,6 +394,7 @@ $("startBox").addEventListener("keydown", function(e){
   if(e.key==="Escape") refreshNav();
 });
 document.addEventListener("keydown", function(e){
+  if(e.key==="Escape"){ post({type:"close"}); return; }   // DialogChrome's Escape-close
   if(e.ctrlKey||e.altKey||e.shiftKey||e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
   if(e.key==="w"||e.key==="ArrowUp"){ scrollBySmooth(-1); }
   else if(e.key==="s"||e.key==="ArrowDown"){ scrollBySmooth(1); }

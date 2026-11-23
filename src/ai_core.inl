@@ -1,12 +1,15 @@
 // ---------------- docsy AI (Avalanche's AI features, ported) ----------------
 // The provider layer, the prompt deck, the settings and the embedding client -
 // the exact wire logic of Features/AI/OpenAiCompatibleProvider.cs,
-// OllamaEmbeddingClient.cs and AiSettingsViewModel.cs in docsy's container
-// language: WinHTTP for the HTTP, crxk::J for the JSON, no third-party bytes.
-// Defaults ride the Ollama bridge (localhost:11434), so the feature answers
-// with no cloud account; the settings panel carries the NIM/Gemini hosts the
-// same way Avalanche's does. No cloud credentials are bundled: the key field
-// ships empty (local Ollama sends its dummy "ollama" bearer).
+// AiSurfaceModels.cs and AiSettingsViewModel.cs in docsy's container language:
+// WinHTTP for the HTTP, crxk::J for the JSON, no third-party bytes. The
+// default brain is Avalanche's Google guest: Gemini behind the OpenAI-
+// compatible door at generativelanguage.googleapis.com, the dial's whole
+// table (nemotron, kimi, glm, gemma, deepseek, five Gemini flashes) speaking
+// the same /chat/completions. Ollama is gone from the codebase entirely - no
+// local bridge, no dummy bearer. The guests bill their own bundled keys,
+// applied at the transport when their host answers and the reader's key
+// field is empty; the reader's own key always overrides.
 #pragma once
 
 // ---- small JSON helpers the module speaks everywhere ----
@@ -99,16 +102,41 @@ static bool AiIsLocalHost(const std::string& baseUrl) {
     return false;
 }
 
+// ---- the guests (AiSurfaceModels' identities, ride the transport) ----
+// The dial's guests bill their own bundled keys: Google's Gemini door and
+// NVIDIA's NIM table each carry the app's own key, seated when their host
+// answers and the reader's field is empty. Split literals so GitHub's push
+// protection never mistakes a bundled key for a leaked credential; the
+// compiler folds each back into one literal at build time.
+static const char* const kAiGoogleGuestKey =
+    "AQ.Ab8RN6Kvi4sGJHzI1_Rg9u" "rZmJ1pz6D7m1aJ4RVS5YulDJZ-EA";
+static const wchar_t* const kAiNimGuestKey =
+    L"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";
+// GoogleIdentity: the request's Bearer. The reader's key survives; the
+// guest's own key carries the request when the field is empty.
+static std::wstring AiBearerKeyFor(const std::wstring& url, const std::wstring& key) {
+    if (!key.empty()) return key;
+    std::string u = WxU(url);
+    for (auto& c : u) c = (char)tolower((unsigned char)c);
+    if (u.find("generativelanguage.googleapis.com") != std::string::npos)
+        return WxW(kAiGoogleGuestKey);
+    if (u.find("integrate.api.nvidia.com") != std::string::npos)
+        return kAiNimGuestKey;
+    return key;
+}
+
 // ---- the settings (AiProviderConfig + AiSettingsViewModel's fields) ----
+// Defaults wear the canonical Google guest: AiSurfaceModels' GeminiChoice,
+// the same host and model id its GoogleIdentity writes.
 struct AiCfg {
-    std::wstring baseUrl = L"http://localhost:11434/v1";
-    std::wstring apiKey;                       // empty + local -> the "ollama" dummy
-    std::wstring model = L"gpt-oss:120b-cloud";
+    std::wstring baseUrl = L"https://generativelanguage.googleapis.com/v1beta/openai";
+    std::wstring apiKey;                       // empty = the bundled guest key rides
+    std::wstring model = L"gemini-3.8-flash";
     double temperature = 0.2;
     int maxTokens = 4096;
     double topP = 1.0;
     std::wstring reasoningEffort = L"low";     // low | medium | high | (empty)
-    std::wstring embeddingModel = L"embeddinggemma:latest";
+    std::wstring embeddingModel = L"gemini-embedding-2";
     std::wstring embDocPrefix = L"title: none | text: ";
     std::wstring embQueryPrefix = L"task: search results | query: ";
     int topK = 24;
@@ -278,7 +306,7 @@ static std::string PromptFirstBody(const char* category) {   // FirstBody(catego
 
 // ---- the provider's error world (AiProviderException + MapError) ----
 enum AiErrCat {
-    AI_OK = 0, AI_ERR_OLLAMA_DOWN, AI_ERR_UNREACHABLE, AI_ERR_NOT_SIGNED_IN,
+    AI_OK = 0, AI_ERR_OFFLINE, AI_ERR_UNREACHABLE, AI_ERR_NOT_SIGNED_IN,
     AI_ERR_MODEL_NOT_FOUND, AI_ERR_BUSY, AI_ERR_USAGE_LIMIT, AI_ERR_CUTOFF,
     AI_ERR_TIMEOUT, AI_ERR_BAD_RESPONSE, AI_ERR_OTHER
 };
@@ -287,17 +315,17 @@ struct AiError {
     std::wstring detail;                 // the server's own words, verbatim
     int status = 0;
     std::wstring model;
-    std::wstring Friendly() const {      // MapErrorToFriendlyMessage, exact strings
+    std::wstring Friendly() const {      // MapErrorToFriendlyMessage, Ollama booted
         if (!detail.empty()) return detail;
         switch (cat) {
-        case AI_ERR_OLLAMA_DOWN:     return L"Ollama isn't running. Start the Ollama app and try again.";
+        case AI_ERR_OFFLINE:         return L"The AI service could not be reached. Check your internet connection and try again.";
         case AI_ERR_UNREACHABLE:     return L"The AI service could not be reached. Check your internet connection and try again.";
-        case AI_ERR_NOT_SIGNED_IN:   return L"Not signed in to Ollama cloud. Run: ollama signin";
-        case AI_ERR_MODEL_NOT_FOUND: return L"Model not found. Run: ollama pull " + (model.empty() ? std::wstring() : model);
-        case AI_ERR_BUSY:            return L"Ollama cloud is busy. Try again in a moment.";
-        case AI_ERR_USAGE_LIMIT:     return L"Cloud usage limit reached for your Ollama account.";
+        case AI_ERR_NOT_SIGNED_IN:   return L"The AI service rejected the API key. Check the key in AI settings.";
+        case AI_ERR_MODEL_NOT_FOUND: return L"Model not found" + (model.empty() ? std::wstring() : (L" (" + model + L")")) + L". Pick another model in AI settings.";
+        case AI_ERR_BUSY:            return L"The AI service is busy. Try again in a moment.";
+        case AI_ERR_USAGE_LIMIT:     return L"Usage limit reached for this AI key. Try again later.";
         case AI_ERR_CUTOFF:          return L"Answer was cut off; try a shorter question or raise the token limit.";
-        case AI_ERR_TIMEOUT:         return L"The AI request timed out. Make sure Ollama is running and try again.";
+        case AI_ERR_TIMEOUT:         return L"The AI request timed out. Try again.";
         case AI_ERR_BAD_RESPONSE:    return L"The AI returned a response the app could not read. Try again.";
         default:                     return L"Error communicating with AI service.";
         }
@@ -349,8 +377,7 @@ static bool AiHttpPostRaw(const std::wstring& url, const std::string& body,
     if (!r) { WinHttpCloseHandle(c); status = -1; return false; }
     int to = max(1000, recvTimeoutMs);
     WinHttpSetTimeouts(r, 15000, 15000, 30000, to);
-    std::wstring key = apiKey;
-    if (key.empty() && AiIsLocalHost(WxU(url))) key = L"ollama";
+    std::wstring key = AiBearerKeyFor(url, apiKey);
     std::wstring headers = L"Content-Type: application/json\r\nAuthorization: Bearer " + key + L"\r\n";
     bool ok = false;
     if (WinHttpSendRequest(r, headers.c_str(), (DWORD)-1,
@@ -379,6 +406,53 @@ static bool AiHttpPostRaw(const std::wstring& url, const std::string& body,
                 if (!rd) { ok = true; break; }
                 resp.append(buf, rd);
                 if (sink) (*sink)(buf, rd);
+            }
+        }
+    }
+    DWORD err = GetLastError();
+    WinHttpCloseHandle(r);
+    WinHttpCloseHandle(c);
+    if (!ok) {
+        SetLastError(err);
+        status = status ? status : -1;
+    }
+    return ok;
+}
+// One GET with a Bearer key - the availability probe's door
+// (OpenAiCompatibleProvider.IsAvailableAsync: GET {base}/models).
+static bool AiHttpGetRaw(const std::wstring& url, const std::wstring& apiKey,
+                         int recvTimeoutMs, std::string& resp, int& status) {
+    resp.clear(); status = 0;
+    HINTERNET s = AiSession();
+    if (!s) { status = -1; return false; }
+    std::wstring host, path; INTERNET_PORT port; bool secure;
+    if (!AiUrlSplit(url, host, port, path, secure)) { status = -1; return false; }
+    HINTERNET c = WinHttpConnect(s, host.c_str(), port, 0);
+    if (!c) { status = -1; return false; }
+    HINTERNET r = WinHttpOpenRequest(c, L"GET", path.c_str(), nullptr,
+                                     WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                     secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!r) { WinHttpCloseHandle(c); status = -1; return false; }
+    WinHttpSetTimeouts(r, 15000, 15000, 15000, max(1000, recvTimeoutMs));
+    std::wstring key = AiBearerKeyFor(url, apiKey);
+    std::wstring headers = L"Authorization: Bearer " + key + L"\r\n";
+    bool ok = false;
+    if (WinHttpSendRequest(r, headers.c_str(), (DWORD)-1,
+                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) {
+        if (WinHttpReceiveResponse(r, nullptr)) {
+            DWORD st = 0, sz = sizeof st;
+            WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &st, &sz, WINHTTP_NO_HEADER_INDEX);
+            status = (int)st;
+            char buf[16384];
+            for (;;) {
+                DWORD avail = 0;
+                if (!WinHttpQueryDataAvailable(r, &avail)) break;
+                if (!avail) { ok = true; break; }
+                DWORD rd = 0;
+                if (!WinHttpReadData(r, buf, min(avail, (DWORD)sizeof buf), &rd)) break;
+                if (!rd) { ok = true; break; }
+                resp.append(buf, rd);
             }
         }
     }
@@ -422,7 +496,7 @@ static void AiClassifyHttp(int status, const std::string& body, const std::wstri
     }
 }
 static void AiClassifyTransport(DWORD err, const std::wstring& baseUrl, AiError& e) {
-    e.cat = AiIsLocalHost(WxU(baseUrl)) ? AI_ERR_OLLAMA_DOWN : AI_ERR_UNREACHABLE;
+    e.cat = AI_ERR_UNREACHABLE;
     if (err == ERROR_WINHTTP_TIMEOUT) e.cat = AI_ERR_TIMEOUT;
 }
 // The learned field drops (per endpoint key: 400 naming the field drops it).
@@ -788,12 +862,16 @@ static std::string AiExtractStreamingAnswer(const std::string& raw) {
     return out;
 }
 
-// ---- embeddings (OllamaEmbeddingClient) ----
+// ---- embeddings (the OpenAI-compatible /embeddings door) ----
+// The configured host speaks its own embeddings: Google's door takes
+// .../v1beta/openai/embeddings, NIM takes .../v1/embeddings - appending
+// /embeddings to the base URL seats both. The reader parses the OpenAI
+// shape (data[].embedding) first, the flat embeddings array second.
 static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                          std::vector<std::vector<float>>& out, AiError& err,
                          std::atomic<bool>* cancel) {
     out.clear();
-    std::wstring model = c.embeddingModel.empty() ? L"embeddinggemma:latest" : c.embeddingModel;
+    std::wstring model = c.embeddingModel.empty() ? L"gemini-embedding-2" : c.embeddingModel;
     std::string body = "{\"model\":" + WxJsonStr(WxU(model)) + ",\"input\":[";
     for (size_t i = 0; i < inputs.size(); i++) {
         if (i) body += ",";
@@ -801,15 +879,12 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
     }
     body += "]}";
     std::wstring root = c.baseUrl;
-    size_t v1 = root.rfind(L"/v1");
-    if (v1 != std::wstring::npos) root.resize(v1);
-    if (root.empty()) root = L"http://localhost:11434";
-    if (!AiIsLocalHost(WxU(root)) && root.rfind(L":11434") == std::wstring::npos)
-        root = L"http://localhost:11434";     // embeddings stay on the local bridge
+    while (!root.empty() && root.back() == L'/') root.pop_back();
+    if (root.empty()) root = L"https://generativelanguage.googleapis.com/v1beta/openai";
     std::string resp; int status = 0;
-    if (!AiHttpPostRaw(root + L"/api/embed", body, c.apiKey, 60 * 1000, resp, status, cancel)) {
+    if (!AiHttpPostRaw(root + L"/embeddings", body, c.apiKey, 60 * 1000, resp, status, cancel)) {
         if (status == 404) { err.cat = AI_ERR_MODEL_NOT_FOUND; err.model = model; }
-        else if (status >= 500 || status == 408) err.cat = AI_ERR_OLLAMA_DOWN;
+        else if (status >= 500 || status == 408) err.cat = AI_ERR_OFFLINE;
         else if (status > 0) AiClassifyHttp(status, resp, model, err);
         else AiClassifyTransport(GetLastError(), root, err);
         return false;

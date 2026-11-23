@@ -70,6 +70,7 @@ static std::wstring g_aiNotesDocPath;
 
 // the summarizer window
 static HWND g_sumWnd = nullptr;
+static int g_sumFrame = 0;               // the OS border width NCCALCSIZE kept
 static wrl::ComPtr<ICoreWebView2Controller> g_sumCtr;
 static wrl::ComPtr<ICoreWebView2> g_sumWeb;
 static bool g_sumBuilding = false, g_sumReady = false;
