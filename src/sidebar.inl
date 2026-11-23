@@ -214,6 +214,81 @@ static void RailActivate(int id) {
     else InfoOpen();                        // KillerPDF's DocInfo_Click: the button stays
 }                                           // enabled; a no-document click is told to the reader
 
+// ---- the sidebar's segmented tabs: PAGES | NOTES (the reference's
+// SidebarSegmentTab: wide, bold, high-contrast; the active tab wears the
+// solid green accent face with bright text, the inactive one a quiet
+// bordered chip with dimmer text). The band is an opaque strip over the
+// card's top row - the thumbnails scroll under it, the same tuck the
+// toolbar band gives every other surface. The NOTES chip only seats in
+// reader mode: the browser's and editor's sidebars keep their own panels. ----
+static constexpr int SB_TABS = 2;
+static int SideBandH() {
+    return (g_webOn || g_editOn || g.full) ? 0 : (int)(34 * g.dpi);
+}
+static void SideBandRects(RECT rc[SB_TABS], int w) {
+    int tw = (int)(68 * g.dpi), th = (int)(22 * g.dpi), gap = (int)(8 * g.dpi);
+    int x = max(0, (w - (tw * SB_TABS + gap)) / 2);
+    int y = max(0, (SideBandH() - th) / 2);
+    for (int i = 0; i < SB_TABS; i++) {
+        rc[i] = { x, y, x + tw, y + th };
+        x += tw + gap;
+    }
+}
+static HFONT g_bandfont = nullptr;
+static HBRUSH g_bandline = nullptr;
+static void SideBandChip(HDC dc, const RECT& cell, const wchar_t* label, bool on, bool hot) {
+    // the chip face: active #1b5e20 / border #0f3d14 / white text; rest
+    // transparent over the grain with the #2e2e2e ring and the muted label;
+    // hover RowHoverBrush - SidebarSegmentTab's exact triggers
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::GraphicsPath p;
+    float rr = (float)(4 * g.dpi);
+    float fx = (float)cell.left, fy = (float)cell.top;
+    float fw = (float)(cell.right - cell.left), fh = (float)(cell.bottom - cell.top);
+    p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+    p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+    p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+    p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+    p.CloseFigure();
+    if (on) {
+        Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x1b, 0x5e, 0x20));
+        gs.FillPath(&f, &p);
+        Gdiplus::Pen pen(Gdiplus::Color(255, 0x0f, 0x3d, 0x14), 1.0f);
+        gs.DrawPath(&pen, &p);
+    } else if (hot) {
+        Gdiplus::SolidBrush f(Gdiplus::Color(255, 0x40, 0x40, 0x40));
+        gs.FillPath(&f, &p);
+        Gdiplus::Pen pen(Gdiplus::Color(255, 0x2e, 0x2e, 0x2e), 1.0f);
+        gs.DrawPath(&pen, &p);
+    } else {
+        Gdiplus::Pen pen(Gdiplus::Color(255, 0x2e, 0x2e, 0x2e), 1.0f);
+        gs.DrawPath(&pen, &p);
+    }
+    HGDIOBJ of = SelectObject(dc, CaptionFont(g_bandfont, 11, true, L"Segoe UI"));
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, on ? RGB(0xff, 0xff, 0xff) : hot ? RGB(0xe0, 0xe0, 0xe0) : RGB(0xa0, 0xa0, 0xa0));
+    DrawTextW(dc, label, -1, (LPRECT)&cell, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, of);
+}
+static void SideBandDraw(HDC dc, int w) {
+    int bh = SideBandH();
+    RECT band{ 0, 0, w, bh };
+    FillRect(dc, &band, GrainBrush(1));
+    if (!g_bandline) g_bandline = CreateSolidBrush(RGB(0x2e, 0x2e, 0x2e));
+    RECT bot{ 0, bh - 1, w, bh };
+    FillRect(dc, &bot, g_bandline);      // the band's CardBorderBrush seam
+    RECT rc[SB_TABS]; SideBandRects(rc, w);
+    SideBandChip(dc, rc[0], L"PAGES", !g_sideNotes, g_sideBandHot == 0);
+    SideBandChip(dc, rc[1], L"NOTES", g_sideNotes, g_sideBandHot == 1);
+}
+static int SideBandHitAt(POINT p, int w) {
+    if (p.y >= SideBandH()) return -1;
+    RECT rc[SB_TABS]; SideBandRects(rc, w);
+    for (int i = 0; i < SB_TABS; i++) if (PtInRect(&rc[i], p)) return i;
+    return -1;
+}
+
 static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_ERASEBKGND: return 1;

@@ -219,7 +219,7 @@ static void AiSemanticStart() {
     AiDocIndex ix = g_aiIndex;
     AiCfg cfg = g_aiCfg;
     std::wstring prefixKey = cfg.embDocPrefix + L"\x01" + cfg.embQueryPrefix;
-    std::string model = WxU(cfg.embeddingModel.empty() ? L"gemini-embedding-2"
+    std::string model = WxU(cfg.embeddingModel.empty() ? L"nvidia/nemotron-3-embed-1b"
                                                        : cfg.embeddingModel);
     std::thread([ix, cfg, prefixKey, model]() mutable {
         bool upToDate = (ix.embModel == model && ix.prefixKey == WxU(prefixKey) &&
@@ -475,6 +475,168 @@ static bool AiAxoAppend(const std::wstring& docPath, const std::string& html,
     if (!WxWriteFile(tmp, (const unsigned char*)out.data(), out.size())) return false;
     DeleteFileW(file.c_str());
     return MoveFileW(tmp.c_str(), file.c_str()) != 0;
+}
+
+// ---- the sidebar's NOTES panel (the reference's own seat: MainWindow's
+// NotesPanel under the Pages | Notes segmented tabs, not a tab on the chat) ----
+// A small WebView2 on g.side below the band, hosting notes_page.deflate
+// (resource 404) - the cards UI the chat panel used to carry. The generation
+// plumbing above is unchanged; only the address it reports to moved.
+static void NotesPanelMessage(const wchar_t* json);   // the page's messages, below
+static wrl::ComPtr<ICoreWebView2Controller> g_notesCtr;
+static wrl::ComPtr<ICoreWebView2> g_notesWeb;
+static bool g_notesBuilding = false, g_notesReady = false;
+
+static std::wstring NotesPageHtml() {
+    HRSRC hs = FindResourceW(g.hinst, MAKEINTRESOURCEW(404), (LPCWSTR)RT_RCDATA);
+    if (!hs) return L"";
+    HGLOBAL hg = LoadResource(g.hinst, hs);
+    if (!hg) return L"";
+    const unsigned char* data = (const unsigned char*)LockResource(hg);
+    DWORD len = SizeofResource(g.hinst, hs);
+    if (!data || !len) return L"";
+    std::vector<unsigned char> out;
+    if (crxk::Inflate(data, len, out, 4 * 1024 * 1024) && !out.empty())
+        return WxW(std::string((const char*)out.data(), out.size()));
+    return WxW(std::string((const char*)data, len));
+}
+static void NotesPost(const std::string& j) {
+    if (g_notesWeb) g_notesWeb->PostWebMessageAsJson(WxW(j).c_str());
+}
+static void NotesSendState() {
+    // the seat's own truth: whose pages it reads, which cards it holds. The
+    // cards belong to the document that generated them - a different book in
+    // the seat clears the board, the reference's NotesPanel behaves the same.
+    DocState& D = DVF();
+    if (D.path != g_aiNotesDocPath) {
+        g_aiNotesDocPath = D.path;
+        g_aiNotesCards.clear();
+    }
+    std::string j = "{\"cmd\":\"notes-status\",\"text\":";
+    j += D.path.empty() ? WxJsonStr(L"Open a PDF to generate notes for its pages.")
+                        : "null";
+    j += ",\"busy\":" + std::string(g_aiNotesBusy ? "true" : "false") + "}";
+    NotesPost(j);
+    std::string cards = "[";
+    for (size_t i = 0; i < g_aiNotesCards.size(); i++) {
+        if (i) cards += ",";
+        cards += "{\"first\":" + std::to_string(g_aiNotesCards[i].first) +
+                 ",\"last\":" + std::to_string(g_aiNotesCards[i].last) +
+                 ",\"content\":" + WxJsonStr(WxU(g_aiNotesCards[i].content)) + "}";
+    }
+    cards += "]";
+    NotesPost("{\"cmd\":\"notes-cards\",\"cards\":" + cards + "}");
+}
+static void NotesSideLayout() {
+    if (!g_notesCtr) return;
+    if (!g.side) return;
+    int band = SideBandH();
+    bool show = g_sideNotes && band > 0 && IsWindowVisible(g.side) &&
+                sd.cw > (int)(60 * g.dpi) && sd.ch > band + (int)(40 * g.dpi);
+    if (!show) {
+        g_notesCtr->put_Bounds({ 0, 0, 0, 0 });
+        g_notesCtr->put_IsVisible(FALSE);
+        return;
+    }
+    RECT b{ 0, band, sd.cw, max(band + 1, sd.ch) };
+    g_notesCtr->put_Bounds(b);
+    g_notesCtr->put_IsVisible(TRUE);
+}
+static void NotesEnsure() {
+    if (g_notesCtr || g_notesBuilding) return;
+    if (!g.side) return;
+    WebEnsureEnv();
+    if (!g_wvEnv) return;
+    g_notesBuilding = true;
+    g_wvEnv->CreateCoreWebView2Controller(
+        g.side,
+        Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+            [](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
+                g_notesBuilding = false;
+                if (FAILED(hr) || !c) return S_OK;
+                g_notesCtr = c;
+                c->get_CoreWebView2(&g_notesWeb);
+                wrl::ComPtr<ICoreWebView2Controller2> c2;
+                if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
+                    c2->put_DefaultBackgroundColor({ 0, 0, 0, 0 });   // the grain field
+                                              // shows through, the pages grid's surface
+                EventRegistrationToken tk;
+                g_notesWeb->add_WebMessageReceived(
+                    Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                        [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* a) -> HRESULT {
+                            LPWSTR msg = nullptr;
+                            if (SUCCEEDED(a->get_WebMessageAsJson(&msg)) && msg) {
+                                NotesPanelMessage(msg);
+                                CoTaskMemFree(msg);
+                            }
+                            return S_OK;
+                        }).Get(), &tk);
+                std::wstring html = NotesPageHtml();
+                if (!html.empty()) g_notesWeb->NavigateToString(html.c_str());
+                NotesSideLayout();
+                return S_OK;
+            }).Get());
+}
+static void NotesSideShow(bool on) {
+    if (g_sideNotes == on) {                 // the same chip again: a no-op repaint
+        InvalidateRect(g.side, nullptr, FALSE);
+        return;
+    }
+    g_sideNotes = on;
+    if (on) {
+        NotesEnsure();
+        if (g_notesReady) NotesSendState();   // a reopen re-seats the cards it holds
+    }
+    InvalidateRect(g.side, nullptr, FALSE);
+    NotesSideLayout();
+}
+// ---- the notes panel's messages (the chat panel's handlers, moved seat) ----
+static void NotesRefresh() {
+    // a new document in the focused pane re-reads the seat: the doc-change
+    // guard inside NotesSendState clears the board the old book filled
+    if (g_sideNotes && g_notesReady) NotesSendState();
+}
+static void NotesPanelMessage(const wchar_t* json) {
+    std::string u8 = WxU(json);
+    crxk::J m;
+    if (!crxk::JParse(u8, m) || m.t != 'o') return;
+    const crxk::J* typ = m.get("type");
+    if (!typ || typ->t != 's') return;
+    std::string t = typ->s;
+    if (t == "ready") {
+        g_notesReady = true;
+        NotesSendState();
+    } else if (t == "notes-gen") {
+        const crxk::J* r = m.get("range");
+        AiNotesGenerate(r && r->t == 's' ? WxW(r->s) : L"");
+    } else if (t == "notes-axo") {
+        const crxk::J* f = m.get("first"), * l = m.get("last"), * c = m.get("content");
+        if (f && l && c && c->t == 's') {
+            DocState& D = DVF();
+            bool ok = !D.path.empty() &&
+                      AiAxoAppend(D.path, AiMdToHtml(c->s), (int)f->d, (int)l->d);
+            AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
+            e->a = ok ? WxU(L"Saved to Axo ✓") : WxU(L"Document is not in the database Books or Articles folder. Axo note not saved.");
+            e->flag = false;
+            AiPost(e);
+        }
+    } else if (t == "notes-axo-all") {
+        DocState& D = DVF();
+        bool ok = !D.path.empty() && !g_aiNotesCards.empty();
+        if (ok) {
+            for (auto& card : g_aiNotesCards) {
+                std::string html = AiMdToHtml("**Pages " + std::to_string(card.first) +
+                                              " \u2013 " + std::to_string(card.last) +
+                                              "**\n\n" + card.content);
+                if (!AiAxoAppend(D.path, html, card.first, card.last)) { ok = false; break; }
+            }
+        }
+        AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
+        e->a = ok ? WxU(L"Saved all to Axo ✓") :
+                    WxU(L"Document is not in the database Books or Articles folder. Axo note not saved.");
+        e->flag = false;
+        AiPost(e);
+    }
 }
 
 // ---- the citation jump: the PDF page + the highlight ----

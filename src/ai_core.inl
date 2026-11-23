@@ -3,13 +3,14 @@
 // the exact wire logic of Features/AI/OpenAiCompatibleProvider.cs,
 // AiSurfaceModels.cs and AiSettingsViewModel.cs in docsy's container language:
 // WinHTTP for the HTTP, crxk::J for the JSON, no third-party bytes. The
-// default brain is Avalanche's Google guest: Gemini behind the OpenAI-
-// compatible door at generativelanguage.googleapis.com, the dial's whole
-// table (nemotron, kimi, glm, gemma, deepseek, five Gemini flashes) speaking
-// the same /chat/completions. Ollama is gone from the codebase entirely - no
-// local bridge, no dummy bearer. The guests bill their own bundled keys,
-// applied at the transport when their host answers and the reader's key
-// field is empty; the reader's own key always overrides.
+// default brain is Avalanche's own first brain: NVIDIA's NIM cloud API and
+// nvidia/nemotron-3-ultra-550b-a55b - AiProviderConfig's defaults and every
+// surface dial's seat in the reference. The dial's other guests (kimi, glm,
+// gemma, deepseek, the five Gemini flashes behind Google's OpenAI-compatible
+// door) stay one preset away in the panel's settings. Ollama is gone from the
+// codebase entirely - no local bridge, no dummy bearer. The guests bill their
+// own bundled keys, applied at the transport when their host answers and the
+// reader's key field is empty; the reader's own key always overrides.
 #pragma once
 
 // ---- small JSON helpers the module speaks everywhere ----
@@ -131,17 +132,19 @@ static std::wstring AiBearerKeyFor(const std::wstring& url, const std::wstring& 
 }
 
 // ---- the settings (AiProviderConfig + AiSettingsViewModel's fields) ----
-// Defaults wear the canonical Google guest: AiSurfaceModels' GeminiChoice,
-// the same host and model id its GoogleIdentity writes.
+// Defaults wear the canonical nemotron: AiProviderConfig's own defaults ARE
+// the app's first brain - NVIDIA's NIM cloud API and
+// nvidia/nemotron-3-ultra-550b-a55b - the same seat the reference's fresh
+// config wears, with NIM's own embedding model on the same door.
 struct AiCfg {
-    std::wstring baseUrl = L"https://generativelanguage.googleapis.com/v1beta/openai";
+    std::wstring baseUrl = L"https://integrate.api.nvidia.com/v1";
     std::wstring apiKey;                       // empty = the bundled guest key rides
-    std::wstring model = L"gemini-3.8-flash";
+    std::wstring model = L"nvidia/nemotron-3-ultra-550b-a55b";
     double temperature = 0.2;
     int maxTokens = 4096;
     double topP = 1.0;
     std::wstring reasoningEffort = L"low";     // low | medium | high | (empty)
-    std::wstring embeddingModel = L"gemini-embedding-2";
+    std::wstring embeddingModel = L"nvidia/nemotron-3-embed-1b";
     std::wstring embDocPrefix = L"title: none | text: ";
     std::wstring embQueryPrefix = L"task: search results | query: ";
     int topK = 24;
@@ -876,7 +879,7 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                          std::vector<std::vector<float>>& out, AiError& err,
                          std::atomic<bool>* cancel) {
     out.clear();
-    std::wstring model = c.embeddingModel.empty() ? L"gemini-embedding-2" : c.embeddingModel;
+    std::wstring model = c.embeddingModel.empty() ? L"nvidia/nemotron-3-embed-1b" : c.embeddingModel;
     std::string body = "{\"model\":" + WxJsonStr(WxU(model)) + ",\"input\":[";
     for (size_t i = 0; i < inputs.size(); i++) {
         if (i) body += ",";
@@ -885,7 +888,7 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
     body += "]}";
     std::wstring root = c.baseUrl;
     while (!root.empty() && root.back() == L'/') root.pop_back();
-    if (root.empty()) root = L"https://generativelanguage.googleapis.com/v1beta/openai";
+    if (root.empty()) root = L"https://integrate.api.nvidia.com/v1";
     std::string resp; int status = 0;
     if (!AiHttpPostRaw(root + L"/embeddings", body, c.apiKey, 60 * 1000, resp, status, cancel)) {
         if (status == 404) { err.cat = AI_ERR_MODEL_NOT_FOUND; err.model = model; }

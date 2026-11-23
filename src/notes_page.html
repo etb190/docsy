@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Notes</title>
+<style>
+/* Avalanche's sidebar NOTES panel (MainWindow.xaml's NotesPanel +
+   Shell/SidebarNotes.cs), ported to docsy's container language: the pages
+   range row, Generate, Save All / Copy All, and the review cards. The rail's
+   Pages | Notes segmented tabs live in the sidebar's own chrome (sidebar.inl);
+   this page is the panel below them. Palette = Themes/Dark.xaml; the panel
+   paints nothing behind the words - the window's grain field shows through
+   (the WebView's own background is alpha 0), exactly like the pages grid. */
+:root{
+  --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
+  --primary:#1ea54c; --onprimary:#0a0a0a; --text:#e0e0e0; --muted:#a0a0a0;
+  --dim:#6a6a6a; --danger:#ef4444; --selbg:#1c5e38;
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+html,body{height:100%; overflow:hidden;}
+body{background:transparent; color:var(--text);
+  font-family:"Segoe UI",sans-serif; font-size:12px;
+  -webkit-user-select:none; user-select:none; cursor:default;}
+::-webkit-scrollbar{width:10px;}
+::-webkit-scrollbar-thumb{background:#3a3a3a; border-radius:5px; border:2px solid transparent;}
+::-webkit-scrollbar-thumb:hover{background:#4a4a4a;}
+::-webkit-scrollbar-track{background:transparent;}
+#notesTab{display:flex; flex-direction:column; height:100%; min-height:0;}
+#notesHead{padding:10px 12px 0; flex:0 0 auto;}
+#notesRow{display:flex; gap:6px; align-items:center;}
+#notesRange{flex:1 1 40px; min-width:0; background:var(--pane); border:1px solid var(--line);
+  border-radius:3px; color:var(--text); font-size:12px; padding:5px 8px; outline:none; user-select:text;}
+#notesGen{flex:0 0 auto; background:#1b5e20; border:1px solid #0f3d14; color:#fff; font-weight:600;
+  font-size:11.5px; border-radius:3px; padding:6px 12px; cursor:pointer; white-space:nowrap;}
+#notesGen:hover{filter:brightness(1.1);}
+#notesGen:disabled{opacity:.4; cursor:default;}
+#notesCtl{display:flex; gap:6px; margin-top:8px;}
+.nbtn{flex:1 1 0; background:var(--pane); border:1px solid var(--line); color:var(--text);
+  font-size:11px; border-radius:3px; padding:4px 6px; cursor:pointer; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis;}
+.nbtn:hover{background:var(--rowhover);}
+.nbtn:disabled{opacity:.35; cursor:default;}
+#notesStatus{display:none; margin-top:6px; font-size:11px; color:var(--muted); line-height:1.4;}
+#notesRule{height:1px; background:var(--line); margin:8px 12px 2px; opacity:.85; flex:0 0 auto;}
+#notesCards{flex:1 1 auto; overflow-y:auto; padding:4px 8px 8px; min-height:0;}
+#notesEmpty{font-size:11px; color:var(--muted); padding:10px 4px; line-height:1.45;}
+.ncard{background:var(--pane); border:1px solid var(--line); border-radius:4px;
+  padding:6px 8px 8px; margin:0 0 8px;}
+.ncard .nhead{display:flex; align-items:center; margin-bottom:4px;}
+.ncard .ntitle{flex:1 1 auto; font-size:11.5px; font-weight:600; color:var(--primary);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.chip{width:24px; height:22px; border:0; background:transparent; color:#2e7d32;
+  font-family:"Segoe MDL2 Assets"; font-size:11px; cursor:pointer; border-radius:3px; flex:0 0 auto;}
+.chip:hover{background:var(--rowhover);}
+.ncard .nbody{font-size:11px; line-height:1.45; user-select:text; cursor:auto;
+  color:var(--text); max-height:260px; overflow-y:auto;}
+.ncard .nbody p{margin:0 0 5px;} .ncard .nbody p:last-child{margin-bottom:0;}
+.ncard .nbody ul{margin:0 0 5px; padding-left:18px;}
+.ncard .nbody strong{font-weight:600;}
+.ncard .nbody h1,.ncard .nbody h2,.ncard .nbody h3{color:var(--primary);
+  font-weight:600; margin:6px 0 3px; line-height:1.3;}
+.ncard .nbody h1{font-size:13px;} .ncard .nbody h2,.ncard .nbody h3{font-size:11.5px;}
+.ncard .nbody code{font-family:Consolas,monospace; font-size:10.5px;
+  background:var(--rowhover); border-radius:3px; padding:1px 4px;}
+.ncard .nbody blockquote{border-left:2px solid var(--line); padding:2px 8px;
+  margin:4px 0 6px; color:var(--muted); font-style:italic;}
+.ncard .nbody a{color:var(--primary);}
+</style>
+</head>
+<body>
+<div id="notesTab">
+  <div id="notesHead">
+    <div id="notesRow">
+      <input id="notesRange" placeholder="Pages 1-100" spellcheck="false">
+      <button id="notesGen">Generate</button>
+    </div>
+    <div id="notesCtl">
+      <button class="nbtn" id="bNotesSaveAll">Save All to Axo</button>
+      <button class="nbtn" id="bNotesCopyAll">Copy All Notes</button>
+    </div>
+    <div id="notesStatus"></div>
+  </div>
+  <div id="notesRule"></div>
+  <div id="notesCards"><div id="notesEmpty">Select a page range and click Generate Notes to create review cards.</div></div>
+</div>
+<script>
+"use strict";
+function post(o){ try{ window.chrome.webview.postMessage(o); }catch(e){} }
+var $=function(id){ return document.getElementById(id); };
+var S={ cards:[] };
+
+/* ---------------- markdown (AiMarkdown.cs's grammar, the cards' dialect) */
+function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function inlineMd(t){
+  var out="", last=0, r=/(`[^`\n]+`)|(\*\*([^*\n]+?)\*\*)|(__([^_\n]+?)__)|(\*([^*\n]+?)\*)|(_([^_\n]+?)_)|(\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\))/g, mm;
+  while((mm=r.exec(t))){
+    out+=t.slice(last,mm.index);
+    if(mm[1]) out+="<code>"+esc(mm[1].slice(1,-1))+"</code>";
+    else if(mm[2]) out+="<strong>"+esc(mm[3])+"</strong>";
+    else if(mm[4]) out+="<strong>"+esc(mm[5])+"</strong>";
+    else if(mm[6]) out+="<em>"+esc(mm[7])+"</em>";
+    else if(mm[8]) out+="<em>"+esc(mm[9])+"</em>";
+    else if(mm[10]) out+='<a href="'+mm[11]+'" title="'+mm[11]+'">'+esc(mm[10])+"</a>";
+    last=mm.index+mm[0].length;
+  }
+  return out+t.slice(last);
+}
+function renderMd(text, el){
+  var lines=text.replace(/\r\n|\r/g,"\n").split("\n"), html="", i=0, para=[], listOpen="";
+  function flushPara(){ if(para.length){ html+="<p>"+para.join(" ")+"</p>"; para=[]; } }
+  function closeList(){ if(listOpen){ html+="</"+listOpen+">"; listOpen=""; } }
+  while(i<lines.length){
+    var ln=lines[i].replace(/\s+$/,"");
+    if(/^```/.test(ln)){ flushPara(); closeList();
+      var code=[], j=i+1;
+      for(; j<lines.length && !/^```/.test(lines[j]); j++) code.push(lines[j]);
+      html+="<pre><code>"+esc(code.join("\n"))+"</code></pre>"; i=j+1; continue; }
+    var hm=ln.match(/^(#{1,6})\s+(.*)$/);
+    if(hm){ flushPara(); closeList(); var lv=hm[1].length;
+      html+="<h"+lv+">"+inlineMd(hm[2])+"</h"+lv+">"; i++; continue; }
+    var bm=ln.match(/^\s*[-*+]\s+(.*)$/);
+    if(bm){ flushPara(); if(listOpen!=="ul"){ closeList(); html+="<ul>"; listOpen="ul"; }
+      html+="<li>"+inlineMd(bm[1])+"</li>"; i++; continue; }
+    var nm=ln.match(/^\s*(\d{1,3})[.)]\s+(.*)$/);
+    if(nm){ flushPara(); if(listOpen!=="ol"){ closeList(); html+="<ol>"; listOpen="ol"; }
+      html+="<li>"+inlineMd(nm[2])+"</li>"; i++; continue; }
+    var qm=ln.match(/^\s*>\s?(.*)$/);
+    if(qm){ flushPara(); closeList(); html+="<blockquote>"+inlineMd(qm[1])+"</blockquote>"; i++; continue; }
+    if(ln.trim()===""){ flushPara(); closeList(); i++; continue; }
+    para.push(inlineMd(ln.trim())); i++;
+  }
+  flushPara(); closeList();
+  el.innerHTML=html||"<p></p>";
+}
+
+/* ---------------- cards ---------------- */
+function renderNotes(){
+  var host=$("notesCards"); host.innerHTML="";
+  if(!S.cards.length){
+    host.innerHTML='<div id="notesEmpty">Select a page range and click Generate Notes to create review cards.</div>';
+    $("bNotesSaveAll").disabled=true; $("bNotesCopyAll").disabled=true;
+    return; }
+  for(var c of S.cards){
+    var d=document.createElement("div"); d.className="ncard";
+    var hd=document.createElement("div"); hd.className="nhead";
+    var t=document.createElement("div"); t.className="ntitle";
+    t.textContent="Pages "+c.first+" \u2013 "+c.last;
+    var cp=document.createElement("button"); cp.className="chip"; cp.innerHTML="&#xE8C8;";
+    cp.title="Copy card";
+    cp.onclick=function(){ copyText("**Pages "+c.first+" \u2013 "+c.last+"**\n\n"+c.content);
+      cp.innerHTML="&#x2713;"; setTimeout(function(){ cp.innerHTML="&#xE8C8;"; },1200); };
+    var sv=document.createElement("button"); sv.className="chip"; sv.innerHTML="&#xE70B;";
+    sv.title="Save to Axo Notes";
+    sv.onclick=function(){ post({type:"notes-axo", first:c.first, last:c.last, content:c.content});
+      sv.innerHTML="&#xE73E;"; setTimeout(function(){ sv.innerHTML="&#xE70B;"; },1200); };
+    var bd=document.createElement("div"); bd.className="nbody"; renderMd(c.content, bd);
+    hd.appendChild(t); hd.appendChild(sv); hd.appendChild(cp);
+    d.appendChild(hd); d.appendChild(bd); host.appendChild(d);
+  }
+  $("bNotesSaveAll").disabled=false; $("bNotesCopyAll").disabled=false;
+}
+function copyText(t){
+  try{ navigator.clipboard.writeText(t); }catch(e){
+    var ta=document.createElement("textarea"); ta.value=t; document.body.appendChild(ta);
+    ta.select(); try{ document.execCommand("copy"); }catch(x){} ta.remove(); }
+}
+
+/* ---------------- C++ -> page ---------------- */
+window.addEventListener("message", function(e){
+  var m=e.data; if(!m||!m.cmd) return;
+  switch(m.cmd){
+  case "notes-status":
+    $("notesStatus").style.display=m.text?"block":"none";
+    $("notesStatus").textContent=m.text||"";
+    $("notesGen").disabled=!!m.busy;
+    $("bNotesSaveAll").disabled=!!m.busy||!S.cards.length;
+    $("bNotesCopyAll").disabled=!!m.busy||!S.cards.length;
+    break;
+  case "notes-cards":
+    S.cards=m.cards||[]; renderNotes();
+    $("notesStatus").style.display="none";
+    $("notesGen").disabled=false;
+    break;
+  case "notes-clear":
+    S.cards=[]; renderNotes();
+    $("notesStatus").style.display="none";
+    break;
+  }
+});
+
+/* ---------------- page -> C++ ---------------- */
+$("bNotesSaveAll").onclick=function(){ post({type:"notes-axo-all"}); };
+$("bNotesCopyAll").onclick=function(){
+  var t=S.cards.map(function(c){ return "**Pages "+c.first+" \u2013 "+c.last+"**\n\n"+c.content+"\n\n"; }).join("").trim();
+  if(t){ copyText(t); $("bNotesCopyAll").textContent="Copied \u2713";
+    setTimeout(function(){ $("bNotesCopyAll").textContent="Copy All Notes"; },1200); }
+};
+$("notesGen").onclick=function(){ post({type:"notes-gen", range:$("notesRange").value}); };
+$("notesRange").addEventListener("keydown", function(e){
+  if(e.key==="Enter") post({type:"notes-gen", range:$("notesRange").value});
+});
+$("notesRange").addEventListener("input", function(){
+  this.value=this.value.replace(/[^0-9\-\u2013 ]/g,"");
+});
+post({type:"ready"});
+</script>
+</body>
+</html>

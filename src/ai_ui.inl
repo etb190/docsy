@@ -676,13 +676,19 @@ static void AiBindContext() {
 static void AiIndexKickoff(const std::wstring& path);   // defined with the pump
 
 // ---- the panel window host ----
+// The panel is a DOCKED column, not an overlay: it parents on the main frame
+// and lives in its own strip right of g.view (LayoutMain reserves the width),
+// the same seat Avalanche's AiChatOverlay holds - the top edge under the
+// toolbar row, the document pushed narrower instead of covered, the window's
+// grain field showing through the WebView's transparent background exactly
+// like the pages rail's surface does.
 static void AiPanelEnsure() {
     if (g_aiCtr || g_aiBuilding) return;
     WebEnsureEnv();
     if (!g_wvEnv) return;
     g_aiBuilding = true;
     g_wvEnv->CreateCoreWebView2Controller(
-        g.view,
+        g.main,
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
             [](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
                 g_aiBuilding = false;
@@ -691,7 +697,11 @@ static void AiPanelEnsure() {
                 c->get_CoreWebView2(&g_aiWeb);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
-                    c2->put_DefaultBackgroundColor({ 255, 0x1c, 0x1c, 0x1c });
+                    c2->put_DefaultBackgroundColor({ 0, 0, 0, 0 });   // transparent:
+                                             // the strip's grain field shows through,
+                                             // the one surface the reference's panel
+                                             // paints over (SidebarPaneBrush is
+                                             // transparent outside 98SE)
                 EventRegistrationToken tk;
                 g_aiWeb->add_WebMessageReceived(
                     Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
@@ -705,23 +715,33 @@ static void AiPanelEnsure() {
                         }).Get(), &tk);
                 std::wstring html = AiPanelHtml();
                 if (!html.empty()) g_aiWeb->NavigateToString(html.c_str());
-                RECT r; GetClientRect(g.view, &r);
                 AiOverlayLayout();
                 c->put_IsVisible(g_aiOn ? TRUE : FALSE);
                 return S_OK;
             }).Get());
 }
-static int AiOverlayW(int vw) {
-    int w = (int)(380 * g.dpi);
-    return min(w, max(0, vw - (int)(80 * g.dpi)));
-}
+// the dock width the layout reserved this pass (LayoutMain owns the number;
+// the panel just reads it, so every mode agrees on one strip)
+static RECT g_aiLastBounds{ -1, -1, -1, -1 };
 static void AiOverlayLayout() {
-    if (!g_aiCtr) return;
-    RECT r; GetClientRect(g.view, &r);
-    int w = g_aiOn ? AiOverlayW(r.right) : 0;
-    RECT b{ max(0, (int)r.right - w), 0, r.right, r.bottom };
-    g_aiCtr->put_Bounds(b);
-    g_aiCtr->put_IsVisible(g_aiOn && r.right > (int)(100 * g.dpi) ? TRUE : FALSE);
+    if (!g.main || !g.view) return;
+    if (!g_aiCtr) return;                    // the creation callback lays it out
+    RECT vr; GetWindowRect(g.view, &vr);
+    ScreenToClient(g.main, (POINT*)&vr);
+    ScreenToClient(g.main, ((POINT*)&vr) + 1);
+    RECT b{ 0, 0, 0, 0 };
+    bool seat = g_aiDockW > 0 && vr.right > 0;
+    if (seat) b = { vr.right, vr.top, vr.right + g_aiDockW, vr.bottom };
+    // Hide before a move: a visible strip clips its own old rect out of every
+    // repaint around it, and a moved strip would leave those holes stale
+    // forever. A resize-drag only reseats when the strip actually moved, so
+    // the steady drag stays flicker-free.
+    if (!EqualRect(&g_aiLastBounds, &b)) {
+        g_aiCtr->put_IsVisible(FALSE);
+        g_aiCtr->put_Bounds(b);
+        g_aiLastBounds = b;
+    }
+    g_aiCtr->put_IsVisible(g_aiOn && seat ? TRUE : FALSE);
 }
 static void AiChatToggle() {
     g_aiOn = !g_aiOn;
@@ -742,9 +762,7 @@ static void AiChatToggle() {
     }
     if (g_aiOn && !g_aiCtr) AiPanelEnsure();
     if (g_aiOn) AiBindContext();
-    AiOverlayLayout();
-    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
-    if (g_editOn && g_edCtr) {   // the editor's keys yield while the panel shows
-        // nothing special: the panel overlays the editor's right edge
-    }
+    // the dock: the view gives the strip its width back and takes it again
+    // here - LayoutMain reserves g_aiDockW and lays the panel out last
+    LayoutMain();
 }

@@ -68,8 +68,8 @@ static void AiPanelMessage(const wchar_t* json) {
         AiBindContext();
     } else if (t == "close") {
         g_aiOn = false;
-        AiOverlayLayout();
-        if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+        LayoutMain();                        // the view takes its width back: the strip's
+                                             // grain shows while the dock width is zeroed
     } else if (t == "newchat") {
         std::lock_guard<std::mutex> lk(g_aiMtx);
         auto it = g_aiCtx.find(g_aiCurKey);
@@ -300,38 +300,6 @@ static void AiPanelMessage(const wchar_t* json) {
                 AiNavigateToSource(src->pageIndex, rects);
             }
         }
-    } else if (t == "notes-gen") {
-        const crxk::J* r = m.get("range");
-        AiNotesGenerate(r && r->t == 's' ? WxW(r->s) : L"");
-    } else if (t == "notes-axo") {
-        const crxk::J* f = m.get("first"), * l = m.get("last"), * c = m.get("content");
-        if (f && l && c && c->t == 's') {
-            DocState& D = DVF();
-            bool ok = !D.path.empty() &&
-                      AiAxoAppend(D.path, AiMdToHtml(c->s), (int)f->d, (int)l->d);
-            AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
-            e->a = ok ? WxU(L"Saved to Axo ✓") : WxU(L"Document is not in the database Books or Articles folder. Axo note not saved.");
-            e->flag = false;
-            AiPost(e);
-        }
-    } else if (t == "notes-axo-all") {
-        DocState& D = DVF();
-        bool ok = !D.path.empty() && !g_aiNotesCards.empty();
-        if (ok) {
-            for (auto& card : g_aiNotesCards) {
-                std::string html = AiMdToHtml("**Pages " + std::to_string(card.first) +
-                                              " \u2013 " + std::to_string(card.last) +
-                                              "**\n\n" + card.content);
-                if (!AiAxoAppend(D.path, html, card.first, card.last)) { ok = false; break; }
-            }
-        }
-        AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
-        e->a = ok ? WxU(L"Saved all to Axo ✓") :
-                    WxU(L"Document is not in the database Books or Articles folder. Axo note not saved.");
-        e->flag = false;
-        AiPost(e);
-    } else if (t == "notes-refresh") {
-        // the tab's own state is client-side; nothing to re-sync yet
     }
 }
 
@@ -420,8 +388,9 @@ static void AiHandleEvent(AiEv* e) {
         AiPanelSend(WxW(AiStatusJson("status")));
         break;
     case AIEV_NOTES_STATUS:
-        AiPanelSend("{\"cmd\":\"notes-status\",\"text\":" + WxJsonStr(e->a) +
-                    ",\"busy\":" + (e->flag ? "true" : "false") + "}");
+        // the cards report to the sidebar's notes seat, not the chat panel
+        NotesPost("{\"cmd\":\"notes-status\",\"text\":" + WxJsonStr(e->a) +
+                  ",\"busy\":" + (e->flag ? "true" : "false") + "}");
         break;
     case AIEV_NOTES_CARDS: {
         crxk::J sb;
@@ -437,7 +406,7 @@ static void AiHandleEvent(AiEv* e) {
                 g_aiNotesCards.push_back(std::move(c));
             }
         }
-        AiPanelSend("{\"cmd\":\"notes-cards\",\"cards\":" + e->b + "}");
+        NotesPost("{\"cmd\":\"notes-cards\",\"cards\":" + e->b + "}");
         break;
     }
     case AIEV_WEB_TEXT: {

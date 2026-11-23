@@ -5,6 +5,13 @@ static void AiIndexTick();                  // the AI workers' pumps ride the ma
 static void AiRangeTick();
 static void AiHandleEvent(AiEv* e);
 
+// The AI panel's docked column: Avalanche's AiChatOverlay Width=380, squeezed
+// before it would crowd the page out (the old overlay's 80px floor, kept).
+static int AiDockWidth(int avail) {
+    int want = (int)(380 * g.dpi);
+    return min(want, max(0, avail - (int)(80 * g.dpi)));
+}
+
 static void LayoutMain() {
     if (!g.main || !g.view) return;
     RECT r; GetClientRect(g.main, &r);
@@ -33,7 +40,12 @@ static void LayoutMain() {
         int ch = max(0, h - cap0 - th - sh);
         int sw = (g_edSide && !g.full) ? SW() : 0;
         int rw = RW();
-        int vw = max(0, w - sw - rw);
+        int aw = (g_aiOn && !g.full) ? AiDockWidth(w - sw - rw) : 0;   // the AI column
+        g_aiDockW = aw;
+        AiOverlayLayout();                   // hide/seat the strip before any repaint:
+                                             // a visible strip clips its own old rect out
+                                             // of the handout below and leaves stale holes
+        int vw = max(0, w - sw - rw - aw);
         if (g_etool) MoveWindow(g_etool, 0, cap0, w, th, TRUE);
         if (g.side) {
             MoveWindow(g.side, 0, cap0 + th, sw, ch, TRUE);
@@ -51,6 +63,7 @@ static void LayoutMain() {
             g_edCtr->put_Bounds(vr);
         }
         AiOverlayLayout();                   // the AI panel rides the editor's strip too
+        NotesSideLayout();                   // the notes seat hides here: no band in editor mode
         for (auto& k : kids) {
             if (!k.w) continue;
             RECT now; GetWindowRect(k.w, &now); ScreenToClient(g.main, (POINT*)&now);
@@ -85,6 +98,9 @@ static void LayoutMain() {
     }
     int sw = g_webOn ? (g_webSide ? SW() : 0) : ((g.sideOn && DVF().n && !g.full) ? SW() : 0);   // the sidebar shows the FOCUSED
     int rw = RW();                              // pane's pages; the rail always rides between
+    int aw = (g_aiOn && !g.full) ? AiDockWidth(w - sw - rw) : 0;   // the AI column
+    g_aiDockW = aw;
+    AiOverlayLayout();                       // hide/seat the strip before any repaint
     int tl = WEBTOOLH();                        // browser mode: the reader's toolbar row, one button
     int cap = cap0 + tl;                        // everything below sits under caption + toolbar
     int tb = g_webOn ? WebBandH() : TBH();      // browser mode: the tab band - there only
@@ -115,7 +131,7 @@ static void LayoutMain() {
         MoveWindow(g.rail, sw, cap + ws_ + tb, rw, ch, TRUE);   // always there but in full screen
         ShowWindow(g.rail, rw > 0 ? SW_SHOWNOACTIVATE : SW_HIDE);
     }
-    MoveWindow(g.view, sw + rw, cap + ws_ + tb, max(0, w - sw - rw), ch, TRUE);
+    MoveWindow(g.view, sw + rw, cap + ws_ + tb, max(0, w - sw - rw - aw), ch, TRUE);
     if (g.status) MoveWindow(g.status, 0, cap + ws_ + tb + ch, w, sh, TRUE);
     // Hand the vacated strips out. A moved child leaves up to four strips
     // (old ∖ new); each is intersected with every sibling's NEW rect - that
@@ -179,6 +195,7 @@ static void LayoutMain() {
         UpdateTitle();
     }
     AiOverlayLayout();                       // the AI panel re-pins to the view's right edge
+    NotesSideLayout();                       // the notes seat re-pins under its band
 }
 
 static void ToggleSide() {
@@ -199,6 +216,7 @@ static void ToggleSide() {
     }
     if (!DVF().n) return;
     g.sideOn = !g.sideOn;
+    if (g.sideOn) g_sideNotes = false;    // the Pages button opens the pages panel
     ShowWindow(g.side, g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE);
     RailRepaint();                        // the Pages button lights and dims with the sidebar
     LayoutMain();

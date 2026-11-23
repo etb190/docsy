@@ -637,8 +637,19 @@ static void ToggleSplit();
 static void ToggleSide();               // defined with the main window (the Pages button)
 static void AiChatToggle();             // the AI panel's toolbar button (defined in ai_ui.inl)
 static void SumToggle(int mode);        // the Page Summary navigator (defined in ai_ui2.inl)
+static int g_aiDockW = 0;               // the AI panel's docked strip width this pass:
+                                        // LayoutMain reserves it right of the view, the
+                                        // panel's bounds read it back (ai_ui.inl)
 static void AiPaintPage(HDC dc, const DocState& D, int page, int px, int py);   // the citation's highlight quad (ai_ui2.inl)
 static void AiOverlayLayout();          // the panel's bounds ride every layout (ai_ui.inl)
+static bool g_sideNotes = false;        // the sidebar's NOTES tab is the active face
+static int g_sideBandHot = -1;          // the segmented tab under the cursor
+static void SideBandDraw(HDC dc, int w);   // the Pages | Notes band (sidebar.inl)
+static int SideBandHitAt(POINT p, int w);  // the band's own hit test
+static void NotesSideShow(bool on);     // the segmented tab's switch (ai_ui2.inl)
+static void NotesSideLayout();          // the notes panel's bounds ride the sidebar (ai_ui2.inl)
+static void NotesRefresh();             // the seat re-reads its document (ai_ui2.inl)
+static int SideBandH();                 // the sidebar's Pages | Notes band height (sidebar.inl)
 static void InfoOpen();
 static bool InfoIsOpen();
 static void SetStatusHold(const std::wstring& t, unsigned ms = 2500);   // the footer's held line

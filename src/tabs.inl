@@ -550,6 +550,9 @@ static void TrackLeave(HWND h) { TRACKMOUSEEVENT t{ sizeof t, TME_LEAVE, h, 0 };
 static void SideDraw(HDC dc, int w, int h, int xoff) {
     RECT r{ xoff, 0, xoff + w, h };
     FillRect(dc, &r, GrainBrush(1));
+    if (g_sideNotes) return;                // the NOTES face: the webview's transparent
+                                            // body sits straight on the grain - thumbs
+                                            // would bleed through between the cards
     DocState& D = DVF();                    // the sidebar paints the FOCUSED pane's pages
     if (!D.n || sd.cw <= 0 || sd.top.empty()) return;
     int avail = sd.cw - SBar();
@@ -621,6 +624,8 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (g_webOn) WebSideDraw(sd.bdc, sd.cw, sd.ch);         // browser mode: the rail is
             else if (g_editOn) EditorSideDraw(sd.bdc, sd.cw, sd.ch);
             else SideDraw(sd.bdc, sd.cw, sd.ch, 0);                 // the web tabs' thumbnails
+            if (SideBandH() > 0) SideBandDraw(sd.bdc, sd.cw);       // the Pages | Notes band rides
+                                                                    // over the card's top row
             BitBlt(dc, 0, 0, sd.cw, sd.ch, sd.bdc, 0, 0, SRCCOPY);  // shared field runs unbroken
             SetTimer(h, 2, 25, nullptr);   // finish any pending thumbs
         }
@@ -628,19 +633,26 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
-        if (wp == 2 && (g_webOn ? !WebSidePump() : !SidePump())) KillTimer(h, 2);
+        if (wp == 2 && (g_webOn ? !WebSidePump()
+                                : (g_sideNotes ? false : !SidePump()))) KillTimer(h, 2);
         return 0;
     case WM_SIZE:                        // the cards re-flow to the width: a full
         InvalidateRect(h, nullptr, FALSE);   // repaint leaves no stale column behind
         return 0;
     case WM_MOUSEWHEEL:
         if (g_webOn) { WebSideWheel(-GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 240) / 120); return 0; }
+        if (g_sideNotes) return 0;         // the notes WebView owns the wheel below the band
         SideScrollTo(sd.scroll - GET_WHEEL_DELTA_WPARAM(wp) * (int)(g.dpi * 240) / 120);
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         if (g_editOn) { EditorRefocus(); return 0; }
         if (g_webOn) { WebSideDown(p); return 0; }
+        if (SideBandH() > 0) {
+            int tab = SideBandHitAt(p, sd.cw);
+            if (tab >= 0) { NotesSideShow(tab == 1); return 0; }   // the segmented tab's own switch
+            if (g_sideNotes) return 0;     // below the band the notes WebView has the click
+        }
         SetCapture(h);
         int gb = SBar();
         if (DVF().n && sd.docH > sd.ch && p.x >= sd.cw - gb && p.x < sd.cw) {
@@ -657,6 +669,18 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         if (g_webOn) { WebSideMove(h, p); return 0; }
+        if (SideBandH() > 0) {
+            int bhot = SideBandHitAt(p, sd.cw);
+            if (bhot >= 0 || p.y < SideBandH()) {
+                if (bhot != g_sideBandHot) {
+                    g_sideBandHot = bhot;
+                    if (bhot >= 0) TrackLeave(h);
+                    InvalidateRect(h, nullptr, FALSE);
+                }
+                return 0;                 // the band owns the pointer above it
+            }
+            if (g_sideNotes) return 0;    // the notes WebView owns the pointer below it
+        }
         if (sd.barDrag) {
             int tl, tp; BarThumb(sd.docH, sd.ch, sd.scroll, tl, tp);
             SideScrollTo((int)((long long)(p.y - sd.barGrab) * max(0, sd.docH - sd.ch) / max(1, sd.ch - tl)));
@@ -685,6 +709,7 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSELEAVE:
         if (g_webOn) { WebSideLeave(); return 0; }
+        if (g_sideBandHot != -1) { g_sideBandHot = -1; InvalidateRect(h, nullptr, FALSE); }
         if (sd.barHot) { sd.barHot = false; InvalidateRect(h, nullptr, FALSE); }
         if (sd.hover != -1) { sd.hover = -1; InvalidateRect(h, nullptr, FALSE); }
         return 0;
@@ -713,6 +738,12 @@ static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 return TRUE;
             }
             bool edge = g.sideOn && DVF().n && sd.cw > 0 && p.x >= sd.cw - 1;
+            if (SideBandH() > 0) {
+                if (SideBandHitAt(p, sd.cw) >= 0) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND)); return TRUE;
+                }
+                if (g_sideNotes) { SetCursor(LoadCursorW(nullptr, IDC_ARROW)); return TRUE; }
+            }
             SetCursor(LoadCursorW(nullptr, edge ? IDC_SIZEWE : IDC_ARROW));
             return TRUE;
         }

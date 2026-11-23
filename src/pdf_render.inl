@@ -1226,6 +1226,7 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
             sd.cw = 0; sd.ch = 0;                    // you read rebuilds the ring around it
             g.sideOn = true;
             if (g.side) ShowWindow(g.side, SW_SHOWNOACTIVATE);
+            NotesRefresh();                          // the notes seat re-reads its document
         }
         LayoutMain();
         if (g.view) InvalidateRect(g.view, nullptr, FALSE);   // the new document is the card now:

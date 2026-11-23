@@ -8,3 +8,4 @@
 401 RCDATA "ai_page.deflate"
 402 RCDATA "sum_page.deflate"
 403 RCDATA "prompts.default.json"
+404 RCDATA "notes_page.deflate"

@@ -6,10 +6,13 @@
 <title>AI</title>
 <style>
 /* Avalanche's AI Chat overlay, ported verbatim to docsy's container language.
-   Palette = Themes/Dark.xaml: BackgroundBrush #1c1c1c, PaneBrush #3a3a3a,
-   RowHoverBrush #404040, CardBorderBrush #2e2e2e, PrimaryBrush #1ea54c,
-   TextBrush #e0e0e0, MutedTextBrush #a0a0a0, DimTextBrush #6a6a6a,
-   DangerRed #ef4444, SelectionBg #1c5e38. */
+   Palette = Themes/Dark.xaml: PaneBrush #3a3a3a, RowHoverBrush #404040,
+   CardBorderBrush #2e2e2e, PrimaryBrush #1ea54c, TextBrush #e0e0e0,
+   MutedTextBrush #a0a0a0, DimTextBrush #6a6a6a, DangerRed #ef4444,
+   SelectionBg #1c5e38. The panel itself paints NOTHING behind the words:
+   SidebarPaneBrush is transparent outside 98SE, so the window's grain field
+   shows through (the WebView's own background is alpha 0) - the same surface
+   the pages rail sits on. The overlays keep BackgroundBrush #1c1c1c. */
 :root{
   --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
   --primary:#1ea54c; --onprimary:#0a0a0a; --text:#e0e0e0; --muted:#a0a0a0;
@@ -20,13 +23,13 @@
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%; overflow:hidden;}
 body{
-  background:var(--bg); color:var(--text);
+  background:transparent; color:var(--text);
   font-family:"Segoe UI","Segoe UI Emoji",sans-serif; font-size:12px;
   -webkit-user-select:none; user-select:none; cursor:default;
 }
 #app{display:flex; flex-direction:column; height:100%;}
 ::-webkit-scrollbar{width:10px;}
-::-webkit-scrollbar-thumb{background:#3a3a3a; border-radius:5px; border:2px solid var(--bg);}
+::-webkit-scrollbar-thumb{background:#3a3a3a; border-radius:5px; border:2px solid transparent;}
 ::-webkit-scrollbar-thumb:hover{background:#4a4a4a;}
 ::-webkit-scrollbar-track{background:transparent;}
 
@@ -45,11 +48,6 @@ body{
 .ibtn:disabled{opacity:.35; cursor:default; background:transparent;}
 #ctxTitle{font-size:11px; color:var(--muted); margin:2px 0 0 24px;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-#tabs{display:flex; gap:6px; margin:6px 0 0 24px;}
-.tab{font-size:11px; font-weight:600; color:var(--muted); padding:3px 10px;
-  border:1px solid var(--line); border-radius:10px; cursor:pointer; background:transparent;}
-.tab:hover{color:var(--text);}
-.tab.on{color:var(--onprimary); background:var(--primary); border-color:var(--primary);}
 
 /* ---- archive banner ---- */
 #archive{display:none; padding:5px 12px; background:var(--pane);
@@ -107,8 +105,9 @@ body{
 .cite:hover{opacity:.75;}
 .cite.dead{opacity:.38; cursor:default;}
 
-/* ---- empty state ---- */
-#empty{position:absolute; inset:0; display:none; flex-direction:column;
+/* ---- empty state: the invitation shows the moment the panel opens - the
+     first user message sweeps it away (setEmpty) ---- */
+#empty{position:absolute; inset:0; display:flex; flex-direction:column;
   align-items:center; justify-content:center; margin:0 24px; pointer-events:none;}
 #empty .t1{font-size:13px; font-weight:600; color:var(--text); margin-top:12px;}
 #empty .t2{font-size:11px; color:var(--muted); margin-top:5px; text-align:center;
@@ -132,7 +131,7 @@ body{
 .sbtn:hover{background:var(--rowhover);}
 .sbtn:disabled{opacity:.35; cursor:default;}
 
-/* ---- overlays (settings / history): opaque seat over the conversation ---- */
+/* ---- overlays (settings / history): opaque seats over the conversation ---- */
 .ovl{position:absolute; inset:0; background:var(--bg); border-top:1px solid var(--line);
   display:none; flex-direction:column; z-index:60;}
 .ovl .obody{flex:1 1 auto; overflow-y:auto; padding:8px 12px;}
@@ -164,38 +163,7 @@ body{
 .hrow .del:hover{color:var(--danger); background:var(--pane);}
 #histEmpty{font-size:11px; color:var(--muted); margin:12px 8px; text-align:center;}
 
-/* ---- NOTES tab (SidebarNotes.cs) ---- */
-#notesTab{flex:1 1 auto; display:none; flex-direction:column; min-height:0;}
-#notesHead{padding:10px 12px 0;}
-#notesRow{display:flex; gap:8px; align-items:center;}
-#notesRow label{font-size:11.5px; color:var(--text); font-weight:600;}
-#notesRange{flex:1 1 auto; min-width:0; background:var(--pane); border:1px solid var(--line);
-  border-radius:3px; color:var(--text); font-size:12px; padding:5px 8px; outline:none; user-select:text;}
-#notesGen{background:#1b5e20; border:1px solid #0f3d14; color:#fff; font-weight:600;
-  font-size:11.5px; border-radius:3px; padding:6px 14px; cursor:pointer;}
-#notesGen:hover{filter:brightness(1.1);}
-#notesGen:disabled{opacity:.4; cursor:default;}
-#notesCtl{display:flex; gap:8px; margin-top:8px;}
-.nbtn{background:var(--pane); border:1px solid var(--line); color:var(--text);
-  font-size:11px; border-radius:3px; padding:4px 10px; cursor:pointer;}
-.nbtn:hover{background:var(--rowhover);}
-.nbtn:disabled{opacity:.35; cursor:default;}
-#notesStatus{display:none; margin-top:6px; font-size:11px; color:var(--muted); line-height:1.4;}
-#notesRule{height:1px; background:var(--line); margin:8px 12px 2px; opacity:.85;}
-#notesCards{flex:1 1 auto; overflow-y:auto; padding:4px 8px 8px;}
-#notesEmpty{font-size:11px; color:var(--muted); padding:10px 4px; line-height:1.45;}
-.ncard{background:var(--pane); border:1px solid var(--line); border-radius:4px;
-  padding:6px 8px 8px; margin:0 0 8px;}
-.ncard .nhead{display:flex; align-items:center; margin-bottom:4px;}
-.ncard .ntitle{flex:1 1 auto; font-size:11.5px; font-weight:600; color:var(--primary);
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-.chip{width:24px; height:22px; border:0; background:transparent; color:#2e7d32;
-  font-family:"Segoe MDL2 Assets"; font-size:11px; cursor:pointer; border-radius:3px; flex:0 0 auto;}
-.chip:hover{background:var(--rowhover);}
-.ncard .nbody{font-size:11px; line-height:1.45; user-select:text; cursor:auto;
-  color:var(--text); max-height:260px; overflow-y:auto;}
-.ncard .nbody p{margin:0 0 5px;} .ncard .nbody p:last-child{margin-bottom:0;}
-.ncard .nbody ul{margin:0 0 5px; padding-left:18px;}
-.ncard .nbody strong{font-weight:600;}
+/* the panel's own text sits straight on the grain, like the reference's rail
+text does - no opaque card behind it */
 </style>
 </head>
