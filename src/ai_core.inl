@@ -214,29 +214,79 @@ static void AiLoadSettings() {
     if (g_aiCfg.maxHistory < 2) g_aiCfg.maxHistory = 2;
 }
 static void AiSaveSettings() {
-    std::string j = "{";
-    auto ps = [&](const char* k, const std::wstring& v) {
-        j += std::string("\"") + k + "\":" + WxJsonStr(v) + ",";
+    std::string s;
+    crxk::J j;
+    if (WxReadFile(AiRootDir() + L"\\settings.json", s)) {
+        crxk::JParse(s, j);
+    }
+    if (j.t != 'o') j = crxk::J();
+    auto setS = [&](const std::string& k, const std::wstring& v) {
+        std::string u = WxU(v);
+        for (auto& kv : j.o) {
+            if (kv.first == k) { kv.second = crxk::J(); kv.second.t = 's'; kv.second.s = u; return; }
+        }
+        crxk::J e; e.t = 's'; e.s = u; j.o.push_back({ k, e });
     };
-    auto pn = [&](const char* k, double v, bool last = false) {
-        char b[64]; snprintf(b, sizeof b, "\"%s\":%.6g%s", k, v, last ? "" : ",");
-        j += b;
+    auto setN = [&](const std::string& k, double v) {
+        for (auto& kv : j.o) {
+            if (kv.first == k) { kv.second = crxk::J(); kv.second.t = 'd'; kv.second.d = v; return; }
+        }
+        crxk::J e; e.t = 'd'; e.d = v; j.o.push_back({ k, e });
     };
-    ps("baseUrl", g_aiCfg.baseUrl);
-    ps("apiKey", g_aiCfg.apiKey);
-    ps("model", g_aiCfg.model);
-    pn("temperature", g_aiCfg.temperature);
-    pn("maxTokens", g_aiCfg.maxTokens);
-    pn("topP", g_aiCfg.topP);
-    ps("reasoningEffort", g_aiCfg.reasoningEffort);
-    ps("embeddingModel", g_aiCfg.embeddingModel);
-    ps("embDocPrefix", g_aiCfg.embDocPrefix);
-    ps("embQueryPrefix", g_aiCfg.embQueryPrefix);
-    pn("topK", g_aiCfg.topK);
-    pn("evidenceBudget", g_aiCfg.evidenceBudget);
-    pn("maxHistory", g_aiCfg.maxHistory, true);
-    j += "}";
-    WxWriteFile(AiRootDir() + L"\\settings.json", (const unsigned char*)j.data(), j.size());
+    setS("baseUrl", g_aiCfg.baseUrl);
+    setS("apiKey", g_aiCfg.apiKey);
+    setS("model", g_aiCfg.model);
+    setN("temperature", g_aiCfg.temperature);
+    setN("maxTokens", g_aiCfg.maxTokens);
+    setN("topP", g_aiCfg.topP);
+    setS("reasoningEffort", g_aiCfg.reasoningEffort);
+    setS("embeddingModel", g_aiCfg.embeddingModel);
+    setS("embDocPrefix", g_aiCfg.embDocPrefix);
+    setS("embQueryPrefix", g_aiCfg.embQueryPrefix);
+    setN("topK", g_aiCfg.topK);
+    setN("evidenceBudget", g_aiCfg.evidenceBudget);
+    setN("maxHistory", g_aiCfg.maxHistory);
+    std::string out;
+    WxJsonEmit(j, out);
+    WxWriteFile(AiRootDir() + L"\\settings.json", (const unsigned char*)out.data(), out.size());
+}
+static std::string AiGetSetting(const std::string& key, const std::string& defVal = "") {
+    std::string s;
+    if (!WxReadFile(AiRootDir() + L"\\settings.json", s)) return defVal;
+    crxk::J j;
+    if (!crxk::JParse(s, j) || j.t != 'o') return defVal;
+    const crxk::J* p = j.get(key.c_str());
+    if (p && p->t == 's') return p->s;
+    if (p && p->t == 'd') {
+        char b[32]; snprintf(b, sizeof b, "%.6g", p->d);
+        return b;
+    }
+    return defVal;
+}
+static void AiSetSetting(const std::string& key, const std::string& val) {
+    std::string s;
+    crxk::J j;
+    if (WxReadFile(AiRootDir() + L"\\settings.json", s)) {
+        crxk::JParse(s, j);
+    }
+    if (j.t != 'o') j = crxk::J();
+    bool found = false;
+    for (auto& kv : j.o) {
+        if (kv.first == key) {
+            kv.second = crxk::J();
+            kv.second.t = 's';
+            kv.second.s = val;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        crxk::J e; e.t = 's'; e.s = val;
+        j.o.push_back({ key, e });
+    }
+    std::string out;
+    WxJsonEmit(j, out);
+    WxWriteFile(AiRootDir() + L"\\settings.json", (const unsigned char*)out.data(), out.size());
 }
 
 // ---- the prompt deck (Features/AI/prompts.default.json, embedded verbatim) ----

@@ -4,18 +4,25 @@
 <meta charset="utf-8">
 <title>Page Summary</title>
 <style>
-/* Avalanche's Page Summary navigator (Features/Summary/SummaryWindow), ported.
-   The DialogChrome.Frame card: a 40px title bar - the "docsy" wordmark in the
-   accent green, the " - Page Summary" suffix in the mono face, the digest font
-   chips and the red close mark right - over the reading navigator, all in the
-   house button language (rounded hover wash). Palette = Themes/Dark.xaml;
-   Start/Reset keep their exact greens/blues; the active range chip wears the
-   theme's SelectionBg face with the SelectionFg ring, not the flat green. */
-:root{ --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
-  --primary:#1ea54c; --text:#e0e0e0; --muted:#a0a0a0; --dim:#6a6a6a; --danger:#ef4444;
-  --selbg:#1c5e38; --selfg:#ffffff;
+/* Avalanche's Page Summary navigator (Features/Summary/SummaryWindow), ported verbatim.
+   The DialogChrome.Frame card: 40px title bar with "docsy - Page Summary" wordmark,
+   AI test beaker, digest font chips and red close mark right.
+   Row 0: reading navigator in ONE row - Ping + Recap bookending left of stepper,
+   Discord + Buffer bookending right of stepper.
+   Row 1: Start (dark green) & Reset (dark blue) buttons.
+   Row 2: Range chips (1..100, All), Word ceiling, Language, Book genre dropdowns.
+   Row 3: Typeset justified digest with word hover plate (#B31B5E20 / #E60F3D14) & empty state.
+   Row 4: Hairline rule.
+   Row 5: Status bar (progress/counts, model, buffer state, pages left).
+   Palette = Themes/Dark.xaml. */
+:root {
+  --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
+  --cardborder:#454545; --primary:#1ea54c; --text:#e0e0e0; --muted:#a0a0a0;
+  --dim:#6a6a6a; --danger:#ef4444; --selbg:#1c5e38; --selfg:#ffffff;
   --startbg:#1b5e20; --startline:#0f3d14; --resetbg:#0d47a1; --resetline:#08306b;
-  --digest:13px; }
+  --platebg:rgba(27, 94, 32, 0.70); --plateedge:rgba(15, 61, 20, 0.90);
+  --digest:13px;
+}
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%; overflow:hidden;}
 body{background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif;
@@ -27,62 +34,85 @@ body{background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif;
 #body{flex:1 1 auto; display:flex; flex-direction:column; min-height:0;}
 .row{flex:0 0 auto;}
 
-/* ---- the title bar (DialogChrome.BuildTitleBar) ---- */
+/* ---- Title Bar (DialogChrome) ---- */
 #titlebar{flex:0 0 auto; height:40px; display:flex; align-items:center;
   border-bottom:1px solid var(--line);}
 #mark{margin-left:16px; white-space:nowrap;}
 #mark b{color:var(--primary); font-size:16.5px; font-weight:700; letter-spacing:.2px;}
 #mark span{font-family:Consolas,monospace; font-size:14px; color:var(--muted);
   margin-left:4px; vertical-align:baseline;}
-#tbtns{margin-left:auto; display:flex; align-items:center; padding-right:5px;}
+#tbtns{margin-left:auto; display:flex; align-items:center; padding-right:6px;}
 .tbtn{width:24px; height:24px; margin-left:6px; background:var(--pane);
-  border:1px solid var(--line); border-radius:4px; color:var(--text);
-  font-family:"Segoe MDL2 Assets"; font-size:10px; line-height:1; cursor:pointer;
-  padding:0; display:flex; align-items:center; justify-content:center;}
+  border:1px solid var(--cardborder); border-radius:4px; color:var(--text);
+  font-family:"Segoe MDL2 Assets"; font-size:11px; line-height:1; cursor:pointer;
+  padding:0; display:flex; align-items:center; justify-content:center;
+  transition:background 0.1s;}
 .tbtn:hover{background:var(--rowhover);}
 .tbtn:active{background:var(--selbg); color:var(--selfg);}
 .tbtn.close{margin-left:8px; color:var(--danger);}
 .tbtn.close:hover{background:var(--danger); color:#fff;}
 .tbtn.close:active{background:var(--danger); color:#fff;}
 
-/* ---- the reading navigator ---- */
+/* ---- Row 0: The Reading Navigator ---- */
 #nav{display:flex; align-items:center; justify-content:center; gap:0; margin:12px 14px 0;}
-#nav .gap{width:10px;}
-.nbtn{width:28px; height:28px; border:1px solid var(--line); background:transparent;
-  color:var(--text); font-family:"Segoe MDL2 Assets"; font-size:11px; cursor:pointer; border-radius:4px;}
+.nav-gap{width:10px; flex-shrink:0;}
+.nbtn{width:28px; height:28px; border:1px solid var(--cardborder); background:transparent;
+  color:var(--text); font-family:"Segoe MDL2 Assets"; font-size:11px; cursor:pointer; border-radius:4px;
+  display:flex; align-items:center; justify-content:center;}
 .nbtn:hover{background:var(--rowhover);}
 .nbtn:active{background:var(--selbg); color:var(--selfg);}
 .nbtn:disabled{opacity:.35; cursor:default;}
-#startBox{width:82px; height:28px; margin:0 4px; background:var(--pane); color:var(--text);
-  border:1px solid var(--line); border-radius:4px; font-size:13px; font-weight:600;
+#startBox{width:82px; height:28px; margin:0 5px; background:var(--pane); color:var(--text);
+  border:1px solid var(--cardborder); border-radius:4px; font-size:13px; font-weight:600;
   text-align:center; outline:none; user-select:text;}
 #startBox:focus{border-color:var(--selfg);}
+
+/* iOS-style toggle switches (TestModeToggle in Avalanche) */
+.sw-wrap{display:flex; align-items:center; cursor:pointer; user-select:none;}
+.sw{width:40px; height:22px; border-radius:11px; background:var(--rowhover);
+  border:1px solid var(--cardborder); position:relative;
+  transition:background-color .15s ease, border-color .15s ease; flex-shrink:0;}
+.sw:hover{border-color:var(--selfg);}
+.sw.on{background:var(--selbg); border-color:var(--selbg);}
+.sw-thumb{width:16px; height:16px; border-radius:50%; background:#ffffff; position:absolute;
+  top:2px; left:3px; box-shadow:0 1px 3px rgba(0,0,0,.35); transition:transform .15s ease;}
+.sw.on .sw-thumb{transform:translateX(18px);}
+.sw-lbl{font-size:11.5px; font-weight:700; color:var(--text); line-height:22px;}
+.sw-lbl.left{margin-right:7px;}
+.sw-lbl.right{margin-left:7px;}
+
+/* ---- Row 1: Start and Reset Actions ---- */
 #actions{display:flex; gap:8px; margin:8px 14px 0;}
 #bStart{flex:1; height:28px; background:var(--startbg); border:1px solid var(--startline);
-  color:#fff; font-weight:600; font-size:12px; border-radius:4px; cursor:pointer;}
+  color:#fff; font-weight:600; font-size:12px; border-radius:4px; cursor:pointer;
+  transition:opacity .1s;}
 #bStart:hover{opacity:.88;}
 #bStart:active{opacity:.75;}
 #bReset{flex:1; height:28px; background:var(--resetbg); border:1px solid var(--resetline);
-  color:#fff; font-weight:600; font-size:12px; border-radius:4px; cursor:pointer;}
+  color:#fff; font-weight:600; font-size:12px; border-radius:4px; cursor:pointer;
+  transition:opacity .1s;}
 #bReset:hover{opacity:.88;}
 #bReset:active{opacity:.75;}
 #bStart:disabled,#bReset:disabled{opacity:.35; cursor:default;}
+
+/* ---- Row 2: Range Chips & Selects ---- */
 #chips{display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:5px;
   margin:7px 14px 2px;}
 .chip{height:28px; min-width:38px; padding:0 9px; font-size:11.5px; font-weight:600;
-  border:1px solid var(--line); background:transparent; color:var(--text);
+  border:1px solid var(--cardborder); background:transparent; color:var(--muted);
   border-radius:4px; cursor:pointer;}
 .chip:hover{background:var(--rowhover); color:var(--text);}
 .chip.on{background:var(--selbg); border-color:var(--selfg); color:var(--selfg);}
-.sep{width:1px; height:20px; background:var(--line); margin:0 3px;}
-select{height:28px; background:var(--pane); color:var(--text); border:1px solid var(--line);
-  border-radius:4px; font-size:11.5px; outline:none; cursor:pointer;}
+.sep{width:1px; height:20px; background:var(--line); margin:0 4px; opacity:0.7;}
+select{height:28px; background:var(--pane); color:var(--text); border:1px solid var(--cardborder);
+  border-radius:4px; font-size:11.5px; outline:none; cursor:pointer; padding:0 4px;}
+select:focus{border-color:var(--selfg);}
 #words{width:90px;} #lang{width:112px;} #genre{width:150px;} #prompt{width:170px;}
 
-/* ---- the digest (Row 3, justified like a typeset page) ---- */
+/* ---- Row 3: The Digest (Justified Typeset Page) ---- */
 #digestWrap{flex:1 1 auto; margin:6px 14px 2px; position:relative; min-height:0;}
-#digest{height:100%; overflow-y:auto; user-select:text; cursor:auto; line-height:1.5;
-  font-size:var(--digest);}
+#digest{height:100%; overflow-y:auto; user-select:text; cursor:auto; line-height:1.55;
+  font-size:var(--digest); padding-right:4px;}
 #digest p{text-align:justify; margin:0 0 8px;}
 #digest h1,#digest h2,#digest h3{color:var(--primary); font-weight:600; margin:10px 0 4px;}
 #digest h1{font-size:1.23em;} #digest h2{font-size:1.12em;} #digest h3{font-size:1.04em;}
@@ -95,8 +125,12 @@ select{height:28px; background:var(--pane); color:var(--text); border:1px solid 
   color:var(--muted); font-style:italic;}
 #digest hr{border:0; border-top:1px solid var(--line); margin:8px 0;}
 
-/* ---- the empty state (the sidechat's invite, mirrored: the robot, a title,
-   a nudge - while a run generates, the invite yields to three pulsing dots) ---- */
+/* Floating Word Hover Plate (DigestWordHighlightAdorner in Avalanche) */
+#wordPlate{position:absolute; pointer-events:none; background:var(--platebg);
+  border:1px solid var(--plateedge); border-radius:3px; display:none; z-index:10;
+  box-sizing:border-box;}
+
+/* Empty State */
 #emptyState{position:absolute; inset:0; display:none; flex-direction:column;
   align-items:center; justify-content:center; text-align:center; pointer-events:none;}
 #emptyState svg{opacity:.8;}
@@ -109,18 +143,19 @@ select{height:28px; background:var(--pane); color:var(--text); border:1px solid 
 #emptyDots i:nth-child(3){animation-delay:.4s;}
 @keyframes blink{0%,100%{opacity:.25}50%{opacity:.8}}
 
-/* ---- the error overlay ---- */
+/* Error Overlay */
 #overlay{position:absolute; inset:0; display:none; flex-direction:column; align-items:center;
   justify-content:center; text-align:center; margin:0 24px; color:var(--muted); font-size:12px;}
 #overlay.err{color:var(--danger);}
 
-/* ---- the hairline + status line (Rows 4-5) ---- */
-#rule{flex:0 0 auto; height:1px; background:var(--line); opacity:.85; margin:5px 14px 0;}
-#statusRow{flex:0 0 auto; display:flex; gap:12px; padding:4px 14px 12px; font-size:11px;
-  color:var(--muted);}
+/* ---- Rows 4-5: Hairline & Status Bar ---- */
+#rule{flex:0 0 auto; height:1px; background:var(--cardborder); opacity:.85; margin:5px 14px 0;}
+#statusRow{flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:4px 14px 12px;
+  font-size:11px; color:var(--muted);}
 #stStatus{flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
-#stModel{flex:0 0 auto; max-width:240px; white-space:nowrap; overflow:hidden;
-  text-overflow:ellipsis;}
+#stModel{flex:0 0 auto; max-width:220px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+#stBuffer{flex:0 0 auto; white-space:nowrap; font-weight:600; color:var(--primary);}
+#stPagesLeft{flex:0 0 auto; white-space:nowrap; color:var(--muted);}
 </style>
 </head>
 <body>
@@ -128,42 +163,68 @@ select{height:28px; background:var(--pane); color:var(--text); border:1px solid 
   <div id="titlebar">
     <div id="mark"><b>docsy</b><span> - Page Summary</span></div>
     <div id="tbtns">
+      <button class="tbtn" id="bTest" title="Test this range in AI Test">&#xE9D9;</button>
       <button class="tbtn" id="bFontDn" title="Smaller digest text">&#xE949;</button>
       <button class="tbtn" id="bFontUp" title="Larger digest text">&#xE94A;</button>
-      <button class="tbtn close" id="bClose" title="Close">&#xE8BB;</button>
+      <button class="tbtn close" id="bClose" title="Close (Esc)">&#xE8BB;</button>
     </div>
   </div>
   <div id="body">
+    <!-- Row 0: Reading Navigator in one row -->
     <div class="row" id="nav">
+      <div class="sw-wrap" id="swPingWrap" title="Play a notification sound when the summary is ready">
+        <div class="sw on" id="swPing"><div class="sw-thumb"></div></div>
+        <span class="sw-lbl right">Ping</span>
+      </div>
+      <div class="nav-gap"></div>
+      <div class="sw-wrap" id="swRecapWrap" title="Toggle automatic recap companion when turning pages">
+        <div class="sw" id="swRecap"><div class="sw-thumb"></div></div>
+        <span class="sw-lbl right">Recap</span>
+      </div>
+      <div class="nav-gap"></div>
       <button class="nbtn" id="bPrev" title="Previous range (A / Left)">&#xE76B;</button>
       <input id="startBox" spellcheck="false" title="Start page - type a page, Enter commits">
       <button class="nbtn" id="bNext" title="Next range (D / Right)">&#xE76C;</button>
+      <div class="nav-gap"></div>
+      <div class="sw-wrap" id="swDiscordWrap" title="Broadcast reading activity to Discord Rich Presence">
+        <span class="sw-lbl left">Discord</span>
+        <div class="sw" id="swDiscord"><div class="sw-thumb"></div></div>
+      </div>
+      <div class="nav-gap"></div>
+      <div class="sw-wrap" id="swBufferWrap" title="Generate the next stretch's digest in the background while you read">
+        <span class="sw-lbl left">Buffer</span>
+        <div class="sw on" id="swBuffer"><div class="sw-thumb"></div></div>
+      </div>
     </div>
+    <!-- Row 1: Action Buttons -->
     <div class="row" id="actions">
-      <button id="bStart">Start</button>
-      <button id="bReset">Reset</button>
+      <button id="bStart" title="Start summarizing the selected page range">Start</button>
+      <button id="bReset" title="Reset summary and start over">Reset</button>
     </div>
+    <!-- Row 2: Range Chips & Selects -->
     <div class="row" id="chips">
       <button class="chip" data-p="1">1</button>
       <button class="chip" data-p="5">5</button>
-      <button class="chip" data-p="20">20</button>
+      <button class="chip on" data-p="20">20</button>
       <button class="chip" data-p="40">40</button>
       <button class="chip" data-p="60">60</button>
       <button class="chip" data-p="80">80</button>
       <button class="chip" data-p="100">100</button>
       <button class="chip" data-p="all">All</button>
       <span class="sep"></span>
-      <select id="words"></select>
-      <select id="lang"></select>
-      <select id="genre"></select>
+      <select id="words" title="Target word limit for summary"></select>
+      <select id="lang" title="Output summary language"></select>
+      <select id="genre" title="Document genre prompt template"></select>
     </div>
     <div class="row" id="chipsWeb" style="display:none">
-      <select id="prompt"></select>
-      <select id="wordsW"></select>
-      <select id="langW"></select>
+      <select id="prompt" title="Web summary prompt"></select>
+      <select id="wordsW" title="Target word limit"></select>
+      <select id="langW" title="Summary language"></select>
     </div>
+    <!-- Row 3: Digest Area -->
     <div id="digestWrap">
       <div id="digest"></div>
+      <div id="wordPlate"></div>
       <div id="emptyState">
         <svg width="42" height="42" viewBox="0 0 24 24" fill="#a0a0a0" fill-rule="evenodd">
           <rect x="4" y="7" width="16" height="12" rx="3.5"/>
@@ -176,38 +237,121 @@ select{height:28px; background:var(--pane); color:var(--text); border:1px solid 
           <rect x="9.2" y="15.7" width="5.6" height="1.3" rx="0.65" fill="#1c1c1c"/>
         </svg>
         <div id="emptyTitle">Nothing summarized yet</div>
-        <div id="emptySub">Pick a range and press Start - the AI reads those pages and writes the digest here.</div>
+        <div id="emptySub">Pick a range and press Start — the AI reads those pages and writes the digest here.</div>
         <div id="emptyDots"><i></i><i></i><i></i></div>
       </div>
       <div id="overlay"><div id="ovText"></div></div>
     </div>
+    <!-- Row 4: Rule -->
     <div id="rule"></div>
-    <div id="statusRow"><span id="stStatus"></span><span id="stModel"></span></div>
+    <!-- Row 5: Status Bar -->
+    <div id="statusRow">
+      <span id="stStatus"></span>
+      <span id="stModel"></span>
+      <span id="stBuffer"></span>
+      <span id="stPagesLeft"></span>
+    </div>
   </div>
 </div>
 <script>
 "use strict";
 function post(o){ try{ window.chrome.webview.postMessage(o); }catch(e){} }
 var $=function(id){ return document.getElementById(id); };
-var S={ mode:"doc", pageCount:1, start:1, rangePages:20, generating:false, gen:0,
-        full:"", shown:0, incoming:[], typeTimer:null, lastPaint:0, busy:false };
 
-/* ---- the chrome: drag handle, close chip, Escape, the digest font dial ---- */
+var S = {
+  mode: "doc",
+  pageCount: 1,
+  start: 1,
+  rangePages: 20,
+  generating: false,
+  gen: 0,
+  full: "",
+  shown: 0,
+  incoming: [],
+  typeTimer: null,
+  lastPaint: 0,
+  busy: false,
+  pingEnabled: true,
+  bufferEnabled: true,
+  recapEnabled: false,
+  discordEnabled: false,
+  genStartTime: 0
+};
+
+var prefetch = {
+  start: 0,
+  range: 0,
+  words: 0,
+  lang: "",
+  genre: "",
+  text: "",
+  ready: false
+};
+
+/* ---- Chrome: Drag handle, close chip, font up/down ---- */
 $("titlebar").addEventListener("mousedown", function(e){
   if(e.button!==0 || e.target.closest(".tbtn")) return;
   post({type:"drag"});
 });
 $("bClose").onclick=function(){ post({type:"close"}); };
+
 var F=13;
 try{ F=Math.min(24,Math.max(10,parseInt(localStorage.getItem("summary.font")||"13",10)||13)); }catch(e){}
 function applyFont(){
   document.documentElement.style.setProperty("--digest",F+"px");
   try{ localStorage.setItem("summary.font",String(F)); }catch(e){}
+  post({type:"set-setting", key:"summary.font", val:String(F)});
 }
 $("bFontDn").onclick=function(){ F=Math.max(10,F-1); applyFont(); };
 $("bFontUp").onclick=function(){ F=Math.min(24,F+1); applyFont(); };
+$("bTest").onclick=function(){ post({type:"test-range", first:S.start, last:fmtRange()}); };
 applyFont();
 
+/* ---- Web Audio API: Avalanche Ping chime (two-tone D5 -> A5) ---- */
+function playPing(){
+  if(!S.pingEnabled) return;
+  try{
+    var AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if(!AudioCtx) return;
+    var ctx = new AudioCtx();
+    var now = ctx.currentTime;
+    var osc = ctx.createOscillator();
+    var gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(587.33, now);        // D5
+    osc.frequency.setValueAtTime(880.00, now + 0.12); // A5
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.55);
+  }catch(e){}
+}
+
+/* ---- iOS-style Toggle Controls ---- */
+function wireToggle(wrapId, toggleId, getVal, setVal, settingKey){
+  function flip(){
+    var v = !getVal();
+    setVal(v);
+    $(toggleId).classList.toggle("on", v);
+    post({type:"set-setting", key:settingKey, val:v ? "1" : "0"});
+    if(settingKey==="summary.buffer.enabled"){
+      if(v) checkPrefetchBuffer();
+      else $("stBuffer").textContent = "";
+    }
+  }
+  $(wrapId).onclick = function(e){
+    e.preventDefault();
+    flip();
+  };
+}
+wireToggle("swPingWrap", "swPing", function(){ return S.pingEnabled; }, function(v){ S.pingEnabled=v; }, "summary.ping.enabled");
+wireToggle("swRecapWrap", "swRecap", function(){ return S.recapEnabled; }, function(v){ S.recapEnabled=v; }, "summary.recap.enabled");
+wireToggle("swDiscordWrap", "swDiscord", function(){ return S.discordEnabled; }, function(v){ S.discordEnabled=v; }, "summary.discord.enabled");
+wireToggle("swBufferWrap", "swBuffer", function(){ return S.bufferEnabled; }, function(v){ S.bufferEnabled=v; }, "summary.buffer.enabled");
+
+/* ---- Markdown Parser ---- */
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function inline(t){
   var r=/(`[^`\n]+`)|(\*\*([^*\n]+?)\*\*)|(\*([^*\n]+?)\*)|(\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\))/g;
@@ -236,12 +380,18 @@ function renderMd(text, el){
     var bm=ln.match(/^\s*[-*+]\s+(.*)$/);
     if(bm){ fp(); if(listOpen!=="ul"){ cl(); html+="<ul>"; listOpen="ul"; }
       html+="<li>"+inline(bm[1])+"</li>"; i++; continue; }
+    var nm=ln.match(/^\s*\d+\.\s+(.*)$/);
+    if(nm){ fp(); if(listOpen!=="ol"){ cl(); html+="<ol>"; listOpen="ol"; }
+      html+="<li>"+inline(nm[1])+"</li>"; i++; continue; }
+    var qm=ln.match(/^\s*>\s*(.*)$/);
+    if(qm){ fp(); cl(); html+="<blockquote>"+inline(qm[1])+"</blockquote>"; i++; continue; }
     if(/^\s*$/.test(ln)){ fp(); cl(); i++; continue; }
     para.push(inline(ln.trim())); i++;
   }
   fp(); cl(); el.innerHTML=html;
 }
-/* ---- typewriter (the 20ms tick, step clamp((backlog+5)/6, 1, 60)) ---- */
+
+/* ---- Typewriter (20ms tick) ---- */
 function tick(){
   if(S.incoming.length){ S.full+=S.incoming.shift(); }
   var backlog=S.incoming.join("").length;
@@ -256,11 +406,73 @@ function tick(){
 function typeStart(){ if(!S.typeTimer) S.typeTimer=setInterval(tick,20); }
 function typeStop(){ if(S.typeTimer){ clearInterval(S.typeTimer); S.typeTimer=null; } }
 function paint(){ renderMd(S.full.slice(0,S.shown), $("digest")); }
-function paintAll(){ S.full+S.incoming.join("");
+function paintAll(){
   while(S.incoming.length) S.full+=S.incoming.shift();
-  S.shown=S.full.length; typeStop(); paint(); }
+  S.shown=S.full.length; typeStop(); paint();
+}
 
-/* ---- the card's three faces: the digest, the invite, the error ---- */
+/* ---- Digest Word Hover Plate (DigestWordHighlightAdorner) ---- */
+var plate=$("wordPlate");
+function hideWordPlate(){ plate.style.display="none"; }
+function updateWordHighlight(e){
+  if(S.generating || window.getSelection().toString().length>0){
+    hideWordPlate(); return;
+  }
+  var x=e.clientX, y=e.clientY;
+  var range=null;
+  if(document.caretRangeFromPoint){
+    range=document.caretRangeFromPoint(x,y);
+  }else if(document.caretPositionFromPoint){
+    var pos=document.caretPositionFromPoint(x,y);
+    if(pos){
+      range=document.createRange();
+      range.setStart(pos.offsetNode, pos.offset);
+      range.collapse(true);
+    }
+  }
+  if(!range || !range.startContainer || range.startContainer.nodeType!==Node.TEXT_NODE){
+    hideWordPlate(); return;
+  }
+  var textNode=range.startContainer;
+  var offset=range.startOffset;
+  var str=textNode.nodeValue||"";
+  if(offset>=str.length) offset=str.length-1;
+  if(offset<0){ hideWordPlate(); return; }
+
+  function isWordChar(c){
+    return c && /\w|[\u00C0-\u024F\u0400-\u04FF\u0600-\u06FF]/.test(c);
+  }
+  if(!isWordChar(str[offset])){
+    if(offset>0 && isWordChar(str[offset-1])) offset--;
+    else { hideWordPlate(); return; }
+  }
+
+  var wStart=offset, wEnd=offset;
+  while(wStart>0 && isWordChar(str[wStart-1])) wStart--;
+  while(wEnd<str.length && isWordChar(str[wEnd])) wEnd++;
+  if(wStart>=wEnd){ hideWordPlate(); return; }
+
+  var wordRange=document.createRange();
+  wordRange.setStart(textNode, wStart);
+  wordRange.setEnd(textNode, wEnd);
+  var r=wordRange.getBoundingClientRect();
+  var wrapR=$("digestWrap").getBoundingClientRect();
+
+  if(x<r.left-2 || x>r.right+2 || y<r.top-2 || y>r.bottom+2){
+    hideWordPlate(); return;
+  }
+
+  plate.style.left=(r.left - wrapR.left - 2)+"px";
+  plate.style.top=(r.top - wrapR.top - 1)+"px";
+  plate.style.width=(r.width + 4)+"px";
+  plate.style.height=(r.height + 2)+"px";
+  plate.style.display="block";
+}
+$("digest").addEventListener("mousemove", updateWordHighlight);
+$("digest").addEventListener("mouseleave", hideWordPlate);
+$("digest").addEventListener("scroll", hideWordPlate);
+
+/* ---- Card States & Nav ---- */
 function emptyState(idle, busy){
   var es=$("emptyState");
   es.style.display=idle?"flex":"none";
@@ -273,138 +485,377 @@ function overlay(text, err){
   $("overlay").className=err?"err":"";
   $("overlay").style.display=text?"flex":"none";
 }
-function setBusy(on){ S.busy=on;
+function setBusy(on){
+  S.busy=on;
   $("bStart").disabled=on; $("startBox").disabled=on;
   document.querySelectorAll("#chips .chip").forEach(function(c){ c.disabled=on; });
   $("words").disabled=on; $("lang").disabled=on; $("genre").disabled=on;
   $("prompt").disabled=on; $("wordsW").disabled=on; $("langW").disabled=on;
 }
-function fmtRange(){ var e=Math.min(S.start+S.rangePages-1, S.pageCount);
-  return e; }
+function fmtRange(){
+  return Math.min(S.start + S.rangePages - 1, S.pageCount);
+}
+function updatePagesLeft(){
+  if(S.mode==="web"){ $("stPagesLeft").textContent=""; return; }
+  var end=fmtRange();
+  var left=Math.max(0, S.pageCount - end);
+  $("stPagesLeft").textContent=left>0?(left+" pages left"):"End of document";
+}
+var startBoxFocused=false;
 function refreshNav(){
   var end=fmtRange();
-  $("startBox").value=S.start+"-"+end;
+  if(!startBoxFocused){
+    $("startBox").value=S.start+"-"+end;
+  }
   $("bPrev").disabled=S.start<=1;
   $("bNext").disabled=end>=S.pageCount;
   document.querySelectorAll("#chips .chip").forEach(function(c){
-    c.className="chip"+((c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10))===S.rangePages?" on":""); });
+    var p=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
+    c.className="chip"+(p===S.rangePages?" on":"");
+  });
+  updatePagesLeft();
 }
 function status(t){ $("stStatus").textContent=t||""; }
 
-/* ---- C++ -> panel ---- */
+function formatElapsed(ms){
+  var s=(ms/1000).toFixed(1);
+  return s+"s";
+}
+function updateDoneStatus(explicitStatus){
+  if(explicitStatus){ status(explicitStatus); return; }
+  var words=0;
+  var text=S.full;
+  for(var i=0; i<text.length; i++){
+    if(!/\s/.test(text[i])){
+      words++;
+      while(i<text.length && !/\s/.test(text[i])) i++;
+    }
+  }
+  var duration=S.genStartTime>0 ? (" · " + formatElapsed(Date.now() - S.genStartTime)) : "";
+  status(words.toLocaleString() + " words · " + text.length.toLocaleString() + " chars" + duration);
+}
+
+/* ---- Prefetch Buffer Controller ---- */
+function checkPrefetchBuffer(){
+  if(!S.bufferEnabled || S.mode==="web"){
+    $("stBuffer").textContent="";
+    return;
+  }
+  var end=fmtRange();
+  if(end>=S.pageCount){
+    $("stBuffer").textContent="";
+    return;
+  }
+  var nextStart=end+1;
+  var c=curSel();
+  prefetch.start=nextStart;
+  prefetch.range=S.rangePages;
+  prefetch.words=c.words;
+  prefetch.lang=c.lang;
+  prefetch.genre=c.genre;
+  prefetch.ready=false;
+  $("stBuffer").textContent="Buffer: generating\u2026";
+  post({
+    type:"prefetch",
+    start:nextStart,
+    range:S.rangePages,
+    words:c.words,
+    lang:c.lang,
+    genre:c.genre
+  });
+}
+
+/* ---- StartBox Input Handling ---- */
+$("startBox").addEventListener("focus", function(){
+  startBoxFocused=true;
+  this.value=String(S.start);
+  this.select();
+});
+$("startBox").addEventListener("blur", function(){
+  if(!startBoxFocused) return;
+  startBoxFocused=false;
+  commitStartBox(this.value);
+});
+$("startBox").addEventListener("keydown", function(e){
+  if(e.key==="Enter"){
+    e.preventDefault();
+    commitStartBox(this.value);
+    this.blur();
+  }else if(e.key==="Escape"){
+    e.preventDefault();
+    startBoxFocused=false;
+    refreshNav();
+    this.blur();
+  }
+});
+function commitStartBox(str){
+  var v=parseInt(str.replace(/[^0-9]/g,""),10);
+  if(!isNaN(v) && v>=1 && v<=S.pageCount){
+    if(v!==S.start){
+      S.start=v;
+      refreshNav();
+      post({type:"page", page:S.start});
+      startGen(false);
+      return;
+    }
+  }
+  refreshNav();
+}
+
+/* ---- C++ -> Web Panel Event Dispatcher ---- */
 window.addEventListener("message", function(e){
   var m=e.data; if(!m||!m.cmd) return;
   switch(m.cmd){
   case "init":
-    S.mode=m.mode||"doc"; S.pageCount=m.pageCount||1;
-    S.start=m.start||1; S.rangePages=m.rangePages||20;
+    S.mode=m.mode||"doc";
+    S.pageCount=m.pageCount||1;
+    S.start=m.start||1;
+    S.rangePages=m.rangePages||20;
+    if(m.ping!==undefined) S.pingEnabled=!!m.ping;
+    if(m.buffer!==undefined) S.bufferEnabled=!!m.buffer;
+    if(m.recap!==undefined) S.recapEnabled=!!m.recap;
+    if(m.discord!==undefined) S.discordEnabled=!!m.discord;
+    $("swPing").classList.toggle("on", S.pingEnabled);
+    $("swBuffer").classList.toggle("on", S.bufferEnabled);
+    $("swRecap").classList.toggle("on", S.recapEnabled);
+    $("swDiscord").classList.toggle("on", S.discordEnabled);
+
+    if(m.font){
+      F=Math.min(24, Math.max(10, parseInt(m.font,10)||13));
+      document.documentElement.style.setProperty("--digest", F+"px");
+    }
+
     var isWeb=S.mode==="web";
     $("nav").style.display=isWeb?"none":"flex";
     $("chips").style.display=isWeb?"none":"flex";
     $("chipsWeb").style.display=isWeb?"flex":"none";
     fillCombos(m);
-    refreshNav(); $("stModel").textContent=m.model?("Model: "+m.model):"";
-    if(m.digest){ S.full=m.digest; S.shown=S.full.length; paint(); status(m.status||""); }
-    else { S.full=""; S.shown=0; $("digest").innerHTML=""; emptyState(true,false); }
+    refreshNav();
+    $("stModel").textContent=m.model?("Model: "+m.model):"";
+
+    if(m.digest){
+      S.full=m.digest; S.shown=S.full.length; paint();
+      updateDoneStatus(m.status);
+      checkPrefetchBuffer();
+    }else{
+      S.full=""; S.shown=0; $("digest").innerHTML=""; emptyState(true,false);
+      status("");
+    }
     break;
-  case "progress": status(m.text||""); break;
+
+  case "progress":
+    status(m.text||"");
+    break;
+
   case "delta":
     if(S.gen!==m.gen) return;
-    S.incoming.push(m.text); typeStart(); emptyState(false,false);
+    S.incoming.push(m.text);
+    typeStart();
+    emptyState(false,false);
     break;
+
   case "done":
     if(S.gen!==m.gen) return;
-    S.incoming=[]; S.full=m.text||""; S.shown=S.full.length; typeStop(); paint();
-    setBusy(false); emptyState(false,false); overlay("",false);
-    status(m.status||"");
+    S.incoming=[];
+    S.full=m.text||"";
+    S.shown=S.full.length;
+    typeStop();
+    paint();
+    setBusy(false);
+    emptyState(false,false);
+    overlay("",false);
+    updateDoneStatus(m.status);
     $("stModel").textContent=m.model?("Model: "+m.model):"";
+    playPing();
+    saveCurrentDigest();
+    checkPrefetchBuffer();
     break;
-  case "notext": if(S.gen!==m.gen) return;
+
+  case "prefetch-ready":
+    if(prefetch.start===m.start && m.text){
+      prefetch.text=m.text;
+      prefetch.ready=true;
+      if(S.bufferEnabled && !S.generating){
+        $("stBuffer").textContent="Buffer: ready";
+      }
+    }
+    break;
+
+  case "notext":
+    if(S.gen!==m.gen) return;
     setBusy(false); typeStop(); emptyState(false,false);
     overlay("The selected pages have no readable text to summarize.",false);
-    status(""); break;
-  case "error": if(S.gen!==m.gen) return;
+    status("");
+    break;
+
+  case "error":
+    if(S.gen!==m.gen) return;
     setBusy(false); typeStop(); emptyState(false,false);
-    overlay(m.text||"Summary failed.",true); status(""); break;
-  case "stopped": if(S.gen!==m.gen) return;
-    paintAll(); setBusy(false); emptyState(false,false); overlay("",false); status("Stopped"); break;
-  case "nav": S.start=m.start; refreshNav(); break;
+    overlay(m.text||"Summary failed.",true);
+    status("");
+    break;
+
+  case "stopped":
+    if(S.gen!==m.gen) return;
+    paintAll(); setBusy(false); emptyState(false,false);
+    overlay("",false); status("Stopped");
+    break;
+
+  case "nav":
+    S.start=m.start;
+    refreshNav();
+    break;
   }
 });
 
+/* ---- Dropdowns Setup ---- */
 function fillCombos(m){
-  var words=[500,750,1000,1500,2000,3000,4500], langs=["English","French","Spanish","Italian","Arabic"];
-  var genres=[["nonfiction_classic","Nonfiction"],["fiction","Fiction"],
-    ["philosophical_fiction","Philosophical"],["research_papers","Research"],
-    ["self_help","Self-help"],["law","Law"]];
-  function fill(el, arr, sel, show){
+  var words=[500,750,1000,1500,2000,3000,4500],
+      langs=["English","French","Spanish","Italian","Arabic","German","Chinese","Japanese","Russian","Portuguese"],
+      genres=[["nonfiction_classic","Nonfiction"],["fiction","Fiction"],
+              ["philosophical_fiction","Philosophical"],["research_papers","Research"],
+              ["self_help","Self-help"],["law","Law"],["history","History"],["science","Science"],["biography","Biography"]];
+
+  function fill(el, arr, sel){
     el.innerHTML="";
-    for(var o of arr){ var op=document.createElement("option");
-      op.value=Array.isArray(o)?o[0]:o; op.textContent=Array.isArray(o)?o[1]:o;
-      if(op.value===String(sel)) op.selected=true; el.appendChild(op); } }
-  fill($("words"), words, m.words||1000, true); fill($("wordsW"), words, m.words||1000);
+    for(var o of arr){
+      var op=document.createElement("option");
+      op.value=Array.isArray(o)?o[0]:o;
+      op.textContent=Array.isArray(o)?o[1]:(typeof o==="number"?o.toLocaleString():o);
+      if(op.value===String(sel)) op.selected=true;
+      el.appendChild(op);
+    }
+  }
+  fill($("words"), words, m.words||1000); fill($("wordsW"), words, m.words||1000);
   fill($("lang"), langs, m.lang||"English"); fill($("langW"), langs, m.lang||"English");
   fill($("genre"), genres, m.genre||"nonfiction_classic");
+
+  $("words").onchange=function(){ post({type:"set-setting", key:"summary.words", val:this.value}); checkPrefetchBuffer(); };
+  $("lang").onchange=function(){ post({type:"set-setting", key:"summary.lang", val:this.value}); checkPrefetchBuffer(); };
+  $("genre").onchange=function(){ post({type:"set-setting", key:"summary.default_genre", val:this.value}); checkPrefetchBuffer(); };
+
   $("prompt").innerHTML="";
   var ps=m.prompts||[];
-  for(var p of ps){ var op=document.createElement("option"); op.value=p.id;
-    op.textContent=p.title; if(p.id===m.promptId) op.selected=true; $("prompt").appendChild(op); }
-  if(!ps.length){ var op=document.createElement("option"); op.value="nonfiction_classic";
-    op.textContent="Nonfiction"; $("prompt").appendChild(op); }
-}
-function curSel(){
-  if(S.mode==="web") return { words:parseInt($("wordsW").value,10)||1000,
-    lang:$("langW").value, genre:$("prompt").value||"nonfiction_classic" };
-  return { words:parseInt($("words").value,10)||1000, lang:$("lang").value,
-    genre:$("genre").value||"nonfiction_classic" };
+  for(var p of ps){
+    var op=document.createElement("option");
+    op.value=p.id; op.textContent=p.title;
+    if(p.id===m.promptId) op.selected=true;
+    $("prompt").appendChild(op);
+  }
+  if(!ps.length){
+    var op=document.createElement("option"); op.value="nonfiction_classic";
+    op.textContent="Nonfiction"; $("prompt").appendChild(op);
+  }
 }
 
-/* ---- panel -> C++ ---- */
+function curSel(){
+  if(S.mode==="web"){
+    return {
+      words: parseInt($("wordsW").value,10)||1000,
+      lang: $("langW").value,
+      genre: $("prompt").value||"nonfiction_classic"
+    };
+  }
+  return {
+    words: parseInt($("words").value,10)||1000,
+    lang: $("lang").value,
+    genre: $("genre").value||"nonfiction_classic"
+  };
+}
+
+/* ---- Panel -> C++ ---- */
 function startGen(bypass){
   var c=curSel();
   S.gen++; S.generating=true; S.full=""; S.shown=0; S.incoming=[];
+  S.genStartTime=Date.now();
   $("digest").innerHTML=""; overlay("",false); emptyState(true,true);
   $("stModel").textContent="Model: ...";
+  $("stBuffer").textContent="";
   setBusy(true);
-  post({type:"start", gen:S.gen, start:S.start, range:S.rangePages,
-        words:c.words, lang:c.lang, genre:c.genre, bypass:!!bypass});
+  post({
+    type:"start", gen:S.gen, start:S.start, range:S.rangePages,
+    words:c.words, lang:c.lang, genre:c.genre, bypass:!!bypass
+  });
 }
+
+function saveCurrentDigest(){
+  if(S.mode!=="doc" || !S.full) return;
+  post({
+    type:"save-digest",
+    text:S.full,
+    first:S.start,
+    last:fmtRange(),
+    model:$("stModel").textContent.replace(/^Model:\s*/,"")
+  });
+}
+
 $("bStart").onclick=function(){ startGen(false); };
 $("bReset").onclick=function(){
   S.gen++; S.generating=false; S.full=""; S.shown=0; S.incoming=[]; typeStop();
   $("digest").innerHTML=""; overlay("",false); emptyState(true,false);
-  status(""); $("stModel").textContent="";
+  status(""); $("stModel").textContent=""; $("stBuffer").textContent="";
   setBusy(false); post({type:"reset"});
 };
-$("bPrev").onclick=function(){ if(S.start<=1) return;
-  S.start=Math.max(1, S.start-S.rangePages); refreshNav();
-  post({type:"page", page:S.start}); startGen(false); };
-$("bNext").onclick=function(){ var end=fmtRange(); if(end>=S.pageCount) return;
-  S.start=end+1; refreshNav();
-  post({type:"page", page:S.start}); startGen(false); };
+
+$("bPrev").onclick=function(){
+  if(S.start<=1) return;
+  S.start=Math.max(1, S.start - S.rangePages);
+  refreshNav();
+  post({type:"page", page:S.start});
+  startGen(false);
+};
+
+$("bNext").onclick=function(){
+  var end=fmtRange();
+  if(end>=S.pageCount) return;
+  var nextStart=end+1;
+  S.start=nextStart;
+  refreshNav();
+  post({type:"page", page:S.start});
+  // Check if buffer is ready for this exact stretch!
+  if(prefetch.ready && prefetch.start===nextStart && prefetch.text){
+    S.gen++;
+    S.generating=false;
+    S.incoming=[];
+    S.full=prefetch.text;
+    S.shown=S.full.length;
+    typeStop();
+    paint();
+    setBusy(false);
+    emptyState(false,false);
+    overlay("",false);
+    updateDoneStatus();
+    saveCurrentDigest();
+    checkPrefetchBuffer();
+  }else{
+    startGen(false);
+  }
+};
+
 document.querySelectorAll("#chips .chip").forEach(function(c){
-  c.onclick=function(){ S.rangePages=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
-    refreshNav(); post({type:"range-changed", pages:S.rangePages}); }; });
-$("startBox").addEventListener("keydown", function(e){
-  if(e.key==="Enter"){ var v=parseInt(this.value.replace(/[^0-9]/g,""),10);
-    if(v>=1&&v<=S.pageCount){ S.start=v; refreshNav();
-      post({type:"page", page:S.start}); startGen(false); }
-    else refreshNav();
-    this.blur(); }
-  if(e.key==="Escape") refreshNav();
+  c.onclick=function(){
+    S.rangePages=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
+    refreshNav();
+    post({type:"range-changed", pages:S.rangePages});
+    post({type:"set-setting", key:"summary.range", val:String(S.rangePages)});
+    checkPrefetchBuffer();
+  };
 });
+
 document.addEventListener("keydown", function(e){
-  if(e.key==="Escape"){ post({type:"close"}); return; }   // DialogChrome's Escape-close
+  if(e.key==="Escape"){ post({type:"close"}); return; }
   if(e.ctrlKey||e.altKey||e.shiftKey||e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
   if(e.key==="w"||e.key==="ArrowUp"){ scrollBySmooth(-1); }
   else if(e.key==="s"||e.key==="ArrowDown"){ scrollBySmooth(1); }
   else if(e.key==="a"||e.key==="ArrowLeft"){ $("bPrev").click(); }
   else if(e.key==="d"||e.key==="ArrowRight"){ $("bNext").click(); }
 });
+
 function scrollBySmooth(dir){
   var d=$("digest"), step=Math.max(d.clientHeight*0.25,60)*dir;
   d.scrollBy({top:step, behavior:"smooth"});
 }
+
 post({type:"ready"});
 </script>
 </body>

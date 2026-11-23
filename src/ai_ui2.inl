@@ -768,16 +768,55 @@ static void SumPost(const std::string& j) {
 }
 static void SumSendInit() {
     AiLoadSettings();
+    std::string sRange = AiGetSetting("summary.range", "20");
+    int range = max(1, atoi(sRange.c_str()));
+    g_sumRange = range;
+    int words = max(100, atoi(AiGetSetting("summary.words", "1000").c_str()));
+    std::string lang = AiGetSetting("summary.lang", "English");
+    std::string genre = AiGetSetting("summary.default_genre", "nonfiction_classic");
+    int font = max(10, min(24, atoi(AiGetSetting("summary.font", "13").c_str())));
+    bool ping = AiGetSetting("summary.ping.enabled", "1") != "0";
+    bool buffer = AiGetSetting("summary.buffer.enabled", "1") != "0";
+    bool recap = AiGetSetting("summary.recap.enabled", "0") == "1";
+    bool discord = AiGetSetting("summary.discord.enabled", "0") == "1";
+
     std::string j = "{\"cmd\":\"init\",\"mode\":\"" + std::string(g_sumMode ? "web" : "doc") + "\"";
     if (g_sumMode == 0) {
         DocState& D = DVF();
+        std::string docId = AiDocSessionKey(D.path);
+        std::string sStart = AiGetSetting("summary.start." + docId);
+        if (!sStart.empty()) {
+            int st = atoi(sStart.c_str());
+            if (st >= 1 && st <= D.n) g_sumStart = st;
+        }
         j += ",\"pageCount\":" + std::to_string(D.n);
         j += ",\"start\":" + std::to_string(g_sumStart);
         j += ",\"rangePages\":" + std::to_string(g_sumRange);
-        j += ",\"words\":1000,\"lang\":\"English\",\"genre\":\"nonfiction_classic\"";
+        j += ",\"words\":" + std::to_string(words);
+        j += ",\"lang\":" + WxJsonStr(lang);
+        j += ",\"genre\":" + WxJsonStr(genre);
+        j += ",\"font\":" + std::to_string(font);
+        j += ",\"ping\":" + std::string(ping ? "true" : "false");
+        j += ",\"buffer\":" + std::string(buffer ? "true" : "false");
+        j += ",\"recap\":" + std::string(recap ? "true" : "false");
+        j += ",\"discord\":" + std::string(discord ? "true" : "false");
+        std::string savedDigest = AiGetSetting("summary.digest." + docId);
+        if (!savedDigest.empty()) {
+            j += ",\"digest\":" + WxJsonStr(savedDigest);
+            std::string savedFirst = AiGetSetting("summary.digest." + docId + ".first");
+            std::string savedLast = AiGetSetting("summary.digest." + docId + ".last");
+            std::string savedModel = AiGetSetting("summary.digest." + docId + ".model");
+            std::string savedScroll = AiGetSetting("summary.digest." + docId + ".scroll");
+            if (!savedFirst.empty()) j += ",\"digestFirst\":" + savedFirst;
+            if (!savedLast.empty()) j += ",\"digestLast\":" + savedLast;
+            if (!savedModel.empty()) j += ",\"digestModel\":" + WxJsonStr(savedModel);
+            if (!savedScroll.empty()) j += ",\"digestScroll\":" + savedScroll;
+        }
     } else {
-        j += ",\"words\":1000,\"lang\":\"English\"";
+        j += ",\"words\":" + std::to_string(words);
+        j += ",\"lang\":" + WxJsonStr(lang);
         j += ",\"prompts\":[{\"id\":\"web_nonfiction_classic\",\"title\":\"Nonfiction\"}]";
+        j += ",\"font\":" + std::to_string(font);
     }
     j += ",\"model\":" + WxJsonStr(g_aiCfg.model);
     j += "}";
@@ -842,12 +881,28 @@ static void SumOpen(int mode) {
         wc.hbrBackground = CreateSolidBrush(RGB(0x1c, 0x1c, 0x1c));
         RegisterClassExW(&wc);
     }
-    int w = (int)(560 * g.dpi), h = (int)(630 * g.dpi);
+    double dpi = g.dpi > 0 ? g.dpi : 1.0;
+    int defW = (int)(560 * dpi), defH = (int)(630 * dpi);
+    std::string sW = AiGetSetting("summary.win.w");
+    std::string sH = AiGetSetting("summary.win.h");
+    std::string sL = AiGetSetting("summary.win.left");
+    std::string sT = AiGetSetting("summary.win.top");
+    int w = sW.empty() ? defW : max((int)(460 * dpi), (int)(atof(sW.c_str()) * dpi));
+    int h = sH.empty() ? defH : max((int)(390 * dpi), (int)(atof(sH.c_str()) * dpi));
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (!sL.empty() && !sT.empty()) {
+        int candX = (int)(atof(sL.c_str()) * dpi);
+        int candY = (int)(atof(sT.c_str()) * dpi);
+        RECT rTest{ candX, candY, candX + w, candY + h };
+        if (MonitorFromRect(&rTest, MONITOR_DEFAULTTONULL)) {
+            x = candX; y = candY;
+        }
+    }
     RECT rc{ 0, 0, w, h };
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     g_sumWnd = CreateWindowExW(0, L"docsy_sum", L"Page Summary",
                                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                               CW_USEDEFAULT, CW_USEDEFAULT,
+                               x, y,
                                rc.right - rc.left, rc.bottom - rc.top,
                                g.main, nullptr, g.hinst, nullptr);
     if (g_sumWnd) DwmApply(g_sumWnd);    // the card's rounded corners + tinted border
@@ -999,6 +1054,13 @@ static void SumPanelMessage(const wchar_t* json) {
     } else if (t == "reset") {
         g_sumCancel = true;
         g_sumBusy = false;
+        if (g_sumMode == 0) {
+            DocState& D = DVF();
+            if (!D.path.empty()) {
+                std::string docId = AiDocSessionKey(D.path);
+                AiSetSetting("summary.digest." + docId, "");
+            }
+        }
     } else if (t == "close") {
         // the chrome's own close chip (DialogChrome's red mark)
         if (g_sumWnd) DestroyWindow(g_sumWnd);
@@ -1014,10 +1076,102 @@ static void SumPanelMessage(const wchar_t* json) {
         if (p && p->t == 'd' && g_sumMode == 0) {
             int pg = max(1, min((int)p->d, DVF().n));
             SetPage(pg - 1);
+            DocState& D = DVF();
+            if (!D.path.empty()) {
+                std::string docId = AiDocSessionKey(D.path);
+                AiSetSetting("summary.start." + docId, std::to_string(pg));
+            }
         }
     } else if (t == "range-changed") {
         const crxk::J* p = m.get("pages");
-        if (p && p->t == 'd') g_sumRange = max(1, (int)p->d);
+        if (p && p->t == 'd') {
+            g_sumRange = max(1, (int)p->d);
+            AiSetSetting("summary.range", std::to_string(g_sumRange));
+        }
+    } else if (t == "set-setting") {
+        const crxk::J* k = m.get("key"), * v = m.get("val");
+        if (k && k->t == 's' && v && v->t == 's') {
+            AiSetSetting(k->s, v->s);
+            if (k->s == "summary.range") {
+                int r = atoi(v->s.c_str());
+                if (r > 0) g_sumRange = r;
+            }
+        }
+    } else if (t == "save-digest") {
+        if (g_sumMode == 0) {
+            DocState& D = DVF();
+            if (!D.path.empty()) {
+                std::string docId = AiDocSessionKey(D.path);
+                const crxk::J* txt = m.get("text"), * f = m.get("first"), * l = m.get("last"), * mdl = m.get("model");
+                if (txt && txt->t == 's') AiSetSetting("summary.digest." + docId, txt->s);
+                if (f && f->t == 'd') AiSetSetting("summary.digest." + docId + ".first", std::to_string((int)f->d));
+                if (l && l->t == 'd') AiSetSetting("summary.digest." + docId + ".last", std::to_string((int)l->d));
+                if (mdl && mdl->t == 's') AiSetSetting("summary.digest." + docId + ".model", mdl->s);
+            }
+        }
+    } else if (t == "prefetch") {
+        const crxk::J* st = m.get("start"), * rg = m.get("range"),
+            * w = m.get("words"), * lg = m.get("lang"), * gr = m.get("genre");
+        if (g_sumMode == 0 && st && st->t == 'd') {
+            int first = (int)st->d;
+            int pages = rg && rg->t == 'd' ? (int)rg->d : g_sumRange;
+            int words = w && w->t == 'd' ? (int)w->d : 1000;
+            std::string lang = lg && lg->t == 's' ? lg->s : "English";
+            std::string genre = gr && gr->t == 's' ? gr->s : "nonfiction_classic";
+            DocState& D = DVF();
+            if (!D.path.empty() && first <= D.n) {
+                int last = min(first + pages - 1, D.n);
+                std::string docId = AiDocSessionKey(D.path);
+                std::string model = WxU(g_aiCfg.model);
+                std::string variant = lang + ":" + std::to_string(words) + ":" + genre;
+                std::wstring rangeText;
+                for (int p = first; p <= last; p++) {
+                    std::wstring txt = AiPageTextFrom(D, p);
+                    if (!txt.empty()) rangeText += L"[p. " + std::to_wstring(p + 1) + L"]\n" + txt + L"\n\n";
+                }
+                if (!rangeText.empty()) {
+                    unsigned char sha[32];
+                    crxk::Sha256((const unsigned char*)rangeText.data(), rangeText.size() * sizeof(wchar_t), sha);
+                    static const char* hx = "0123456789abcdef";
+                    std::string hash(64, '0');
+                    for (int i = 0; i < 32; i++) { hash[i * 2] = hx[sha[i] >> 4]; hash[i * 2 + 1] = hx[sha[i] & 15]; }
+                    std::string cached;
+                    if (AiCacheGet(docId, first, last, model, variant, hash, cached)) {
+                        SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
+                                ",\"text\":" + WxJsonStr(cached) + "}");
+                    } else if (!g_sumBusy) {
+                        std::thread([docId, rangeText, first, last, words, lang, genre, hash]() {
+                            AiLoadSettings();
+                            AiCfg cfg = g_aiCfg;
+                            std::string sys = PromptBodyOf(genre.c_str());
+                            if (sys.empty()) sys = PromptBodyOf("nonfiction_classic");
+                            {
+                                std::string ph = std::to_string(words);
+                                size_t pos;
+                                while ((pos = sys.find("{words}")) != std::string::npos) sys.replace(pos, 7, ph);
+                                while ((pos = sys.find("{language}")) != std::string::npos) sys.replace(pos, 10, lang);
+                            }
+                            int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
+                            if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
+                            std::string user = WxU(rangeText);
+                            std::string content;
+                            AiError err;
+                            std::atomic<bool> cancel{ false };
+                            if (AiChatBuffered(cfg, sys, {}, user, budget, nullptr, true, content, err, &cancel) && !content.empty()) {
+                                std::string answer = AiExtractStreamingAnswer(content);
+                                if (answer.empty()) answer = AiParseStructured(AiStripThinkSpans(content)).answer;
+                                if (answer.empty()) answer = content;
+                                std::string mdl = WxU(cfg.model);
+                                std::string var = lang + ":" + std::to_string(words) + ":" + genre;
+                                AiCachePut(docId, first, last, mdl, var, hash, answer);
+                                SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
+                                        ",\"text\":" + WxJsonStr(answer) + "}");
+                            }
+                        }).detach();
+                    }
+                }
+            }
+        }
     }
 }
 static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
@@ -1062,18 +1216,37 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         mmi->ptMinTrackSize.y = (int)(390 * g.dpi);
         return 0;
     }
-    case WM_SIZE:
-        if (g_sumCtr) {
+    case WM_MOVE:
+    case WM_SIZE: {
+        if (g_sumCtr && m == WM_SIZE) {
             RECT r; GetClientRect(h, &r);
             g_sumCtr->put_Bounds(r);
         }
-        DwmApply(h);       // corner rounding flips when the window maximizes
+        if (m == WM_SIZE) DwmApply(h);       // corner rounding flips when the window maximizes
+        if (!IsIconic(h) && !IsZoomed(h) && IsWindowVisible(h)) {
+            RECT wr; GetWindowRect(h, &wr);
+            double dpi = g.dpi > 0 ? g.dpi : 1.0;
+            AiSetSetting("summary.win.w", std::to_string((int)((wr.right - wr.left) / dpi)));
+            AiSetSetting("summary.win.h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
+            AiSetSetting("summary.win.left", std::to_string((int)(wr.left / dpi)));
+            AiSetSetting("summary.win.top", std::to_string((int)(wr.top / dpi)));
+        }
         return 0;
-    case WM_DESTROY:
+    }
+    case WM_DESTROY: {
+        if (!IsIconic(h) && !IsZoomed(h)) {
+            RECT wr; GetWindowRect(h, &wr);
+            double dpi = g.dpi > 0 ? g.dpi : 1.0;
+            AiSetSetting("summary.win.w", std::to_string((int)((wr.right - wr.left) / dpi)));
+            AiSetSetting("summary.win.h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
+            AiSetSetting("summary.win.left", std::to_string((int)(wr.left / dpi)));
+            AiSetSetting("summary.win.top", std::to_string((int)(wr.top / dpi)));
+        }
         g_sumCancel = true;
         g_sumWnd = nullptr;
         g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false;
         return 0;
+    }
     case WM_CLOSE:
         DestroyWindow(h);
         return 0;

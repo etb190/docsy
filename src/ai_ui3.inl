@@ -501,6 +501,18 @@ static void AiHandleEvent(AiEv* e) {
                 ",\"text\":" + WxJsonStr(e->a) +
                 ",\"status\":" + WxJsonStr(status) +
                 ",\"model\":" + WxJsonStr(g_aiCfg.model) + "}");
+        if (g_sumMode == 0) {
+            DocState& D = DVF();
+            if (!D.path.empty()) {
+                std::string docId = AiDocSessionKey(D.path);
+                int last = min(g_sumStart + g_sumRange - 1, D.n);
+                AiSetSetting("summary.digest." + docId, e->a);
+                AiSetSetting("summary.digest." + docId + ".first", std::to_string(g_sumStart));
+                AiSetSetting("summary.digest." + docId + ".last", std::to_string(last));
+                AiSetSetting("summary.digest." + docId + ".model", WxU(g_aiCfg.model));
+                AiSetSetting("summary.start." + docId, std::to_string(g_sumStart));
+            }
+        }
         break;
     }
     case AIEV_SUM_ERROR:
