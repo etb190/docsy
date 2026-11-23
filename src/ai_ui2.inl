@@ -89,10 +89,17 @@ static void AiRangeStart(const std::wstring& path, int first, int last, int what
     g_range.text.clear();
     g_range.what = what;
     g_range.gen = gen;
-    SetTimer(g.main, 4714, 30, nullptr);
+    // one page per 150ms, not 30: TtFor's first build on a dense page can eat
+    // 100-200ms of the UI thread, and a tick every 30ms with that inside it
+    // saturates the thread - the whole app read as 5 fps while the index built.
+    // At 150ms the thread keeps half its time free between pages.
+    SetTimer(g.main, 4714, 150, nullptr);
 }
 static void AiRangeTick() {
     if (!g_range.active) { KillTimer(g.main, 4714); return; }
+    if (!g_aiOn) return;   // the panel is the job's only consumer: a hidden panel
+                           // pauses the pump (the timer stays armed; a tick over a
+                           // hidden panel is free, and the next visible one resumes)
     DocState& D = DVF();
     if (D.path.empty() || D.path != g_range.path) {
         g_range.active = false;
@@ -150,10 +157,16 @@ static void AiIndexKickoff(const std::wstring& path) {
     g_aiIndex.pageCount = DVF().n;
     g_aiIndex.contentHash = AiFileHash(path);
     AiPanelSend(WxW(AiStatusJson("status")));
-    SetTimer(g.main, 4713, 30, nullptr);
+    // 150ms cadence - see AiRangeStart's note: one dense page's text layer can
+    // cost the UI thread 100-200ms, and the 30ms tick turned the build into a
+    // continuous saturate. The index is background work; the UI leads.
+    SetTimer(g.main, 4713, 150, nullptr);
 }
 static void AiIndexTick() {
     if (!g_aiIndexing) { KillTimer(g.main, 4713); return; }
+    if (!g_aiOn) return;   // the panel's absence pauses the build: the "app runs
+                           // at 5 fps with the AI panel closed" report was this
+                           // pump grinding pages nobody was asking about
     DocState& D = DVF();
     if (D.path.empty() || D.path != g_aiIdxPath || D.n <= 0) {
         g_aiIndexing = false;
