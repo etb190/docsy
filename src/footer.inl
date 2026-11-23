@@ -195,6 +195,7 @@ static void ToggleFull(HWND h) {
     DwmApply(h);
     InvalidateRect(h, nullptr, FALSE);
     if (g_editOn) EditorNotifyFull();    // the page's Esc gate follows every road in
+    if (g_editOn) EditorRailSync();      // and the rail's raster gate follows the fullscreen
 }
 
 // The moon button: KillerPDF's DocInvert flips the document images to their

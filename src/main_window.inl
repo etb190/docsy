@@ -185,6 +185,7 @@ static void ToggleSide() {
     if (g_editOn) {
         g_edSide = !g_edSide;
         if (g.side) ShowWindow(g.side, g_edSide ? SW_SHOWNOACTIVATE : SW_HIDE);
+        EditorRailSync();                        // the page's raster gate follows the rail
         RailRepaint();
         LayoutMain();
         return;

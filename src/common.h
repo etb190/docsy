@@ -1133,6 +1133,7 @@ static void EditorZoomApplyItem(int i);
 static void EditorToggleInvert();         // the footer moon -> the page's az-inv
 static void EditorStatusHoldInfo();       // the status cell's file flash, editor world
 static void EditorNotifyFull();           // the page's Esc gate tracks the chrome
+static void EditorRailSync();             // the rail's on/off rides the page + a fresh thumb on open
 static HBRUSH WebEditColors(HDC dc, HWND ctl);   // WM_CTLCOLOREDIT
 static void WebFailCard(HDC dc, int w, int h);   // the no-engine card in the view
 static void WebViewClick(POINT p);        // the fail card's download button

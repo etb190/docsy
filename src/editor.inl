@@ -130,6 +130,20 @@ static void EditorNotifyFull() {
                                              : L"{\"cmd\":\"full\",\"on\":false}");
 }
 
+// The rail's state rides the page: the page stops rasterizing its Letter sheet
+// while the rail cannot show it - the SVG raster and the megabyte message it
+// posts, then the host's base64 + GDI+ decode on the UI thread, all cost real
+// time a hidden thumbnail never earns back. A rail that just opened asks for
+// one fresh render so the card is never stale. EditorToggle, ToggleSide and
+// ToggleFull all land here; the page's own 'rail' cmd arms azRailOn.
+static void EditorRailSync() {
+    if (!g_edWeb) return;
+    bool on = g_editOn && g_edSide && !g.full;
+    g_edWeb->PostWebMessageAsJson(on ? L"{\"cmd\":\"rail\",\"on\":true}"
+                                     : L"{\"cmd\":\"rail\",\"on\":false}");
+    if (on) g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"thumb\"}");
+}
+
 static void EditorInsertImagePrompt() {
     wchar_t fn[MAX_PATH] = L"";
     OPENFILENAMEW ofn{ sizeof ofn };
@@ -382,6 +396,8 @@ static void EditorHandleMessage(const wchar_t* json) {
             g_edPendingLoad.clear();
             if (g_edWeb) g_edWeb->PostWebMessageAsJson(msg.c_str());
         }
+        EditorRailSync();                        // a fresh page learns the rail's state
+                                                 // (and a shown rail gets its first card)
     } else if (t == "state") {
         g_edBold = m.get("b") ? m.get("b")->b : false;
         g_edItalic = m.get("i") ? m.get("i")->b : false;
@@ -413,8 +429,9 @@ static void EditorHandleMessage(const wchar_t* json) {
         }
         UpdateTitle();
     } else if (t == "dirty") {                       // any change: ask the page for its own
-        if (g_edWeb)                                 // render - a page, not a screenshot of
-            g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"thumb\"}");   // the whole screen
+        if (g_edWeb && g_edSide && !g.full)          // render, but only while the rail can
+            g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"thumb\"}");   // show it - a hidden
+                                                         // thumbnail never earns its cost
     } else if (t == "title") {
         std::string title = m.get("title") ? m.get("title")->str() : "";
         if (!title.empty()) { g_edTitle = WxW(title); UpdateTitle(); }
@@ -535,7 +552,8 @@ static void EditorToggle(bool on) {
             RECT r; GetClientRect(g.view, &r);
             g_edCtr->put_Bounds(r);
             EditorRefocus();                           // the page's own thumbs ride the
-        }                                              // load and every change after it
+            EditorRailSync();                          // load and every change after it
+        }
     } else {
         if (g_edCtr) g_edCtr->put_IsVisible(FALSE);
         if (g_etool) ShowWindow(g_etool, SW_HIDE);
