@@ -987,7 +987,9 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
         else {
             AiEv* e = AiEvMake(AIEV_SUM_ERROR);
             e->gen = gen;
-            e->a = WxU(err.Friendly());
+            std::wstring msg = !e2.detail.empty() ? e2.Friendly() : err.Friendly();
+            if (msg.empty()) msg = !err.detail.empty() ? err.detail : L"Failed to generate summary. Please check your AI API key and connection.";
+            e->a = WxU(msg);
             AiPost(e);
             g_sumBusy = false;
             return;

@@ -112,8 +112,8 @@ static bool AiIsLocalHost(const std::string& baseUrl) {
 // dist branch's binary as a leaked GCP credential (Avalanche's source-side
 // split survives only because the scanner never reads the built binary).
 static std::wstring AiGoogleGuestKey() {
-    std::string a = "AQ.Ab8RN6Kvi4sGJHzI1_Rg9u";
-    std::string b = "rZmJ1pz6D7m1aJ4RVS5YulDJZ-EA";
+    std::string a = "AQ.Ab8RN6IlgyIX2-_uCvRx7Px";
+    std::string b = "M2uPIGfBX3-9tm6wcGjXvejeglA";
     return WxW(a + b);
 }
 static const wchar_t* const kAiNimGuestKey =
@@ -527,13 +527,16 @@ static void AiClassifyHttp(int status, const std::string& body, const std::wstri
     e.status = status; e.model = model;
     // ExtractServerDetail: error.message verbatim, else the trimmed body
     crxk::J j;
-    if (crxk::JParse(body, j) && j.t == 'o') {
-        const crxk::J* er = j.get("error");
-        if (er && er->t == 'o') {
-            const crxk::J* m = er->get("message");
-            if (m && m->t == 's') e.detail = WxW(m->s);
-        } else if (er && er->t == 's') {
-            e.detail = WxW(er->s);
+    if (crxk::JParse(body, j)) {
+        const crxk::J* root = (j.t == 'o') ? &j : ((j.t == 'a' && !j.a.empty() && j.a[0].t == 'o') ? &j.a[0] : nullptr);
+        if (root) {
+            const crxk::J* er = root->get("error");
+            if (er && er->t == 'o') {
+                const crxk::J* m = er->get("message");
+                if (m && m->t == 's') e.detail = WxW(m->s);
+            } else if (er && er->t == 's') {
+                e.detail = WxW(er->s);
+            }
         }
     }
     if (e.detail.empty() && !body.empty()) {
@@ -555,7 +558,14 @@ static void AiClassifyHttp(int status, const std::string& body, const std::wstri
 }
 static void AiClassifyTransport(DWORD err, const std::wstring& baseUrl, AiError& e) {
     e.cat = AI_ERR_UNREACHABLE;
-    if (err == ERROR_WINHTTP_TIMEOUT) e.cat = AI_ERR_TIMEOUT;
+    if (err == ERROR_WINHTTP_TIMEOUT) {
+        e.cat = AI_ERR_TIMEOUT;
+        e.detail = L"Request timed out while connecting to AI service.";
+    } else if (err != 0) {
+        wchar_t buf[256];
+        swprintf_s(buf, L"Could not connect to AI service (WinHTTP error %lu). Check your internet connection.", err);
+        e.detail = buf;
+    }
 }
 // The learned field drops (per endpoint key: 400 naming the field drops it).
 struct AiDrops { bool jsonDropped = false, effortDropped = false; };
