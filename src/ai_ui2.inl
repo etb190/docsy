@@ -97,9 +97,8 @@ static void AiRangeStart(const std::wstring& path, int first, int last, int what
 }
 static void AiRangeTick() {
     if (!g_range.active) { KillTimer(g.main, 4714); return; }
-    if (!g_aiOn) return;   // the panel is the job's only consumer: a hidden panel
-                           // pauses the pump (the timer stays armed; a tick over a
-                           // hidden panel is free, and the next visible one resumes)
+    if (g_range.what == 0 && !g_sumWnd) return;
+    if (g_range.what == 1 && !g_sideNotes) return;
     DocState& D = DVF();
     if (D.path.empty() || D.path != g_range.path) {
         g_range.active = false;
@@ -898,14 +897,19 @@ static void SumOpen(int mode) {
             x = candX; y = candY;
         }
     }
+    DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_CAPTION) | WS_CLIPCHILDREN;
     RECT rc{ 0, 0, w, h };
-    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    AdjustWindowRect(&rc, style, FALSE);
     g_sumWnd = CreateWindowExW(0, L"docsy_sum", L"Page Summary",
-                               WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                               style | WS_VISIBLE,
                                x, y,
                                rc.right - rc.left, rc.bottom - rc.top,
                                g.main, nullptr, g.hinst, nullptr);
-    if (g_sumWnd) DwmApply(g_sumWnd);    // the card's rounded corners + tinted border
+    if (g_sumWnd) {
+        SetWindowPos(g_sumWnd, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        DwmApply(g_sumWnd);    // the card's rounded corners + tinted border
+    }
     if (g_sumMode == 1) g_sumReady = true;
     SumEnsure();
 }

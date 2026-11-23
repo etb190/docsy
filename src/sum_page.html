@@ -96,18 +96,41 @@ body{background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif;
 #bStart:disabled,#bReset:disabled{opacity:.35; cursor:default;}
 
 /* ---- Row 2: Range Chips & Selects ---- */
-#chips{display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:5px;
+#rangeRow{display:flex; align-items:center; justify-content:center; gap:5px;
   margin:7px 14px 2px;}
+#comboRow{display:flex; align-items:center; justify-content:center; gap:8px;
+  margin:4px 14px 2px;}
+#chipsWeb{display:flex; align-items:center; justify-content:center; gap:8px;
+  margin:6px 14px 2px;}
 .chip{height:28px; min-width:38px; padding:0 9px; font-size:11.5px; font-weight:600;
   border:1px solid var(--cardborder); background:transparent; color:var(--muted);
   border-radius:4px; cursor:pointer;}
 .chip:hover{background:var(--rowhover); color:var(--text);}
 .chip.on{background:var(--selbg); border-color:var(--selfg); color:var(--selfg);}
-.sep{width:1px; height:20px; background:var(--line); margin:0 4px; opacity:0.7;}
-select{height:28px; background:var(--pane); color:var(--text); border:1px solid var(--cardborder);
-  border-radius:4px; font-size:11.5px; outline:none; cursor:pointer; padding:0 4px;}
+select{
+  appearance:none;
+  -webkit-appearance:none;
+  height:28px;
+  background-color:#2b2b2b;
+  color:#e0e0e0 !important;
+  border:1px solid #3f3f3f;
+  border-radius:4px;
+  font-size:11.5px;
+  font-family:inherit;
+  font-weight:500;
+  outline:none;
+  cursor:pointer;
+  padding:0 24px 0 8px;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23a0a0a0' d='M0 0l5 5 5-5z'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 8px center;
+  box-sizing:border-box;
+}
+select:hover{background-color:#333333; border-color:#505050;}
 select:focus{border-color:var(--selfg);}
-#words{width:90px;} #lang{width:112px;} #genre{width:150px;} #prompt{width:170px;}
+select option{background-color:#242424; color:#e0e0e0;}
+#words{width:110px;} #lang{width:130px;} #genre{width:170px;} #prompt{width:170px;}
+#wordsW{width:110px;} #langW{width:130px;}
 
 /* ---- Row 3: The Digest (Justified Typeset Page) ---- */
 #digestWrap{flex:1 1 auto; margin:6px 14px 2px; position:relative; min-height:0;}
@@ -201,8 +224,8 @@ select:focus{border-color:var(--selfg);}
       <button id="bStart" title="Start summarizing the selected page range">Start</button>
       <button id="bReset" title="Reset summary and start over">Reset</button>
     </div>
-    <!-- Row 2: Range Chips & Selects -->
-    <div class="row" id="chips">
+    <!-- Row 2a: Range Chips -->
+    <div class="row" id="rangeRow">
       <button class="chip" data-p="1">1</button>
       <button class="chip" data-p="5">5</button>
       <button class="chip on" data-p="20">20</button>
@@ -211,15 +234,55 @@ select:focus{border-color:var(--selfg);}
       <button class="chip" data-p="80">80</button>
       <button class="chip" data-p="100">100</button>
       <button class="chip" data-p="all">All</button>
-      <span class="sep"></span>
-      <select id="words" title="Target word limit for summary"></select>
-      <select id="lang" title="Output summary language"></select>
-      <select id="genre" title="Document genre prompt template"></select>
+    </div>
+    <!-- Row 2b: Dropdowns -->
+    <div class="row" id="comboRow">
+      <select id="words" title="Target word limit for summary">
+        <option value="500">500 words</option>
+        <option value="1000" selected>1,000 words</option>
+        <option value="1500">1,500 words</option>
+        <option value="2000">2,000 words</option>
+      </select>
+      <select id="lang" title="Output summary language">
+        <option value="English" selected>English</option>
+        <option value="Spanish">Spanish</option>
+        <option value="French">French</option>
+        <option value="German">German</option>
+        <option value="Italian">Italian</option>
+        <option value="Portuguese">Portuguese</option>
+        <option value="Russian">Russian</option>
+        <option value="Chinese">Chinese</option>
+        <option value="Japanese">Japanese</option>
+        <option value="Korean">Korean</option>
+        <option value="Arabic">Arabic</option>
+      </select>
+      <select id="genre" title="Document genre prompt template">
+        <option value="nonfiction_classic" selected>Nonfiction</option>
+        <option value="fiction_literary">Fiction</option>
+        <option value="technical_academic">Technical / Academic</option>
+        <option value="biography_memoir">Biography / Memoir</option>
+        <option value="history">History</option>
+        <option value="philosophy">Philosophy</option>
+        <option value="science">Science</option>
+        <option value="selfhelp_business">Self-Help / Business</option>
+      </select>
     </div>
     <div class="row" id="chipsWeb" style="display:none">
-      <select id="prompt" title="Web summary prompt"></select>
-      <select id="wordsW" title="Target word limit"></select>
-      <select id="langW" title="Summary language"></select>
+      <select id="prompt" title="Web summary prompt">
+        <option value="web_nonfiction_classic" selected>Nonfiction</option>
+      </select>
+      <select id="wordsW" title="Target word limit">
+        <option value="500">500 words</option>
+        <option value="1000" selected>1,000 words</option>
+        <option value="1500">1,500 words</option>
+        <option value="2000">2,000 words</option>
+      </select>
+      <select id="langW" title="Summary language">
+        <option value="English" selected>English</option>
+        <option value="Spanish">Spanish</option>
+        <option value="French">French</option>
+        <option value="German">German</option>
+      </select>
     </div>
     <!-- Row 3: Digest Area -->
     <div id="digestWrap">
@@ -603,8 +666,8 @@ function commitStartBox(str){
 }
 
 /* ---- C++ -> Web Panel Event Dispatcher ---- */
-window.addEventListener("message", function(e){
-  var m=e.data; if(!m||!m.cmd) return;
+function handleHostMessage(m){
+  if(!m||!m.cmd) return;
   switch(m.cmd){
   case "init":
     S.mode=m.mode||"doc";
@@ -627,7 +690,8 @@ window.addEventListener("message", function(e){
 
     var isWeb=S.mode==="web";
     $("nav").style.display=isWeb?"none":"flex";
-    $("chips").style.display=isWeb?"none":"flex";
+    $("rangeRow").style.display=isWeb?"none":"flex";
+    $("comboRow").style.display=isWeb?"none":"flex";
     $("chipsWeb").style.display=isWeb?"flex":"none";
     fillCombos(m);
     refreshNav();
@@ -706,7 +770,20 @@ window.addEventListener("message", function(e){
     refreshNav();
     break;
   }
-});
+}
+
+function onMsgEvent(e){
+  var m = e.data;
+  if(!m) return;
+  if(typeof m === "string"){
+    try { m = JSON.parse(m); } catch(err){ return; }
+  }
+  handleHostMessage(m);
+}
+window.addEventListener("message", onMsgEvent);
+if(window.chrome && window.chrome.webview){
+  window.chrome.webview.addEventListener("message", onMsgEvent);
+}
 
 /* ---- Dropdowns Setup ---- */
 function fillCombos(m){
@@ -832,7 +909,7 @@ $("bNext").onclick=function(){
   }
 };
 
-document.querySelectorAll("#chips .chip").forEach(function(c){
+document.querySelectorAll(".chip").forEach(function(c){
   c.onclick=function(){
     S.rangePages=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
     refreshNav();
@@ -856,6 +933,7 @@ function scrollBySmooth(dir){
   d.scrollBy({top:step, behavior:"smooth"});
 }
 
+fillCombos({});
 post({type:"ready"});
 </script>
 </body>

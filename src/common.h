@@ -757,19 +757,14 @@ static void DwmApply(HWND h) {
         HMODULE d = LoadLibraryW(L"dwmapi.dll");
         if (d) pfn = (DwmSetFn)(void*)GetProcAddress(d, "DwmSetWindowAttribute");
     }
-    if (!pfn) return;
-    static int s_round = -1;
+    if (!pfn || !h) return;
+    BOOL dark = TRUE;
+    pfn(h, 20, &dark, sizeof dark);               // DWMWA_USE_IMMERSIVE_DARK_MODE (Win11 / Win10 20H1+)
+    pfn(h, 19, &dark, sizeof dark);               // older Win10 builds
     int roundc = (IsZoomed(h) || g.full) ? 1 /* DWMWCP_DONOTROUND */ : 2 /* DWMWCP_ROUND */;
-    if (roundc != s_round) {
-        s_round = roundc;
-        pfn(h, 33, &roundc, sizeof roundc);           // DWMWA_WINDOW_CORNER_PREFERENCE
-    }
-    static bool s_border = false;
-    if (!s_border) {
-        s_border = true;
-        COLORREF border = RGB(0x3f, 0x3f, 0x3f);      // DWMWA_BORDER_COLOR, 0x00BBGGRR
-        pfn(h, 34, &border, sizeof border);
-    }
+    pfn(h, 33, &roundc, sizeof roundc);           // DWMWA_WINDOW_CORNER_PREFERENCE
+    COLORREF border = RGB(0x3f, 0x3f, 0x3f);      // DWMWA_BORDER_COLOR, 0x00BBGGRR
+    pfn(h, 34, &border, sizeof border);
 }
 
 static HFONT CaptionFont(HFONT& slot, int px, bool bold, const wchar_t* face) {
