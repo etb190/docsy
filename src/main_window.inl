@@ -803,6 +803,8 @@ static int Shot(const wchar_t* out, int w, int h) {
         if (g_webOn) WebSideDraw(m1, sw, ch);
         else if (g_editOn) EditorSideDraw(m1, sw, ch);               // the OPEN WEB TABS rail
         else SideDraw(m1, sw, ch, 0);
+        if (SideBandH() > 0) SideBandDraw(m1, sw);   // the Pages | Notes band, the same
+                                                     // overpaint the live WM_PAINT runs
         BitBlt(dc, 0, cap + ws_ + tb, sw, ch, m1, 0, 0, SRCCOPY);
         SelectObject(m1, o1); DeleteObject(b1); DeleteDC(m1);
     }
