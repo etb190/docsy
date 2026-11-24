@@ -529,8 +529,12 @@ static void AiHandleEvent(AiEv* e) {
                 while (i < e->a.size() && !isspace((unsigned char)e->a[i])) i++;
             }
         bool fromCache = e->b == "fromCache";
-        std::string status = fromCache ? "From cache" :
-            std::to_string(words) + " words · " + std::to_string(e->a.size()) + " chars";
+        // the counts ride ALWAYS - a cache hit still fills the page, the user
+        // still wants to know how much text is on it; "from cache" shrinks to
+        // a suffix and never replaces the numbers again
+        std::string status = std::to_string(words) + " words · " +
+                             std::to_string(e->a.size()) + " chars" +
+                             (fromCache ? " · from cache" : "");
         SumPost("{\"cmd\":\"done\",\"gen\":" + std::to_string(e->gen) +
                 ",\"text\":" + WxJsonStr(e->a) +
                 ",\"status\":" + WxJsonStr(status) +
