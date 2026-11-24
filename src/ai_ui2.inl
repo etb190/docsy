@@ -24,12 +24,11 @@ static std::string g_sumInitDoc;         // what the page's last init was built
                                          // document moved under the hood
 
 // ---- the page text builder: [p. N] anchored, running paragraphs ----
-static std::wstring AiPageTextFrom(const DocState& D, int page) {
-    TxtPage* pt = TtFor(const_cast<DocState&>(D), page);
-    if (!pt || pt->cells.empty()) return L"";
+static std::wstring AiPageTextOf(const TxtPage& pt) {
+    if (pt.cells.empty()) return L"";
     std::map<int, std::wstring> wt;
     std::map<int, std::array<float, 4>> wbox;
-    for (auto& c : pt->cells) {
+    for (auto& c : pt.cells) {
         auto& bx = wbox[c.word];
         if (bx[2] == 0 && bx[3] == 0) bx = { c.l, c.t, c.r, c.b };
         else { bx[0] = min(bx[0], c.l); bx[1] = min(bx[1], c.t);
@@ -37,7 +36,7 @@ static std::wstring AiPageTextFrom(const DocState& D, int page) {
         wt[c.word] += c.text;
     }
     std::map<int, std::vector<int>> byLine;
-    for (auto& c : pt->cells) byLine[c.line].push_back(c.word);
+    for (auto& c : pt.cells) byLine[c.line].push_back(c.word);
     std::vector<std::pair<int, std::vector<int>>> lines(byLine.begin(), byLine.end());
     std::sort(lines.begin(), lines.end(), [&](auto& a, auto& b) {
         return wbox[a.second.front()][1] < wbox[b.second.front()][1];
@@ -82,6 +81,66 @@ static int AiLetters(const std::wstring& s) {
     return n;
 }
 
+// ---- the OCR flight: one page's text layer built OFF the UI thread ----
+// TtFor builds synchronously - fine for a cursor or a find, and brutal for a
+// sixty-page summary: Windows' OCR over a fresh 2x software render costs
+// 100-300ms a page ON THE CALLING THREAD, and the extraction pump calling it
+// froze the message loop for the whole range. The app hitched, and the
+// low-level mouse hook riding that loop stalled the machine's pointer with
+// it. The flight keeps the render on this thread (the PDF document is
+// apartment-bound) and hands the recognition to its own async completion: the
+// pump parks, the message loop breathes, and the arrival re-kicks whoever was
+// waiting. One page in flight at a time - both pumps park on the same flight.
+struct AiOcrFlight {
+    bool busy = false;
+    std::wstring path;
+    int page = -1;
+    DWORD born = 0;
+};
+static AiOcrFlight g_ocrFlight;
+static void AiOcrArrive(AiOcrPayload* pl);   // lands on the UI thread (WM_APP + 72);
+                                             // defined below, beside the pumps it re-kicks
+
+static bool AiOcrPrewarm(DocState& D, int pageIdx) {
+    if (g_ocrFlight.busy) return true;      // a page is already flying: the caller parks
+    auto eng = OcrEngineGet();
+    if (!eng || !D.n || pageIdx < 0 || pageIdx >= D.n) return false;
+    int ow = std::clamp((int)std::lround(D.pw[pageIdx] * 2), 800, 1600);
+    int oh = max(1, (int)std::lround(ow * D.ph[pageIdx] / max(1.f, D.pw[pageIdx])));
+    auto soft = RenderSoft(D, pageIdx, ow, oh);   // the one this-thread step
+                                                  // (~20-80ms; the OCR itself -
+                                                  // the 100-300ms bulk - runs away
+                                                  // from this thread)
+    if (!soft) return false;                // render failed: the page reads empty
+    g_ocrFlight.busy = true;
+    g_ocrFlight.path = D.path;
+    g_ocrFlight.page = pageIdx;
+    g_ocrFlight.born = GetTickCount();
+    AiOcrPayload* pl = new AiOcrPayload();
+    pl->path = D.path;
+    pl->page = pageIdx;
+    pl->ow = ow; pl->oh = oh;
+    auto op = eng.RecognizeAsync(soft);
+    op.Completed([pl](auto&& async, auto&&) {
+        try {
+            auto res = async.GetResults();
+            for (winrt::Windows::Media::Ocr::OcrLine line : res.Lines())
+                for (winrt::Windows::Media::Ocr::OcrWord wd : line.Words()) {
+                    auto r = wd.BoundingRect();
+                    if (r.Width <= 0 || r.Height <= 0 || wd.Text().empty()) continue;
+                    TxtCell c;
+                    c.text = std::wstring(wd.Text());
+                    c.l = r.X; c.t = r.Y; c.r = c.l + r.Width; c.b = c.t + r.Height;
+                    pl->cells.push_back(std::move(c));
+                }
+            pl->ok = true;
+        } catch (...) { pl->ok = false; }
+        if (g.main) PostMessageW(g.main, WM_APP + 72, 0, (LPARAM)pl);
+        else { delete pl; g_ocrFlight.busy = false; }   // no frame left to land on
+    });
+    return true;   // parked; the arrival re-kicks the waiting pump
+}
+
 // ---- the range extraction pump (one OCR page per tick) ----
 struct AiRangeJob {
     bool active = false;
@@ -95,6 +154,39 @@ struct AiRangeJob {
     bool bypass = false;
 };
 static AiRangeJob g_range;
+
+static void AiOcrArrive(AiOcrPayload* pl) {
+    std::wstring path = std::move(pl->path);
+    int page = pl->page, ow = pl->ow, oh = pl->oh;
+    bool ok = pl->ok;
+    std::vector<TxtCell> cells = std::move(pl->cells);
+    delete pl;
+    g_ocrFlight.busy = false;
+    g_ocrFlight.page = -1;
+    DocState& D = DVF();
+    if (!path.empty() && path == D.path && page >= 0 && page < D.n && !D.txt.count(page)) {
+        TxtPage pt; pt.w = D.pw[page]; pt.h = D.ph[page];
+        if (ok) {
+            float kx = pt.w / max(1, ow), ky = pt.h / max(1, oh);
+            for (auto& c : cells) {
+                TxtCell s;
+                s.text = std::move(c.text);
+                s.l = c.l * kx; s.t = c.t * ky; s.r = c.r * kx; s.b = c.b * ky;
+                pt.cells.push_back(std::move(s));
+            }
+            TtLines(pt);
+            TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
+        }
+        pt.tick = ++D.tick;
+        D.txt[page] = std::move(pt);
+        TtTrim(D, page);
+    }
+    // a failed flight parks an empty page (the pump reads L"" and moves on);
+    // a flight whose document died just frees its seat - the living pump for
+    // the current document re-fires its own prewarm on its next tick
+    if (g_range.active) SetTimer(g.main, 4714, 1, nullptr);   // the parked pump resumes now
+    if (g_aiIndexing) SetTimer(g.main, 4713, 1, nullptr);
+}
 // the buffer's deferred seat: the page's prefetch request waits a beat after
 // the popup unfolds (the first paint lands unmolested), then rides the pump
 static struct {
@@ -126,11 +218,30 @@ static void AiRangeTick() {
         KillTimer(g.main, 4714);
         return;
     }
+    // a flight that never landed (a hung engine, a lost message): 30s frees
+    // the seat so the pump re-fires instead of waiting forever
+    if (g_ocrFlight.busy && GetTickCount() - g_ocrFlight.born > 30000)
+        g_ocrFlight.busy = false;
 
     DWORD startTick = GetTickCount();
+    bool parked = false;
     while (g_range.cur <= g_range.last) {
         int p = g_range.cur; // 1-based page number
-        std::wstring t = AiPageTextFrom(D, p - 1); // 0-based page index
+        auto it = D.txt.find(p - 1);              // 0-based page index
+        if (it == D.txt.end()) {
+            // The page's text layer is not built: fire the OCR flight (its
+            // render is the only this-thread step) and PARK - the old pump
+            // called TtFor here and froze the message loop 100-300ms per page,
+            // the machine-wide lag the reading phase was famous for. The
+            // arrival re-kicks this pump in 1ms.
+            if (AiOcrPrewarm(D, p - 1)) { parked = true; break; }
+            // no engine / render failed: park an empty page, read L"", move on
+            TxtPage empty; empty.w = D.pw[p - 1]; empty.h = D.ph[p - 1];
+            empty.tick = ++D.tick;
+            it = D.txt.emplace(p - 1, std::move(empty)).first;
+            TtTrim(D, p - 1);
+        }
+        std::wstring t = AiPageTextOf(it->second);
         if (!t.empty()) g_range.text += L"[p. " + std::to_wstring(p) + L"]\n" + t + L"\n\n";
         g_range.cur++;
 
@@ -161,19 +272,19 @@ static void AiRangeTick() {
         // "Buffer: generating", and a progress post would stomp it
 
         // The yield rule: one page minimum; extras only while the tick is
-        // still fresh. The check runs AFTER a page completes and one OCR page
-        // can cost 100-300ms on this thread, so a small budget here means the
-        // loop breaks between pages - never mid-page.
+        // still fresh. Cached pages cost microseconds, so a small budget here
+        // means the loop breaks between pages - never mid-page.
         if (GetTickCount() - startTick >= 12) break;
     }
 
-    // The idle tail scales with what the pages actually cost. The old pump
+    // The idle tail scales with what the ticks actually cost. The old pump
     // (15ms tick, 20ms budget) was a continuous saturate - the message loop
     // never drained, and the low-level mouse hook riding it stalled the whole
-    // machine's pointer for as long as the extraction ran. Cheap cached pages
-    // keep the run brisk; OCR-heavy pages earn the loop a long clean breath
-    // between blocks. Start (what=0) leans a little tighter - someone is
-    // waiting; the background jobs (1/2/3) yield generously.
+    // machine's pointer for as long as the extraction ran. Cached pages keep
+    // the run brisk; Start (what=0) leans a little tighter - someone is
+    // waiting; the background jobs (1/2/3) yield generously. A parked tick
+    // (OCR in flight) re-checks gently - the arrival re-kicks in 1ms anyway,
+    // this is only the backstop for a flight that died silently.
     DWORD spent = GetTickCount() - startTick;
     DWORD idle = g_range.what == 0 ? max<DWORD>(30, min<DWORD>(120, spent))
                                    : max<DWORD>(50, min<DWORD>(280, spent * 2));
@@ -241,7 +352,7 @@ static void AiRangeTick() {
         AiPost(e);
         return;
     }
-    SetTimer(g.main, 4714, idle, nullptr);
+    SetTimer(g.main, 4714, parked ? 90 : idle, nullptr);
 }
 
 // ---- the document index pump (OCR one page per tick) ----
@@ -311,10 +422,21 @@ static void AiIndexTick() {
         if (!queued.empty()) AiStartReplyThread(key, queued);
         return;
     }
-    TxtPage* pt = TtFor(D, p);
-    if (pt && !pt->cells.empty()) {
+    // the same disease the range pump had: TtFor built the page synchronously
+    // and froze the message loop 100-200ms a page while the index built. The
+    // async flight parks this pump instead; the arrival re-kicks it in 1ms.
+    auto it = D.txt.find(p);
+    if (it == D.txt.end()) {
+        if (AiOcrPrewarm(D, p)) return;   // parked; the flight's arrival continues
+        TxtPage empty; empty.w = D.pw[p]; empty.h = D.ph[p];   // no engine / render failed
+        empty.tick = ++D.tick;
+        D.txt.emplace(p, std::move(empty));
+        TtTrim(D, p);
+        it = D.txt.find(p);
+    }
+    if (it != D.txt.end() && !it->second.cells.empty()) {
         std::vector<AiWordIn> words;
-        AiPageWords(*pt, p, words);
+        AiPageWords(it->second, p, words);
         for (auto& w : words) g_aiIdxChunk->Append(w);
     }
     g_aiIdxPage++;
@@ -1200,7 +1322,13 @@ static void SumOpen(int mode) {
 }
 
 // ---- the summary's generation thread ----
-static void AiSumRun(unsigned long long gen, const std::string& docId,
+// `run` is the run token this thread was born under: a redirected Start bumps
+// g_sumRun, and every busy-flag write below is gated on still owning it - a
+// dying run must never un-busy the run that replaced it. `cancel` is this
+// run's OWN stop flag (one per run): the redirect sets the old flag, not the
+// new one, so the two runs never race the same boolean.
+static void AiSumRun(unsigned long long gen, unsigned long long run,
+                     std::shared_ptr<std::atomic<bool>> cancel, const std::string& docId,
                      std::wstring rangeText, int first, int last,
                      int words, std::string lang, std::string genre, bool bypass) {
     AiLoadSettings();
@@ -1211,7 +1339,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
         AiEv* e = AiEvMake(AIEV_SUM_NOTEXT);
         e->gen = gen;
         AiPost(e);                       // the panel learns on the pump's thread
-        g_sumBusy = false;
+        if (run == g_sumRun) g_sumBusy = false;
         return;
     }
     std::string hash = [&] {
@@ -1232,7 +1360,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
         e->a = WxU(cached);
         e->b = "fromCache";
         AiPost(e);
-        g_sumBusy = false;
+        if (run == g_sumRun) g_sumBusy = false;
         return;
     }
     std::string sys = PromptBodyOf(genre.c_str());
@@ -1262,12 +1390,12 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
                                    e->a = piece;
                                    AiPost(e);
                                }
-                           }, full, err, &g_sumCancel);
-    if (g_sumCancel.load()) {
+                           }, full, err, cancel.get());
+    if (cancel->load()) {
         AiEv* e = AiEvMake(AIEV_SUM_PROGRESS);
         e->gen = gen; e->a = WxU(L"Stopped");
         AiPost(e);
-        g_sumBusy = false;
+        if (run == g_sumRun) g_sumBusy = false;
         return;
     }
     if (!ok || full.empty()) {
@@ -1275,7 +1403,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
         std::string content;
         AiError e2;
         if (AiChatBuffered(cfg, sys, {}, user, budget * 2, nullptr, true, content, e2,
-                           &g_sumCancel) && !content.empty())
+                           cancel.get()) && !content.empty())
             full = content;
         else {
             AiEv* e = AiEvMake(AIEV_SUM_ERROR);
@@ -1286,7 +1414,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
                 msg = L"Authentication failed (API key invalid or expired). Please check your AI API key in Settings.";
             e->a = WxU(msg);
             AiPost(e);
-            g_sumBusy = false;
+            if (run == g_sumRun) g_sumBusy = false;
             return;
         }
     }
@@ -1304,7 +1432,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
     e->a = WxU(answer);
     e->b = "gen";
     AiPost(e);
-    g_sumBusy = false;
+    if (run == g_sumRun) g_sumBusy = false;
 }
 
 // ---- the summarizer panel's messages ----
@@ -1319,16 +1447,32 @@ static void SumPanelMessage(const wchar_t* json) {
         g_sumReady = true;
         SumSendInit();
     } else if (t == "start") {
-        if (g_sumBusy) return;
+        // A second Start is a REDIRECT, not a drop. The old gate swallowed the
+        // click while a run was busy: the page kept saying "Reading pages..."
+        // and every back / forth / range switch went nowhere - the user's
+        // "nothing, same shit". The extraction pump is a cheap cursor (it just
+        // turns to the new range) and a streaming model call dies on its own
+        // per-run cancel flag; the old run's leftovers are all gen-gated away
+        // by the page. The new run owns the busy flag from here.
         const crxk::J* g = m.get("gen"), * w = m.get("words"), * st = m.get("start"),
             * rg = m.get("range"), * lg = m.get("lang"), * gr = m.get("genre"), * bp = m.get("bypass");
         unsigned long long gen = g ? (unsigned long long)g->d : ++g_sumGen;
+        g_sumGen = gen;                      // the accepted gen: stale completions
+                                             // recognize themselves against it
+        ++g_sumRun;                          // the new run owns the busy flag
+        if (g_sumBusy) {
+            if (g_sumCancel) *g_sumCancel = true;   // the old stream folds quietly
+            if (!(g_range.active && (g_range.what == 0 || g_range.what == 2)))
+                g_range.active = false;   // a model-phase run: the pump is idle;
+                                          // an extraction in flight just gets
+                                          // overwritten by the AiRangeStart below
+        }
+        g_sumCancel = std::make_shared<std::atomic<bool>>(false);
         int words = w ? (int)w->d : 1000;
         std::string lang = lg && lg->t == 's' ? lg->s : "English";
         std::string genre = gr && gr->t == 's' ? gr->s : "nonfiction_classic";
         bool bypass = bp && bp->b;
         g_sumBusy = true;
-        g_sumCancel = false;
         if (g_sumMode == 0) {
             if (st && st->t == 'd') g_sumStart = max(1, (int)st->d);
             if (rg && rg->t == 'd') g_sumRange = max(1, (int)rg->d);
@@ -1352,8 +1496,20 @@ static void SumPanelMessage(const wchar_t* json) {
             g_sumWebPending = gen;
             AiWebExtract(gen);
         }
+    } else if (t == "cancel") {
+        // the buffer fast-path displayed its ready summary while a generation
+        // was still breathing behind it: the old run folds quietly (its posts
+        // are gen-gated away) and the busy flag dies with it - no reset, the
+        // cache and the digest stay
+        if (g_sumCancel) *g_sumCancel = true;
+        g_range.active = false;
+        KillTimer(g.main, 4714);
+        g_sumBusy = false;
     } else if (t == "reset") {
-        g_sumCancel = true;
+        if (g_sumCancel) *g_sumCancel = true;
+        g_range.active = false;              // an extraction in flight dies with
+        KillTimer(g.main, 4714);             // the reset - the old code left the
+                                             // pump grinding a wiped range
         g_sumBusy = false;
         if (g_sumMode == 0) {
             DocState& D = DVF();
@@ -1606,7 +1762,8 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         SumSavePlacement();
         SumUnhookMouse();
         g_sumHideTick = 0;
-        g_sumCancel = true;
+        if (g_sumCancel) *g_sumCancel = true;
+        g_range.active = false;
         g_sumWnd = nullptr;
         g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false;
         return 0;

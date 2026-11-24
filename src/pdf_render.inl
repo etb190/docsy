@@ -793,6 +793,30 @@ static int FdMatch(const TxtPage& pt, const std::wstring& query, bool matchCase,
 
 // ---------------- text selection app glue ----------------
 
+// The one OCR engine, created on first touch from the user's languages (no pack
+// means selection is quietly off). Shared by the synchronous build below and by
+// the AI pumps' async prewarm, so both faces read the same engine.
+static winrt::Windows::Media::Ocr::OcrEngine OcrEngineGet() {
+    static winrt::Windows::Media::Ocr::OcrEngine s_ocr = nullptr;
+    static bool s_tried = false;
+    if (!s_tried) {
+        s_tried = true;
+        s_ocr = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages();
+    }
+    return s_ocr;
+}
+// The text cache's LRU tail: drop the stalest page's geometry past 256 entries
+// (a 2,000-cell page is ~100KB, so 256 pages ride comfortably under 30MB).
+// TtFor and the AI pumps' async arrivals both store through here.
+static void TtTrim(DocState& D, int keepIdx) {
+    while (D.txt.size() > 256) {
+        auto oldest = D.txt.end();
+        for (auto x = D.txt.begin(); x != D.txt.end(); ++x)
+            if (x->first != keepIdx && (oldest == D.txt.end() || x->second.tick < oldest->second.tick)) oldest = x;
+        if (oldest == D.txt.end()) break;
+        D.txt.erase(oldest);
+    }
+}
 // Per-page text geometry, built lazily on first touch (cursor, press or a selection
 // slice) and LRU-capped at 48 pages, so a 2,000-page book never pre-extracts.
 static TxtPage* TtFor(DocState& D, int i) {
@@ -807,12 +831,7 @@ static TxtPage* TtFor(DocState& D, int i) {
         // pipeline below. Built lazily on first touch and LRU-capped, so a 2,000-page
         // book never OCRs what you never touch; no OCR language pack means selection
         // is quietly off and the page keeps its pan gesture.
-        static winrt::Windows::Media::Ocr::OcrEngine s_ocr = nullptr;
-        static bool s_tried = false;
-        if (!s_tried) {
-            s_tried = true;
-            s_ocr = winrt::Windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages();
-        }
+        auto s_ocr = OcrEngineGet();
         if (s_ocr) {
             int ow = std::clamp((int)std::lround(D.pw[i] * 2), 800, 1600);
             int oh = max(1, (int)std::lround(ow * D.ph[i] / max(1.f, D.pw[i])));
@@ -837,13 +856,7 @@ static TxtPage* TtFor(DocState& D, int i) {
     TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
     pt.tick = ++D.tick;
     D.txt[i] = std::move(pt);
-    while (D.txt.size() > 256) {            // LRU: drop the stalest page's geometry (a
-        auto oldest = D.txt.end();          // 2,000-cell page is ~100KB, so 256 pages ride
-        for (auto x = D.txt.begin(); x != D.txt.end(); ++x)   // comfortably under 30MB)
-            if (x->first != i && (oldest == D.txt.end() || x->second.tick < oldest->second.tick)) oldest = x;
-        if (oldest == D.txt.end()) break;
-        D.txt.erase(oldest);
-    }
+    TtTrim(D, i);
     return &D.txt[i];
 }
 

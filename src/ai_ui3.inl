@@ -468,14 +468,18 @@ static void AiHandleEvent(AiEv* e) {
             int first = g_range.first, last = g_range.last;
             AiNotesRunModel(text, first, last);
         } else if (what == 2) {
-            // the beaker's range test: the tester probe answers what it saw
+            // the beaker's range test: the tester probe answers what it saw.
+            // The run token rides along like any summary thread: a Start
+            // pressed mid-test redirects (bumps g_sumRun), and this probe's
+            // completion must not un-busy the run that replaced it.
             unsigned long long gen = e->gen;
+            unsigned long long run = g_sumRun;
             std::wstring text = WxW(e->a);
-            std::thread([gen, text]() {
+            std::thread([gen, run, text]() {
                 if (AiLetters(text) < 50) {
                     SumPost("{\"cmd\":\"test-out\",\"gen\":" + std::to_string(gen) +
                             ",\"text\":\"The selected pages have no readable text to verify.\",\"ok\":false}");
-                    g_sumBusy = false;
+                    if (run == g_sumRun) g_sumBusy = false;
                     return;
                 }
                 AiLoadSettings();
@@ -489,20 +493,24 @@ static void AiHandleEvent(AiEv* e) {
                 SumPost("{\"cmd\":\"test-out\",\"gen\":" + std::to_string(gen) +
                         ",\"text\":" + WxJsonStr(out) +
                         ",\"ok\":" + (ok ? "true" : "false") + "}");
-                g_sumBusy = false;
+                if (run == g_sumRun) g_sumBusy = false;
             }).detach();
         } else if (what == 0) {
-            // summary: the thread takes the text
-            if (g_sumThread.joinable()) g_sumThread.join();
+            // summary: the thread takes the text. The doc's cache key rides
+            // the extraction job's own path - DVF() or the index pump's path
+            // can point somewhere else by the time the extraction lands, and
+            // a digest cached under the wrong document is a digest lost.
             unsigned long long gen = e->gen;
             std::wstring text = WxW(e->a);
             int first = g_range.first, last = g_range.last;
             int words = g_range.words;
             std::string lang = g_range.lang, genre = g_range.genre;
             bool bypass = g_range.bypass;
-            std::string docId = AiDocSessionKey(g_aiIdxPath.empty() ? DVF().path : g_aiIdxPath);
-            std::thread([gen, docId, text, first, last, words, lang, genre, bypass]() {
-                AiSumRun(gen, docId, text, first, last, words, lang, genre, bypass);
+            std::string docId = AiDocSessionKey(g_range.path);
+            unsigned long long run = g_sumRun;          // this thread's owner token
+            auto cancel = g_sumCancel;                  // this run's own stop flag
+            std::thread([gen, run, cancel, docId, text, first, last, words, lang, genre, bypass]() {
+                AiSumRun(gen, run, cancel, docId, text, first, last, words, lang, genre, bypass);
             }).detach();
         }
         break;
@@ -525,7 +533,10 @@ static void AiHandleEvent(AiEv* e) {
                 ",\"text\":" + WxJsonStr(e->a) +
                 ",\"status\":" + WxJsonStr(status) +
                 ",\"model\":" + WxJsonStr(g_aiCfg.model) + "}");
-        if (g_sumMode == 0) {
+        // the saved digest rides the CURRENT run's gen: a superseded run's
+        // completion (its text already gen-gated away on the page) must not
+        // overwrite the digest row with the old range
+        if (g_sumMode == 0 && e->gen == g_sumGen) {
             DocState& D = DVF();
             if (!D.path.empty()) {
                 std::string docId = AiDocSessionKey(D.path);

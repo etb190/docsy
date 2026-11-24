@@ -4,6 +4,7 @@ static void AiOverlayLayout();              // the AI panel's bounds ride every 
 static void AiIndexTick();                  // the AI workers' pumps ride the main timer
 static void AiRangeTick();
 static void AiHandleEvent(AiEv* e);
+static void AiOcrArrive(AiOcrPayload* pl);  // the OCR flight's landing (async page text)
 
 // The AI panel's docked column: Avalanche's AiChatOverlay Width=380, squeezed
 // before it would crowd the page out (the old overlay's 80px floor, kept).
@@ -645,6 +646,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;                                 // (the find bar's pumps ride the view)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
     case WM_APP + 71: AiHandleEvent((AiEv*)lp); return 0;   // the AI workers' event pump
+    case WM_APP + 72: AiOcrArrive((AiOcrPayload*)lp); return 0;   // the OCR flight lands:
+                                          // one page's text geometry, built on its own
+                                          // async completion - the UI thread only stores
     case WM_APP + 5: WxInstallDone((WxJob*)lp); return 0;   // an extension download finished
     case WM_APP + 7: WxEngineRestart(); return 0;   // the deferred engine restart: a fresh
                                                     // browser process for extension operations

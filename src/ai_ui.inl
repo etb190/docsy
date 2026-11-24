@@ -77,10 +77,18 @@ static bool g_sumBuilding = false, g_sumReady = false;
 static int g_sumMode = 0;                // 0 doc, 1 web
 static std::wstring g_sumDocPath;
 static int g_sumPageCount = 0, g_sumStart = 1, g_sumRange = 20;
-static unsigned long long g_sumGen = 0;
+static unsigned long long g_sumGen = 0;   // the gen the page's last accepted start rode
+                                          // - a completion whose gen differs is stale and
+                                          // only its display is gen-gated away, never its
+                                          // state writes
+static unsigned long long g_sumRun = 0;   // bumped by every accepted start: the owner of
+                                          // the busy flag. A superseded run's dying thread
+                                          // sees its own run number gone and stands down
+                                          // instead of un-busying the run that replaced it
 static unsigned long long g_sumWebPending = 0;   // the web summary waiting on its extraction
-static std::thread g_sumThread;
-static std::atomic<bool> g_sumCancel{ false };
+static std::shared_ptr<std::atomic<bool>> g_sumCancel;   // the CURRENT run's stop flag -
+                                          // one flag per run, so a redirected Start folds
+                                          // the old stream without racing the new one's flag
 static bool g_sumBusy = false;
 static std::wstring g_sumOwnerPanePath;  // the pane whose pages the window follows
 

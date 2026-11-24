@@ -30,6 +30,23 @@ struct AiEv {
     double d = 0;
     bool flag = false;
 };
+struct AiOcrPayload {                    // one finished OCR page, marshaled home
+                                         // on WM_APP + 72 (the async flight's
+                                         // landing - the recognition ran on its
+                                         // own async completion, never on the
+                                         // thread that asked for the page)
+    std::wstring path;                   // the document it belongs to: an
+                                         // arrival whose document is gone dies
+    int page = -1;                       // 0-based page index
+    int ow = 0, oh = 0;                  // the OCR raster the boxes are native
+                                         // to; the UI thread scales them into
+                                         // page DIPs where D.pw/D.ph live
+    bool ok = false;                     // false = the engine failed: the
+                                         // arrival parks an empty page so the
+                                         // waiting pump moves on instead of
+                                         // re-asking forever
+    std::vector<TxtCell> cells;          // boxes in OCR pixels
+};
 static void AiPost(AiEv* e) {
     // the main frame owns the AI event queue: its proc answers WM_APP + 71
     // with AiHandleEvent, on the UI thread, whether or not any AI surface is

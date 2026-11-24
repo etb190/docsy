@@ -351,6 +351,7 @@ var S = {
   typeTimer: null,
   lastPaint: 0,
   busy: false,
+  lastStart: 0,
   pingEnabled: true,
   bufferEnabled: true,
   recapEnabled: false,
@@ -592,10 +593,11 @@ function overlay(text, err){
 }
 function setBusy(on){
   S.busy=on;
-  $("bStart").disabled=on; $("startBox").disabled=on;
-  document.querySelectorAll(".chip").forEach(function(c){ c.disabled=on; });
-  $("words").disabled=on; $("lang").disabled=on; $("genre").disabled=on;
-  $("prompt").disabled=on; $("wordsW").disabled=on; $("langW").disabled=on;
+  // the controls stay alive during a run: the host treats a second Start as a
+  // redirect (it folds the old stream and turns the extraction pump to the new
+  // range), and back / forth do exactly what they say - disabling them while a
+  // range was grinding was the "nothing happens when I click" trap. The dots
+  // and the status line say busy; the buttons keep working.
 }
 function fmtRange(){
   return Math.min(S.start + S.rangePages - 1, S.pageCount);
@@ -697,10 +699,9 @@ function commitStartBox(str){
   var v=parseInt(str.replace(/[^0-9]/g,""),10);
   if(!isNaN(v) && v>=1 && v<=S.pageCount){
     if(v!==S.start){
-      S.start=v;
+      if(!startGen(false, v)) return;   // stay put when the debounce ate it
       refreshNav();
       post({type:"page", page:S.start});
-      startGen(false);
       return;
     }
   }
@@ -759,6 +760,8 @@ function handleHostMessage(m){
     break;
 
   case "progress":
+    if(S.gen!==m.gen) return;   // a superseded run's last words die here - the
+                                // status line belongs to the run the page asked for
     status(m.text||"");
     break;
 
@@ -792,6 +795,7 @@ function handleHostMessage(m){
 
   case "done":
     if(S.gen!==m.gen) return;
+    S.generating=false;
     S.incoming=[];
     S.full=m.text||"";
     S.shown=S.full.length;
@@ -819,6 +823,7 @@ function handleHostMessage(m){
 
   case "notext":
     if(S.gen!==m.gen) return;
+    S.generating=false;
     setBusy(false); typeStop(); emptyState(false,false);
     overlay("The selected pages have no readable text to summarize.",false);
     status("");
@@ -826,6 +831,7 @@ function handleHostMessage(m){
 
   case "error":
     if(S.gen!==m.gen) return;
+    S.generating=false;
     setBusy(false); typeStop(); emptyState(false,false);
     $("digest").innerHTML="";
     overlay(m.text||"Summary failed.",true);
@@ -834,6 +840,7 @@ function handleHostMessage(m){
 
   case "stopped":
     if(S.gen!==m.gen) return;
+    S.generating=false;
     paintAll(); setBusy(false); emptyState(false,false);
     overlay("",false); status("Stopped");
     break;
@@ -914,8 +921,16 @@ function curSel(){
 }
 
 /* ---- Panel -> C++ ---- */
-function startGen(bypass){
-  if(S.busy) return;   // the host drops a start while it is busy - stay in step
+// `startOverride` moves S.start only when the start is actually sent: a click
+// inside the 300ms debounce leaves the view exactly where it was, instead of
+// moving the range and silently generating nothing (the old "nothing happens"
+// trap). Every start is SENT now - the host redirects a running generation,
+// it never drops one.
+function startGen(bypass, startOverride){
+  var now=Date.now();
+  if(S.lastStart && now-S.lastStart<300) return false;   // a double-click is one intent
+  S.lastStart=now;
+  if(startOverride!==undefined) S.start=startOverride;
   var c=curSel();
   S.gen++; S.generating=true; S.full=""; S.shown=0; S.incoming=[];
   S.genStartTime=Date.now();
@@ -929,6 +944,7 @@ function startGen(bypass){
     type:"start", gen:S.gen, start:S.start, range:S.rangePages,
     words:c.words, lang:c.lang, genre:c.genre, bypass:!!bypass
   });
+  return true;
 }
 
 function saveCurrentDigest(){
@@ -958,24 +974,22 @@ $("bReset").onclick=function(){
 
 $("bPrev").onclick=function(){
   if(S.start<=1) return;
-  S.start=Math.max(1, S.start - S.rangePages);
+  if(!startGen(false, Math.max(1, S.start - S.rangePages))) return;   // stay put when the debounce ate it
   refreshNav();
   post({type:"page", page:S.start});
-  startGen(false);
 };
 
 $("bNext").onclick=function(){
   var end=fmtRange();
   if(end>=S.pageCount) return;
   var nextStart=end+1;
-  S.start=nextStart;
-  refreshNav();
-  post({type:"page", page:S.start});
-  // Check if buffer is ready for this exact stretch!
+  // Check if buffer is ready for this exact stretch: display it instantly and
+  // fold whatever is still running behind it (a cancel is a courtesy here -
+  // the old run's posts are gen-gated away either way)
   if(prefetch.ready && prefetch.start===nextStart && prefetch.text){
-    S.gen++;
-    S.generating=false;
-    S.incoming=[];
+    post({type:"cancel"});
+    S.gen++; S.generating=false; S.incoming=[];
+    S.start=nextStart;
     S.full=prefetch.text;
     S.shown=S.full.length;
     typeStop();
@@ -983,12 +997,15 @@ $("bNext").onclick=function(){
     setBusy(false);
     emptyState(false,false);
     overlay("",false);
+    refreshNav();
     updateDoneStatus();
     saveCurrentDigest();
     checkPrefetchBuffer();
-  }else{
-    startGen(false);
+    return;
   }
+  if(!startGen(false, nextStart)) return;   // stay put when the debounce ate it
+  refreshNav();
+  post({type:"page", page:S.start});
 };
 
 document.querySelectorAll(".chip").forEach(function(c){
