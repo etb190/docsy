@@ -44,3 +44,4 @@ static void AiChatToggle();
 static void AiModeChanged();
 static void AiOverlayLayout();
 static void SumToggle(int mode);
+static void SumOwnerMoved();   // the frame moved: the summary popup rides along

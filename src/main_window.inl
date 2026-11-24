@@ -282,6 +282,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                             // cluster vanishes until a hover repaints it
         DwmApply(h);   // corners square off while maximized, round again on restore
         return 0;
+    case WM_MOVE:
+        SumOwnerMoved();   // the frame dragged: the summary popup rides along,
+                           // and its clamp keeps it inside the frame it belongs to
+        return 0;
     case WM_PAINT: {   // the custom caption row; the children paint their own areas
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT r; GetClientRect(h, &r);

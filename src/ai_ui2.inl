@@ -8,6 +8,12 @@ static void AiPanelMessage(const wchar_t* json);
 static void SumPanelMessage(const wchar_t* json);
 static void SumPost(const std::string& j);
 static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
+static void SumCloseSoon();      // the popup contract: deactivate rolls it up
+static void SumSavePlacement();  // one settings write per gesture, not per pixel
+
+static bool g_sumClosePending = false;   // a delayed teardown is on the clock
+static RECT g_sumOwnerPrev{};            // the frame's last screen rect: the
+                                         // popup rides its moves like a pane
 
 // ---- the page text builder: [p. N] anchored, running paragraphs ----
 static std::wstring AiPageTextFrom(const DocState& D, int page) {
@@ -117,12 +123,15 @@ static void AiRangeTick() {
             SumPost("{\"cmd\":\"progress\",\"gen\":" + std::to_string(g_range.gen) +
                     ",\"text\":\"Reading pages " + std::to_string(g_range.first) + "-" +
                     std::to_string(min(g_range.cur - 1, g_range.last)) + " of " +
-                    std::to_string(g_range.last) + "\u2026\"}");
+                    // the ellipsis rides as explicit UTF-8 bytes: a narrow \u escape
+                    // folds to the ANSI codepage byte 0x85, and WxW's CP_UTF8 read
+                    // turns that into the lone '?' the status bar used to show
+                    std::to_string(g_range.last) + "\xe2\x80\xa6\"}");
         } else if (g_range.what == 2) {
             SumPost("{\"cmd\":\"test-progress\",\"gen\":" + std::to_string(g_range.gen) +
                     ",\"text\":\"Reading pages " + std::to_string(g_range.first) + "-" +
                     std::to_string(min(g_range.cur - 1, g_range.last)) + " of " +
-                    std::to_string(g_range.last) + "\u2026\"}");
+                    std::to_string(g_range.last) + "\xe2\x80\xa6\"}");
         } else if (g_range.what == 1 && (p & 3) == 0) {
             AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
             e->flag = true;
@@ -644,7 +653,7 @@ static void NotesPanelMessage(const wchar_t* json) {
         if (ok) {
             for (auto& card : g_aiNotesCards) {
                 std::string html = AiMdToHtml("**Pages " + std::to_string(card.first) +
-                                              " \u2013 " + std::to_string(card.last) +
+                                              " \xe2\x80\x93 " + std::to_string(card.last) +
                                               "**\n\n" + card.content);
                 if (!AiAxoAppend(D.path, html, card.first, card.last)) { ok = false; break; }
             }
@@ -855,7 +864,10 @@ static void SumEnsure() {
                 c->get_CoreWebView2(&g_sumWeb);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
-                    c2->put_DefaultBackgroundColor({ 255, 0x1c, 0x1c, 0x1c });
+                    c2->put_DefaultBackgroundColor({ 0, 0, 0, 0 });   // the grain field
+                                              // shows through, like the notes and
+                                              // chat faces - the card sits on the
+                                              // app's noise, not on its own paint
                 EventRegistrationToken tk;
                 g_sumWeb->add_WebMessageReceived(
                     Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
@@ -874,9 +886,58 @@ static void SumEnsure() {
                 return S_OK;
             }).Get());
 }
-static void SumToggle(int mode) { SumOpen(mode); }
+// ---- the popup contract's helpers ----
+// The navigator is a popup of the frame, not a free window: it closes on a
+// click anywhere outside its borders (WM_ACTIVATE's WA_INACTIVE below), and
+// that close walks out slowly - one script call first, so the digest's scroll
+// position lands in the settings file before the webview tears down.
+static void SumCloseSoon() {
+    if (!g_sumWnd || g_sumClosePending) return;
+    g_sumClosePending = true;
+    if (g_sumWeb)   // the digest's scroll rides out before the teardown
+        g_sumWeb->ExecuteScript(L"window.__sumSaveScroll&&window.__sumSaveScroll();", nullptr);
+    SetTimer(g_sumWnd, 4719, 300, nullptr);
+}
+static void SumSavePlacement() {
+    if (!g_sumWnd || IsIconic(g_sumWnd)) return;
+    RECT wr; GetWindowRect(g_sumWnd, &wr);
+    double dpi = g.dpi > 0 ? g.dpi : 1.0;
+    AiSetSetting("summary.win.w", std::to_string((int)((wr.right - wr.left) / dpi)));
+    AiSetSetting("summary.win.h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
+    if (g.main && !IsIconic(g.main)) {   // the popup's seat is relative to the
+        RECT mr; GetWindowRect(g.main, &mr);   // frame - it belongs to the app,
+        AiSetSetting("summary.win.relx",       // not to the desktop
+                     std::to_string((int)((wr.left - mr.left) / dpi)));
+        AiSetSetting("summary.win.rely",
+                     std::to_string((int)((wr.top - mr.top) / dpi)));
+    }
+}
+// the frame moved: the popup rides along like any docked pane, and the
+// WINDOWPOSCHANGING clamp below keeps it inside the frame while it goes
+static void SumOwnerMoved() {
+    if (!g.main || IsIconic(g.main)) return;
+    RECT mr; GetWindowRect(g.main, &mr);
+    if (g_sumOwnerPrev.right > g_sumOwnerPrev.left && g_sumWnd && IsWindowVisible(g_sumWnd)) {
+        int dx = mr.left - g_sumOwnerPrev.left, dy = mr.top - g_sumOwnerPrev.top;
+        if (dx || dy) {
+            RECT wr; GetWindowRect(g_sumWnd, &wr);
+            SetWindowPos(g_sumWnd, nullptr, wr.left + dx, wr.top + dy, 0, 0,
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+    }
+    g_sumOwnerPrev = mr;
+}
+static void SumToggle(int mode) {
+    if (g_sumWnd && IsWindowVisible(g_sumWnd) && !g_sumClosePending && g_sumMode == mode) {
+        SumCloseSoon();   // the toolbar button is a toggle: open again rolls it up
+        return;
+    }
+    SumOpen(mode);
+}
 static void SumOpen(int mode) {
     if (g_sumWnd) {
+        g_sumClosePending = false;               // a pending close is withdrawn:
+        KillTimer(g_sumWnd, 4719);               // the user came back before the bell
         if (g_sumMode != mode) {
             g_sumMode = mode;
             if (g_sumCtr) { g_sumCtr->Close(); g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false; }
@@ -903,23 +964,45 @@ static void SumOpen(int mode) {
     int defW = (int)(560 * dpi), defH = (int)(630 * dpi);
     std::string sW = AiGetSetting("summary.win.w");
     std::string sH = AiGetSetting("summary.win.h");
-    std::string sL = AiGetSetting("summary.win.left");
-    std::string sT = AiGetSetting("summary.win.top");
     int w = sW.empty() ? defW : max((int)(460 * dpi), (int)(atof(sW.c_str()) * dpi));
     int h = sH.empty() ? defH : max((int)(390 * dpi), (int)(atof(sH.c_str()) * dpi));
-    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
-    if (!sL.empty() && !sT.empty()) {
-        int candX = (int)(atof(sL.c_str()) * dpi);
-        int candY = (int)(atof(sT.c_str()) * dpi);
-        RECT rTest{ candX, candY, candX + w, candY + h };
-        if (MonitorFromRect(&rTest, MONITOR_DEFAULTTONULL)) {
-            x = candX; y = candY;
+    // the popup's seat is the frame's seat: centered over the app on first
+    // open, then the saved offset from the frame's corner (a plain absolute
+    // restore put it wherever the desktop last saw it - the old windows-own-
+    // desktop behavior the popup is here to bury)
+    RECT mr{ 0, 0, 0, 0 };
+    if (g.main) GetWindowRect(g.main, &mr);
+    int x = mr.left + max(0, ((mr.right - mr.left) - w) / 2);
+    int y = mr.top + max(0, ((mr.bottom - mr.top) - h) / 3);
+    std::string sRX = AiGetSetting("summary.win.relx");
+    std::string sRY = AiGetSetting("summary.win.rely");
+    if (!sRX.empty() && !sRY.empty()) {
+        x = mr.left + (int)(atof(sRX.c_str()) * dpi);
+        y = mr.top + (int)(atof(sRY.c_str()) * dpi);
+    } else {
+        std::string sL = AiGetSetting("summary.win.left");
+        std::string sT = AiGetSetting("summary.win.top");
+        if (!sL.empty() && !sT.empty()) {   // a pre-popup session's absolute seat
+            x = (int)(atof(sL.c_str()) * dpi);   // migrates: the clamp below
+            y = (int)(atof(sT.c_str()) * dpi);   // pulls it back inside the app
         }
     }
-    DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_CAPTION) | WS_CLIPCHILDREN;
+    if (mr.right > mr.left) {   // never even propose a seat outside the frame
+        int maxX = max(mr.left, mr.right - w);
+        int maxY = max(mr.top, mr.bottom - h);
+        if (x < mr.left) x = mr.left;
+        if (x > maxX) x = maxX;
+        if (y < mr.top) y = mr.top;
+        if (y > maxY) y = maxY;
+    }
+    // WS_POPUP + THICKFRAME: the history popup's "part of the app" birth with
+    // the resize bands kept; no caption boxes, so the HTML bar's drag handle
+    // can't maximize it by accident. TOOLWINDOW keeps it out of Alt-Tab -
+    // it is a pane that floats, not a window that lives on its own.
+    DWORD style = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
     RECT rc{ 0, 0, w, h };
     AdjustWindowRect(&rc, style, FALSE);
-    g_sumWnd = CreateWindowExW(0, L"docsy_sum", L"Page Summary",
+    g_sumWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"docsy_sum", L"Page Summary",
                                style | WS_VISIBLE,
                                x, y,
                                rc.right - rc.left, rc.bottom - rc.top,
@@ -928,6 +1011,8 @@ static void SumOpen(int mode) {
         SetWindowPos(g_sumWnd, nullptr, 0, 0, 0, 0,
                      SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         DwmApply(g_sumWnd);    // the card's rounded corners + tinted border
+        g_sumOwnerPrev = RECT{};
+        if (g.main) GetWindowRect(g.main, &g_sumOwnerPrev);
     }
     if (g_sumMode == 1) g_sumReady = true;
     SumEnsure();
@@ -1094,6 +1179,26 @@ static void SumPanelMessage(const wchar_t* json) {
             if (!D.path.empty()) {
                 std::string docId = AiDocSessionKey(D.path);
                 AiSetSetting("summary.digest." + docId, "");
+                // Reset's whole point: Start must build anew, not replay the
+                // cache the last run left. The digest setting alone never
+                // touched summary_cache.json, so the very next Start answered
+                // "fromCache" with the same text the user just wiped.
+                int last = min(g_sumStart + g_sumRange - 1, D.n);
+                AiCacheDeleteRange(docId, g_sumStart, last);
+                AiSetSetting("summary.digest." + docId + ".first", "");
+                AiSetSetting("summary.digest." + docId + ".last", "");
+                AiSetSetting("summary.digest." + docId + ".model", "");
+                AiSetSetting("summary.digest." + docId + ".scroll", "");
+            }
+        }
+    } else if (t == "save-scroll") {   // the digest's reader seat, per document
+        const crxk::J* tp = m.get("top");
+        if (g_sumMode == 0 && tp && tp->t == 'd') {
+            DocState& D = DVF();
+            if (!D.path.empty()) {
+                std::string docId = AiDocSessionKey(D.path);
+                int top = max(0, (int)tp->d);
+                AiSetSetting("summary.digest." + docId + ".scroll", std::to_string(top));
             }
         }
     } else if (t == "close") {
@@ -1257,6 +1362,77 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         break;
     }
+    case WM_WINDOWPOSCHANGING: {   // the popup is part of the app: no drag, no
+                                   // restore, no ride-along may carry it past
+                                   // the frame that owns it
+        WINDOWPOS* p = (WINDOWPOS*)lp;
+        if (p && g.main && !(p->flags & SWP_NOMOVE)) {
+            RECT mr;
+            GetWindowRect(g.main, &mr);
+            int w = p->cx, hgt = p->cy;
+            if ((p->flags & SWP_NOSIZE) || w <= 0 || hgt <= 0) {
+                RECT wr; GetWindowRect(h, &wr);
+                w = wr.right - wr.left; hgt = wr.bottom - wr.top;
+            }
+            int maxX = max(mr.left, mr.right - w);
+            int maxY = max(mr.top, mr.bottom - hgt);
+            if (p->x < mr.left) p->x = mr.left;
+            if (p->x > maxX) p->x = maxX;
+            if (p->y < mr.top) p->y = mr.top;
+            if (p->y > maxY) p->y = maxY;
+        }
+        break;
+    }
+    case WM_ERASEBKGND: {   // the family noise: one grain tile, phased to the
+                            // frame the way every pane's fill phases (the ask
+                            // dialog's SetBrushOrgEx recipe)
+        HDC dc = (HDC)wp;
+        RECT rc; GetClientRect(h, &rc);
+        if (g.main) {
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+            SetBrushOrgEx(dc, -po.x, -po.y, nullptr);
+        }
+        FillRect(dc, &rc, GrainBrush(1));
+        return 1;
+    }
+    case WM_PAINT: {   // the transparent webview lets the grain through - the
+                       // window itself lays the tile down on every expose
+        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
+        RECT rc; GetClientRect(h, &rc);
+        if (g.main) {
+            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
+            SetBrushOrgEx(dc, -po.x, -po.y, nullptr);
+        }
+        FillRect(dc, &rc, GrainBrush(1));
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ACTIVATE: {   // the popup contract (the ask dialog's): a click
+                          // anywhere outside - the main frame, another app,
+                          // the taskbar - rolls the window up. The one pardon:
+                          // an activation that stays in our own tree (the
+                          // webview's dropdown popups are owned by us, and
+                          // their GA_ROOT still lands on this window)
+        if (g_sumWnd == h) {
+            if (LOWORD(wp) == WA_INACTIVE) {
+                HWND to = (HWND)lp;
+                if (!to || (GetAncestor(to, GA_ROOT) != h && !IsChild(h, to)))
+                    SumCloseSoon();
+            } else {
+                g_sumClosePending = false;   // back on top before the bell:
+                KillTimer(h, 4719);          // the close is withdrawn
+            }
+        }
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == 4719) {   // SumCloseSoon's bell: the scroll is saved by now
+            g_sumClosePending = false;
+            KillTimer(h, 4719);
+            DestroyWindow(h);
+            return 0;
+        }
+        break;
     case WM_GETMINMAXINFO: {   // SummaryWindow: MinWidth 460, MinHeight 390
         DefWindowProcW(h, m, wp, lp);
         MINMAXINFO* mmi = (MINMAXINFO*)lp;
@@ -1264,32 +1440,23 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         mmi->ptMinTrackSize.y = (int)(390 * g.dpi);
         return 0;
     }
-    case WM_MOVE:
     case WM_SIZE: {
-        if (g_sumCtr && m == WM_SIZE) {
+        if (g_sumCtr) {
             RECT r; GetClientRect(h, &r);
             g_sumCtr->put_Bounds(r);
         }
-        if (m == WM_SIZE) DwmApply(h);       // corner rounding flips when the window maximizes
-        if (!IsIconic(h) && !IsZoomed(h) && IsWindowVisible(h)) {
-            RECT wr; GetWindowRect(h, &wr);
-            double dpi = g.dpi > 0 ? g.dpi : 1.0;
-            AiSetSetting("summary.win.w", std::to_string((int)((wr.right - wr.left) / dpi)));
-            AiSetSetting("summary.win.h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
-            AiSetSetting("summary.win.left", std::to_string((int)(wr.left / dpi)));
-            AiSetSetting("summary.win.top", std::to_string((int)(wr.top / dpi)));
-        }
+        DwmApply(h);       // corner rounding flips when the window maximizes
         return 0;
     }
+    case WM_EXITSIZEMOVE:   // one settings write per gesture, not per pixel -
+                            // the old WM_MOVE save rewrote settings.json four
+                            // times a pixel while the window dragged
+        SumSavePlacement();
+        return 0;
     case WM_DESTROY: {
-        if (!IsIconic(h) && !IsZoomed(h)) {
-            RECT wr; GetWindowRect(h, &wr);
-            double dpi = g.dpi > 0 ? g.dpi : 1.0;
-            AiSetSetting("summary.win.w", std::to_string((int)((wr.right - wr.left) / dpi)));
-            AiSetSetting("summary.win.h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
-            AiSetSetting("summary.win.left", std::to_string((int)(wr.left / dpi)));
-            AiSetSetting("summary.win.top", std::to_string((int)(wr.top / dpi)));
-        }
+        SumSavePlacement();
+        KillTimer(h, 4719);
+        g_sumClosePending = false;
         g_sumCancel = true;
         g_sumWnd = nullptr;
         g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false;

@@ -23,13 +23,17 @@
   --platebg:rgba(27, 94, 32, 0.70); --plateedge:rgba(15, 61, 20, 0.90);
   --digest:13px;
 }
+/* The card sits on the app's grain field - the host window lays the noise
+   tile down and this page paints nothing behind its rows, exactly like the
+   notes and chat faces (put_DefaultBackgroundColor(0,0,0,0) up top). */
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%; overflow:hidden;}
-body{background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif;
+body{background:transparent; color:var(--text); font-family:"Segoe UI",sans-serif;
   font-size:13px; -webkit-user-select:none; user-select:none; cursor:default;}
 ::-webkit-scrollbar{width:10px;}
-::-webkit-scrollbar-thumb{background:#3a3a3a; border-radius:5px; border:2px solid var(--bg);}
-::-webkit-scrollbar-thumb:hover{background:#4a4a4a;}
+::-webkit-scrollbar-thumb{background:#3a3a3a; border-radius:5px; border:2px solid transparent;
+  background-clip:padding-box;}
+::-webkit-scrollbar-thumb:hover{background:#4a4a4a; background-clip:padding-box;}
 #app{display:flex; flex-direction:column; height:100%;}
 #body{flex:1 1 auto; display:flex; flex-direction:column; min-height:0;}
 .row{flex:0 0 auto;}
@@ -347,7 +351,8 @@ var S = {
   bufferEnabled: true,
   recapEnabled: false,
   discordEnabled: false,
-  genStartTime: 0
+  genStartTime: 0,
+  model: ""
 };
 
 var prefetch = {
@@ -365,7 +370,25 @@ $("titlebar").addEventListener("mousedown", function(e){
   if(e.button!==0 || e.target.closest(".tbtn")) return;
   post({type:"drag"});
 });
-$("bClose").onclick=function(){ post({type:"close"}); };
+
+/* ---- The digest's reader seat ----
+   Every close path (chip, Esc, a click anywhere outside the popup) saves the
+   scroll first: the C++ side's __sumSaveScroll call before its teardown and
+   the throttled trail here land the same message, so reopening puts you back
+   on the line you left, on top of the summary that was up when you closed. */
+var scrollSaveTimer=null;
+function requestScrollSave(){
+  if(scrollSaveTimer) return;
+  scrollSaveTimer=setTimeout(function(){
+    scrollSaveTimer=null;
+    post({type:"save-scroll", top:Math.max(0,Math.round($("digest").scrollTop))});
+  },300);
+}
+window.__sumSaveScroll=function(){
+  if(scrollSaveTimer){ clearTimeout(scrollSaveTimer); scrollSaveTimer=null; }
+  post({type:"save-scroll", top:Math.max(0,Math.round($("digest").scrollTop))});
+};
+$("bClose").onclick=function(){ window.__sumSaveScroll(); post({type:"close"}); };
 
 var F=13;
 try{ F=Math.min(24,Math.max(10,parseInt(localStorage.getItem("summary.font")||"13",10)||13)); }catch(e){}
@@ -548,7 +571,7 @@ function updateWordHighlight(e){
 }
 $("digest").addEventListener("mousemove", updateWordHighlight);
 $("digest").addEventListener("mouseleave", hideWordPlate);
-$("digest").addEventListener("scroll", hideWordPlate);
+$("digest").addEventListener("scroll", function(){ hideWordPlate(); requestScrollSave(); });
 
 /* ---- Card States & Nav ---- */
 function emptyState(idle, busy){
@@ -689,6 +712,7 @@ function handleHostMessage(m){
     S.pageCount=m.pageCount||1;
     S.start=m.start||1;
     S.rangePages=m.rangePages||20;
+    S.model=m.model||"";
     if(m.ping!==undefined) S.pingEnabled=!!m.ping;
     if(m.buffer!==undefined) S.bufferEnabled=!!m.buffer;
     if(m.recap!==undefined) S.recapEnabled=!!m.recap;
@@ -709,12 +733,20 @@ function handleHostMessage(m){
     $("chipsWeb").style.display=isWeb?"flex":"none";
     if(isWeb) $("stBuffer").textContent="";   // the buffer is a doc-mode animal
     fillCombos(m);
+    // the digest that is about to come up was written at its own stretch:
+    // the navigator re-seats on that start, not on the last page-turn
+    if(m.digest && m.digestFirst) S.start=Math.max(1, parseInt(m.digestFirst,10)||S.start);
     refreshNav();
-    $("stModel").textContent=m.model?("Model: "+m.model):"";
+    $("stModel").textContent=S.model?("Model: "+S.model):"";
 
     if(m.digest){
       S.full=m.digest; S.shown=S.full.length; paint();
+      if(m.digestModel) $("stModel").textContent="Model: "+m.digestModel;
       updateDoneStatus(m.status);
+      if(m.digestScroll){
+        var ds=Math.max(0, parseInt(m.digestScroll,10)||0);
+        setTimeout(function(){ try{ $("digest").scrollTop=ds; }catch(e){} },0);
+      }
       checkPrefetchBuffer();
     }else{
       S.full=""; S.shown=0; $("digest").innerHTML=""; emptyState(true,false);
@@ -884,7 +916,9 @@ function startGen(bypass){
   S.gen++; S.generating=true; S.full=""; S.shown=0; S.incoming=[];
   S.genStartTime=Date.now();
   $("digest").innerHTML=""; overlay("",false); emptyState(true,true);
-  $("stModel").textContent="Model: ...";
+  // the model keeps its name while it works - the blank "Model: ..." felt
+  // like the window forgot what it was doing
+  $("stModel").textContent=S.model?("Model: "+S.model):"";
   $("stBuffer").textContent="";
   setBusy(true);
   post({
@@ -908,7 +942,13 @@ $("bStart").onclick=function(){ startGen(false); };
 $("bReset").onclick=function(){
   S.gen++; S.generating=false; S.full=""; S.shown=0; S.incoming=[]; typeStop();
   $("digest").innerHTML=""; overlay("",false); emptyState(true,false);
-  status(""); $("stModel").textContent=""; $("stBuffer").textContent="";
+  try{ $("digest").scrollTop=0; }catch(e){}
+  window.__sumSaveScroll();   // the wiped board also clears the saved seat (C++
+                              // wipes the digest row and its cache entry)
+  status("Range cleared - press Start for a fresh summary");
+  $("stModel").textContent=S.model?("Model: "+S.model):"";
+  $("stBuffer").textContent="";
+  prefetch.text=""; prefetch.ready=false;
   setBusy(false); post({type:"reset"});
 };
 
@@ -958,7 +998,7 @@ document.querySelectorAll(".chip").forEach(function(c){
 });
 
 document.addEventListener("keydown", function(e){
-  if(e.key==="Escape"){ post({type:"close"}); return; }
+  if(e.key==="Escape"){ window.__sumSaveScroll(); post({type:"close"}); return; }
   if(e.ctrlKey||e.altKey||e.shiftKey||e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
   if(e.key==="w"||e.key==="ArrowUp"){ scrollBySmooth(-1); }
   else if(e.key==="s"||e.key==="ArrowDown"){ scrollBySmooth(1); }
