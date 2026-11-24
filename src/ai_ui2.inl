@@ -13,6 +13,53 @@ static void SumHide(bool fromOutside);   // the popup contract: a click outside
 static void SumPrewarm();        // the idle seat: window + webview build hidden
 static void SumSavePlacement();  // one settings write per gesture, not per pixel
 
+#include <mmsystem.h>            // PlaySound - the fold's chime lives below
+
+// ---- the completion chime, native ----
+// The page's Web Audio chime only answers while the webview renders: a folded
+// popup (put_IsVisible FALSE, the page visibility "hidden") gives no guarantee
+// its AudioContext breathes, and the user's rule is the chime rides whenever a
+// run or a buffer lands - window open or not. So the fold's own ear: the same
+// two-tone D5 -> A5 the page plays, synthesized once into a 16-bit mono WAV
+// image and handed to PlaySound. No asset, no dependency beyond winmm.
+static void SumPingNative() {
+    static unsigned char* wav = nullptr;    // process-lifetime: SND_ASYNC keeps
+                                            // playing against it after we return
+    if (!wav) {
+        const DWORD rate = 22050;
+        const double dur = 0.55, d5 = 587.33, a5 = 880.0, peak = 0.4;
+        const DWORD samples = (DWORD)(rate * dur);
+        const DWORD dataLen = samples * 2;
+        const DWORD fileLen = 36 + dataLen;
+        unsigned char* w = new unsigned char[44 + dataLen];
+        if (!w) return;
+        auto put32 = [&](DWORD v, int at) {
+            w[at] = v & 255; w[at + 1] = (v >> 8) & 255;
+            w[at + 2] = (v >> 16) & 255; w[at + 3] = (v >> 24) & 255;
+        };
+        auto put16 = [&](DWORD v, int at) {
+            w[at] = v & 255; w[at + 1] = (v >> 8) & 255;
+        };
+        memcpy(w, "RIFF", 4); put32(fileLen, 4); memcpy(w + 8, "WAVE", 12);
+        memcpy(w + 12, "fmt ", 4); put32(16, 16); put16(1, 20); put16(1, 22);
+        put32(rate, 24); put32(rate * 2, 28); put16(2, 32); put16(16, 34);
+        memcpy(w + 36, "data", 4); put32(dataLen, 40);
+        short* s = (short*)(w + 44);
+        for (DWORD i = 0; i < samples; i++) {
+            double t = (double)i / rate;
+            // the page's envelope: gain 0.12 at t=0, exponentialRamp to 0.001
+            // at t=0.55 - same shape, scaled to a volume an ear across the
+            // room still catches
+            double g = peak * std::pow(0.001 / 0.12, t / dur);
+            double f = t < 0.12 ? d5 : a5;
+            s[i] = (short)(std::sin(6.283185307179586 * f * t) * g * 32767.0);
+        }
+        wav = w;
+    }
+    PlaySoundW((LPCWSTR)wav, nullptr,
+               SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
+}
+
 static DWORD g_sumHideTick = 0;          // when an outside click folded it: the
                                          // toolbar's own click must not reopen
 static RECT g_sumOwnerPrev{};            // the frame's last screen rect: the
@@ -296,7 +343,19 @@ static void AiRangeTick() {
             // the buffer's quiet fill: cache first, then a background model
             // thread - nothing here needs the event pump
             DocState& D = DVF();
-            if (D.path.empty() || D.path != g_range.path || g_range.text.empty()) return;
+            if (D.path.empty() || D.path != g_range.path) return;   // a different
+                                            // document owns the seat now - the
+                                            // page's own re-init reset its buffer
+                                            // chip; nothing to tell anyone
+            if (g_range.text.empty()) {   // no readable text in the stretch: the
+                                          // page must hear the fill ended, or
+                                          // "Buffer: generating" hangs forever
+                AiEv* pe = AiEvMake(AIEV_SUM_PREFETCH);
+                pe->key = std::to_string(g_range.first);
+                pe->a = "";
+                AiPost(pe);
+                return;
+            }
             int first = g_range.first, last = g_range.last, words = g_range.words;
             std::string lang = g_range.lang, genre = g_range.genre;
             std::string docId = AiDocSessionKey(D.path);
@@ -311,9 +370,18 @@ static void AiRangeTick() {
             for (int i = 0; i < 32; i++) { hash[i * 2] = hx[sha[i] >> 4]; hash[i * 2 + 1] = hx[sha[i] & 15]; }
             std::string cached;
             if (AiCacheGet(docId, first, last, model, variant, hash, cached)) {
+                // a lookup, not work: it lands the same breath the request
+                // left - no chime, the done chime for the digest on screen
+                // just played (the buffer's chime is for a fill that took
+                // real time, and an instant replay of it is noise)
                 SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
-                        ",\"text\":" + WxJsonStr(cached) + "}");
-            } else if (!g_sumBusy) {
+                        ",\"text\":" + WxJsonStr(cached) + ",\"ping\":false}");
+            } else {
+                // The fill never refused to run again: the old !g_sumBusy gate
+                // dropped the whole job whenever a summary was streaming, and
+                // the page kept saying "Buffer: generating" over a buffer that
+                // would never come. The model call is independent; two HTTP
+                // calls in flight are fine.
                 std::thread([docId, rangeText, first, last, words, lang, genre, hash]() {
                     AiLoadSettings();
                     AiCfg cfg = g_aiCfg;
@@ -331,16 +399,25 @@ static void AiRangeTick() {
                     std::string content;
                     AiError err;
                     std::atomic<bool> cancel{ false };
+                    std::string answer;
                     if (AiChatBuffered(cfg, sys, {}, user, budget, nullptr, true, content, err, &cancel) && !content.empty()) {
-                        std::string answer = AiExtractStreamingAnswer(content);
+                        answer = AiExtractStreamingAnswer(content);
                         if (answer.empty()) answer = AiParseStructured(AiStripThinkSpans(content)).answer;
                         if (answer.empty()) answer = content;
                         std::string mdl = WxU(cfg.model);
                         std::string var = lang + ":" + std::to_string(words) + ":" + genre;
                         AiCachePut(docId, first, last, mdl, var, hash, answer);
-                        SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
-                                ",\"text\":" + WxJsonStr(answer) + "}");
                     }
+                    // the answer rides the pump, never the thread: the old
+                    // SumPost here called PostWebMessageAsJson off the UI
+                    // thread and the delivery died in the apartment wall - the
+                    // cache filled, the page never heard a word of it, and
+                    // "Buffer: generating" hung forever. Empty = failed; the
+                    // handler turns that into prefetch-fail on the UI thread.
+                    AiEv* pe = AiEvMake(AIEV_SUM_PREFETCH);
+                    pe->key = std::to_string(first);
+                    pe->a = answer;
+                    AiPost(pe);
                 }).detach();
             }
             return;
@@ -1377,9 +1454,16 @@ static void AiSumRun(unsigned long long gen, unsigned long long run,
     // WxJsonStr returns a quoted literal - it can only ride a VALUE position;
     // embedded raw into "Connecting to ..." it minted a text field with naked
     // inner quotes, the panel's JSON.parse dropped it, and the connect line
-    // never showed. Quote the whole sentence instead.
-    SumPost("{\"cmd\":\"progress\",\"gen\":" + std::to_string(gen) +
-            ",\"text\":" + WxJsonStr("Connecting to " + model + "\xe2\x80\xa6") + "}");
+    // never showed. Quote the whole sentence instead. And the post rides the
+    // pump: this thread is not the UI thread, and a webview call from here
+    // dies in the apartment wall - the connect line was the least of what
+    // that wall ate.
+    {
+        AiEv* pe = AiEvMake(AIEV_SUM_PROGRESS);
+        pe->gen = gen;
+        pe->a = "Connecting to " + model + "\xe2\x80\xa6";
+        AiPost(pe);
+    }
     AiError err;
     std::string full;
     bool ok = AiChatStream(cfg, sys, {}, user, budget, nullptr, true,

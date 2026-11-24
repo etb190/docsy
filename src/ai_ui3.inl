@@ -479,8 +479,14 @@ static void AiHandleEvent(AiEv* e) {
             std::wstring text = WxW(e->a);
             std::thread([gen, run, text]() {
                 if (AiLetters(text) < 50) {
-                    SumPost("{\"cmd\":\"test-out\",\"gen\":" + std::to_string(gen) +
-                            ",\"text\":\"The selected pages have no readable text to verify.\",\"ok\":false}");
+                    // the probe's verdict rides the pump like every other
+                    // thread's word: a webview call from this thread died in
+                    // the apartment wall and the beaker never reported
+                    AiEv* te = AiEvMake(AIEV_SUM_TESTOUT);
+                    te->gen = gen;
+                    te->a = "The selected pages have no readable text to verify.";
+                    te->flag = false;
+                    AiPost(te);
                     if (run == g_sumRun) g_sumBusy = false;
                     return;
                 }
@@ -492,9 +498,11 @@ static void AiHandleEvent(AiEv* e) {
                 bool ok = AiChatBuffered(cfg, sys, {}, WxU(text), 2048,
                                          nullptr, true, content, err, nullptr);
                 std::string out = ok ? content : WxU(err.Friendly());
-                SumPost("{\"cmd\":\"test-out\",\"gen\":" + std::to_string(gen) +
-                        ",\"text\":" + WxJsonStr(out) +
-                        ",\"ok\":" + (ok ? "true" : "false") + "}");
+                AiEv* te = AiEvMake(AIEV_SUM_TESTOUT);
+                te->gen = gen;
+                te->a = out;
+                te->flag = ok;
+                AiPost(te);
                 if (run == g_sumRun) g_sumBusy = false;
             }).detach();
         } else if (what == 0) {
@@ -535,9 +543,21 @@ static void AiHandleEvent(AiEv* e) {
         std::string status = std::to_string(words) + " words · " +
                              std::to_string(e->a.size()) + " chars" +
                              (fromCache ? " · from cache" : "");
+        // the chime's own handoff: a visible popup lets the page play its Web
+        // Audio chime (the same rule for cache hits and fresh runs), a folded
+        // one gets the native ear - PlaySound answers whether or not any
+        // webview renders. The page learns which ear rang through "ping":
+        // false mutes its own chime so the room never hears a double.
+        bool winVisible = g_sumWnd && IsWindowVisible(g_sumWnd) != FALSE;
+        bool currentRun = e->gen == g_sumGen;   // a superseded run's chime
+                                                // belongs to no one alive
+        if (!winVisible && currentRun &&
+            AiGetSetting("summary.ping.enabled", "1") != "0")
+            SumPingNative();
         SumPost("{\"cmd\":\"done\",\"gen\":" + std::to_string(e->gen) +
                 ",\"text\":" + WxJsonStr(e->a) +
                 ",\"status\":" + WxJsonStr(status) +
+                ",\"ping\":" + (winVisible ? "true" : "false") +
                 ",\"model\":" + WxJsonStr(g_aiCfg.model) + "}");
         // the saved digest rides the CURRENT run's gen: a superseded run's
         // completion (its text already gen-gated away on the page) must not
@@ -571,6 +591,32 @@ static void AiHandleEvent(AiEv* e) {
     case AIEV_TEST_OUT:
         AiPanelSend("{\"cmd\":\"test\",\"text\":" + WxJsonStr(e->a) + "}");
         break;
+    case AIEV_SUM_TESTOUT:   // the beaker's verdict, landed on the UI thread
+                             // where the webview call can actually speak
+        SumPost("{\"cmd\":\"test-out\",\"gen\":" + std::to_string(e->gen) +
+                ",\"text\":" + WxJsonStr(e->a) +
+                ",\"ok\":" + (e->flag ? "true" : "false") + "}");
+        break;
+    case AIEV_SUM_PREFETCH: {   // the buffer's fill: the thread's word comes
+                                // home here, on the UI thread, before any
+                                // webview hears it. Empty = the fill failed
+                                // or found nothing - the page must hear that
+                                // too, or its chip hangs on "generating".
+        int first = atoi(e->key.c_str());
+        bool winVisible = g_sumWnd && IsWindowVisible(g_sumWnd) != FALSE;
+        if (!e->a.empty()) {
+            if (!winVisible &&
+                AiGetSetting("summary.ping.enabled", "1") != "0")
+                SumPingNative();   // the fill took real work - the ear rings
+                                   // even when the window is folded away
+            SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
+                    ",\"text\":" + WxJsonStr(e->a) +
+                    ",\"ping\":" + (winVisible ? "true" : "false") + "}");
+        } else {
+            SumPost("{\"cmd\":\"prefetch-fail\",\"start\":" + std::to_string(first) + "}");
+        }
+        break;
+    }
     default:
         break;
     }

@@ -744,7 +744,17 @@ function handleHostMessage(m){
     refreshNav();
     $("stModel").textContent=S.model?("Model: "+S.model):"";
 
+    // the re-init's mop: whatever the previous document or run left standing
+    // (busy dots, the empty-state card, a stale buffer chip, a dead run's
+    // gen) dies HERE, before the new state paints - the saved digest painting
+    // through the "Nothing summarized yet" card was exactly this mop missing
+    S.gen++; S.generating=false; S.incoming=[]; typeStop(); setBusy(false);
+    overlay("",false);
+    prefetch.text=""; prefetch.ready=false;
+    $("stBuffer").textContent="";
+
     if(m.digest){
+      emptyState(false,false);   // the empty card folds before the digest paints
       S.full=m.digest; S.shown=S.full.length; paint();
       if(m.digestModel) $("stModel").textContent="Model: "+m.digestModel;
       updateDoneStatus(m.status);
@@ -806,7 +816,10 @@ function handleHostMessage(m){
     overlay("",false);
     updateDoneStatus(m.status);
     $("stModel").textContent=m.model?("Model: "+m.model):"";
-    playPing();
+    // the chime is a handoff: the host rings its native ear when the popup is
+    // folded (a hidden page's AudioContext is not a clock you can trust) and
+    // tells us through "ping":false - play here only when the room is ours
+    if(m.ping!==false) playPing();
     saveCurrentDigest();
     checkPrefetchBuffer();
     break;
@@ -815,9 +828,21 @@ function handleHostMessage(m){
     if(prefetch.start===m.start && m.text){
       prefetch.text=m.text;
       prefetch.ready=true;
-      if(S.bufferEnabled && !S.generating){
-        $("stBuffer").textContent="Buffer: ready";
-      }
+      // the gate that hid "ready" while a run streamed is gone: the buffer's
+      // state is its own line, true however busy the digest above is, and the
+      // user asked to HEAR the fill land - the chime rides unless the host's
+      // native ear already rang it ("ping":false means folded window)
+      if(S.bufferEnabled) $("stBuffer").textContent="Buffer: ready";
+      if(m.ping!==false) playPing();
+    }
+    break;
+
+  case "prefetch-fail":
+    // the fill died or found nothing readable: the chip must move, or it
+    // would hang on "generating" over a buffer that will never come
+    if(prefetch.start===m.start){
+      prefetch.ready=false;
+      if(S.bufferEnabled) $("stBuffer").textContent="Buffer: failed";
     }
     break;
 
@@ -827,6 +852,8 @@ function handleHostMessage(m){
     setBusy(false); typeStop(); emptyState(false,false);
     overlay("The selected pages have no readable text to summarize.",false);
     status("");
+    checkPrefetchBuffer();   // the run died but the buffer's job is separate -
+                             // a dropped request gets re-asked here, not hung
     break;
 
   case "error":
@@ -836,6 +863,8 @@ function handleHostMessage(m){
     $("digest").innerHTML="";
     overlay(m.text||"Summary failed.",true);
     status(m.text ? ("Error: " + m.text) : "Failed");
+    checkPrefetchBuffer();   // the same safety net: an errored run must not
+                             // leave the buffer chip mid-sentence
     break;
 
   case "stopped":
@@ -843,6 +872,7 @@ function handleHostMessage(m){
     S.generating=false;
     paintAll(); setBusy(false); emptyState(false,false);
     overlay("",false); status("Stopped");
+    checkPrefetchBuffer();
     break;
 
   case "nav":

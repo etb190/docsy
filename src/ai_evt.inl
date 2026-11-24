@@ -20,7 +20,9 @@ enum AiEvKind {
     AIEV_NOTES_CARDS,     // b: cards blob
     AIEV_SUM_INIT, AIEV_SUM_PROGRESS, AIEV_SUM_DELTA, AIEV_SUM_DONE,
     AIEV_SUM_ERROR, AIEV_SUM_NOTEXT, AIEV_EXTRACT_DONE, AIEV_WEB_TEXT,
-    AIEV_ED_TEXT, AIEV_TEST_OUT, AIEV_AXO_DONE
+    AIEV_ED_TEXT, AIEV_TEST_OUT, AIEV_AXO_DONE,
+    AIEV_SUM_PREFETCH,    // a: buffer digest (empty = failed); key: first page
+    AIEV_SUM_TESTOUT      // a: beaker probe output; flag: ok; gen: the run
 };
 struct AiEv {
     AiEvKind kind;
