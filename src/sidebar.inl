@@ -376,7 +376,7 @@ static LRESULT CALLBACK RailProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT rr; GetClientRect(h, &rr);
         int hit = RailHitAt(p, rr.bottom);
-        if (hit >= 0 && g.railHot == hit) RailActivate(hit);   // press + release on one button
+        if (hit >= 0 && g.railHot == hit && RailEnabled(hit)) RailActivate(hit);   // press + release on enabled button
         InvalidateRect(h, nullptr, FALSE);
         return 0;
     }

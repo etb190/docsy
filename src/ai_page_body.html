@@ -52,52 +52,64 @@
     </div>
 
     <div class="ovl" id="setOvl">
-      <div class="ohead"><span style="flex:1">AI settings</span>
+      <div class="ohead"><span style="flex:1; font-weight:600;">AI Settings</span>
         <button class="ibtn" id="bSetClose" title="Close settings">&#xE711;</button></div>
       <div class="obody">
-        <div class="flabel">Model preset (Avalanche's dial)</div>
-        <select class="fbox" id="sPreset">
-          <option value="">(keep the fields as they are)</option>
-          <option value="gemini">Google Gemini 3.8 Flash</option>
-          <option value="gemini-3.7">Google Gemini 3.7 Flash</option>
-          <option value="gemini-3.6">Google Gemini 3.6 Flash</option>
+        <div class="flabel" style="font-weight:600; color:var(--text); margin-top:4px;">AI Model (Avalanche Model Dial)</div>
+        <select class="fbox" id="sModelDial" style="font-weight:600; font-size:12px; height:32px;">
+          <option value="gemini-3.6" selected>Google Gemini 3.6 Flash (Recommended)</option>
           <option value="gemini-3.5">Google Gemini 3.5 Flash</option>
           <option value="gemini-3.5-lite">Google Gemini 3.5 Flash Lite</option>
-          <option value="nemotron">NVIDIA Nemotron (NIM)</option>
-          <option value="kimi">Kimi K3 (NIM)</option>
+          <option value="gemini-3.7">Google Gemini 3.7 Flash</option>
+          <option value="gemini">Google Gemini 3.8 Flash</option>
+          <option value="nemotron">NVIDIA Nemotron (NIM Cloud)</option>
+          <option value="kimi">Moonshot Kimi K3 (NIM)</option>
           <option value="glm-flash">GLM 5.3 Flash (NIM)</option>
           <option value="glm-5.3">GLM 5.3 (NIM)</option>
-          <option value="gemma-4">Gemma 4 31B (NIM)</option>
+          <option value="gemma-4">Google Gemma 4 31B (NIM)</option>
           <option value="deepseek">DeepSeek V4.1 Flash (NIM)</option>
+          <option value="gpt-oss">Local Ollama (gpt-oss:120b-cloud)</option>
         </select>
-        <div class="flabel">Chat Base URL</div>
-        <input class="fbox" id="sUrl" placeholder="https://integrate.api.nvidia.com/v1">
-        <div class="flabel">Chat API Key</div>
-        <input class="fbox" id="sKey" type="password" placeholder="(empty = the bundled guest key rides)">
-        <div class="flabel">Chat Model</div>
-        <input class="fbox" id="sModel" placeholder="nvidia/nemotron-3-ultra-550b-a55b">
-        <div class="flabel">Temperature</div>
-        <input class="fbox" id="sTemp" type="number" step="0.1" min="0" max="2">
-        <div class="flabel">Max Tokens</div>
-        <input class="fbox" id="sTok" type="number" min="256">
-        <div class="flabel">Top P</div>
-        <input class="fbox" id="sTopP" type="number" step="0.05" min="0" max="1">
-        <div class="flabel">Reasoning Effort</div>
-        <select class="fbox" id="sEffort"><option value="">(none)</option><option>low</option><option>medium</option><option>high</option></select>
-        <div class="flabel">Embedding Model</div>
-        <input class="fbox" id="sEmb" placeholder="nvidia/nemotron-3-embed-1b">
-        <div class="flabel">Passages per question (Top K)</div>
-        <input class="fbox" id="sTopK" type="number" min="1">
-        <div class="flabel">Evidence character budget</div>
-        <input class="fbox" id="sBudget" type="number" min="1000">
-        <div class="flabel">History messages sent</div>
-        <input class="fbox" id="sHist" type="number" min="2">
-        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
-          <button class="abtn primary" id="bSave">Save</button>
-          <button class="abtn" id="bTest">Test connection</button>
+        <div class="flabel" style="margin-top:10px;">Custom API Key <span style="font-weight:normal; font-size:10px; color:var(--muted);">(optional - built-in Google & NIM guest keys included)</span></div>
+        <input class="fbox" id="sKey" type="password" placeholder="Using built-in guest key">
+        
+        <details style="margin-top:14px; font-size:11.5px; color:var(--muted); cursor:pointer;">
+          <summary style="font-weight:600; color:var(--text); padding:4px 0; outline:none;">Advanced Settings</summary>
+          <div style="padding-top:8px;">
+            <div class="flabel">Base URL</div>
+            <input class="fbox" id="sUrl" placeholder="https://generativelanguage.googleapis.com/v1beta/openai">
+            <div class="flabel">Model ID</div>
+            <input class="fbox" id="sModel" placeholder="gemini-3.6-flash">
+            <div style="display:flex; gap:8px;">
+              <div style="flex:1;">
+                <div class="flabel">Temperature</div>
+                <input class="fbox" id="sTemp" type="number" step="0.1" min="0" max="2" value="0.5">
+              </div>
+              <div style="flex:1;">
+                <div class="flabel">Max Tokens</div>
+                <input class="fbox" id="sTok" type="number" min="256" value="16384">
+              </div>
+              <div style="flex:1;">
+                <div class="flabel">Top P</div>
+                <input class="fbox" id="sTopP" type="number" step="0.05" min="0" max="1" value="0.95">
+              </div>
+            </div>
+            <div class="flabel">Reasoning Effort</div>
+            <select class="fbox" id="sEffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
+            <div class="flabel">Embedding Model</div>
+            <input class="fbox" id="sEmb" placeholder="gemini-embedding-2">
+            <input type="hidden" id="sTopK" value="24">
+            <input type="hidden" id="sBudget" value="40000">
+            <input type="hidden" id="sHist" value="6">
+          </div>
+        </details>
+
+        <div style="display:flex; gap:8px; margin-top:14px; align-items:center;">
+          <button class="abtn primary" id="bSave" style="min-width:80px;">Save Settings</button>
+          <button class="abtn" id="bTest">Test Connection</button>
         </div>
-        <div id="cloudNote"></div>
-        <div id="testOut"></div>
+        <div id="cloudNote" style="margin-top:8px; font-size:11px; color:var(--muted);"></div>
+        <div id="testOut" style="margin-top:6px; font-size:11.5px; font-weight:500;"></div>
       </div>
     </div>
 
@@ -354,21 +366,31 @@ $("bSave").onclick=function(){ post({type:"settings-save", settings:readSettings
    choice seats; the key field empties so the bundled guest key rides the
    transport (AiBearerKeyFor) - the reader's own key always overrides */
 var PRESETS={
-  "gemini":["https://generativelanguage.googleapis.com/v1beta/openai","gemini-3.8-flash"],
-  "gemini-3.7":["https://generativelanguage.googleapis.com/v1beta/openai","gemini-3.7-flash"],
   "gemini-3.6":["https://generativelanguage.googleapis.com/v1beta/openai","gemini-3.6-flash"],
   "gemini-3.5":["https://generativelanguage.googleapis.com/v1beta/openai","gemini-3.5-flash"],
   "gemini-3.5-lite":["https://generativelanguage.googleapis.com/v1beta/openai","gemini-3.5-flash-lite"],
+  "gemini-3.7":["https://generativelanguage.googleapis.com/v1beta/openai","gemini-3.7-flash"],
+  "gemini":["https://generativelanguage.googleapis.com/v1beta/openai","gemini-3.8-flash"],
   "nemotron":["https://integrate.api.nvidia.com/v1","nvidia/nemotron-3-ultra-550b-a55b"],
   "kimi":["https://integrate.api.nvidia.com/v1","moonshotai/kimi-k3"],
   "glm-flash":["https://integrate.api.nvidia.com/v1","z-ai/glm-5.3-flash"],
   "glm-5.3":["https://integrate.api.nvidia.com/v1","z-ai/glm-5.3"],
   "gemma-4":["https://integrate.api.nvidia.com/v1","google/gemma-4-31b-it"],
-  "deepseek":["https://integrate.api.nvidia.com/v1","deepseek-ai/deepseek-v4.1-flash"]
+  "deepseek":["https://integrate.api.nvidia.com/v1","deepseek-ai/deepseek-v4.1-flash"],
+  "gpt-oss":["http://localhost:11434/v1","gpt-oss:120b-cloud"]
 };
-$("sPreset").onchange=function(){ var p=PRESETS[this.value]; if(!p) return;
-  $("sUrl").value=p[0]; $("sModel").value=p[1]; $("sKey").value=""; };
-$("bTest").onclick=function(){ $("testOut").textContent="Testing…";
+var dialEl = $("sModelDial");
+if(dialEl){
+  dialEl.onchange=function(){
+    var p=PRESETS[this.value]; if(!p) return;
+    $("sUrl").value=p[0]; $("sModel").value=p[1];
+    if(this.value.startsWith("gemini")) $("sEmb").value="gemini-embedding-2";
+    else if(this.value.startsWith("nemotron") || this.value==="kimi" || this.value.startsWith("glm") || this.value==="deepseek" || this.value==="gemma-4") $("sEmb").value="nvidia/nemotron-3-embed-1b";
+    var local=/localhost|127\.0\.0\.1|\[::1?\]/.test($("sUrl").value);
+    $("cloudNote").style.display=local?"none":"block";
+  };
+}
+$("bTest").onclick=function(){ $("testOut").textContent="Testing connection…"; $("testOut").style.color="var(--muted)";
   post({type:"settings-test", settings:readSettings()}); };
 $("bHist").onclick=function(){ post({type:"history-open"}); };
 $("bHistBack").onclick=function(){ $("histOvl").style.display="none"; post({type:"history-back"}); };
@@ -401,26 +423,62 @@ $("setOvl").addEventListener("mousedown", function(e){
 
 /* ---------------- settings ---------------- */
 function fillSettings(s){
-  $("sUrl").value=s.baseUrl||""; $("sKey").value=s.apiKey||"";
-  $("sModel").value=s.model||""; $("sTemp").value=s.temperature!=null?s.temperature:0.5;
+  $("sUrl").value=s.baseUrl||"https://generativelanguage.googleapis.com/v1beta/openai";
+  $("sKey").value=s.apiKey||"";
+  $("sModel").value=s.model||"gemini-3.6-flash";
+  $("sTemp").value=s.temperature!=null?s.temperature:0.5;
   $("sTok").value=s.maxTokens!=null?s.maxTokens:16384;
   $("sTopP").value=s.topP!=null?s.topP:0.95;
   $("sEffort").value=s.reasoningEffort||"";
-  $("sEmb").value=s.embeddingModel||"";
+  $("sEmb").value=s.embeddingModel||"gemini-embedding-2";
   $("sTopK").value=s.topK!=null?s.topK:24;
   $("sBudget").value=s.evidenceBudget!=null?s.evidenceBudget:40000;
   $("sHist").value=s.maxHistory!=null?s.maxHistory:6;
+
+  // Match active model dial
+  var foundKey = "";
+  for(var k in PRESETS){
+    if(PRESETS[k][1] === s.model){ foundKey = k; break; }
+  }
+  if(!foundKey && s.model){
+    if(s.model.indexOf("gemini-3.6") !== -1) foundKey = "gemini-3.6";
+    else if(s.model.indexOf("gemini-3.5-flash-lite") !== -1) foundKey = "gemini-3.5-lite";
+    else if(s.model.indexOf("gemini-3.5") !== -1) foundKey = "gemini-3.5";
+    else if(s.model.indexOf("gemini-3.7") !== -1) foundKey = "gemini-3.7";
+    else if(s.model.indexOf("gemini") !== -1) foundKey = "gemini";
+    else if(s.model.indexOf("nemotron") !== -1) foundKey = "nemotron";
+    else if(s.model.indexOf("kimi") !== -1) foundKey = "kimi";
+    else if(s.model.indexOf("glm-5.3-flash") !== -1) foundKey = "glm-flash";
+    else if(s.model.indexOf("glm-5.3") !== -1) foundKey = "glm-5.3";
+    else if(s.model.indexOf("deepseek") !== -1) foundKey = "deepseek";
+    else if(s.model.indexOf("gemma-4") !== -1) foundKey = "gemma-4";
+    else if(s.model.indexOf("gpt-oss") !== -1) foundKey = "gpt-oss";
+  }
+  if(foundKey && $("sModelDial")) $("sModelDial").value = foundKey;
+  else if($("sModelDial")) $("sModelDial").value = "gemini-3.6";
+
   var local=/localhost|127\.0\.0\.1|\[::1?\]/.test($("sUrl").value)||!$("sUrl").value;
   $("cloudNote").style.display=local?"none":"block";
-  $("cloudNote").textContent="Cloud endpoint: your questions and document passages leave this machine.";
+  $("cloudNote").textContent="Cloud endpoint: questions and document passages leave this machine.";
 }
 function readSettings(){
-  return { baseUrl:$("sUrl").value.trim(), apiKey:$("sKey").value,
-    model:$("sModel").value.trim(), temperature:parseFloat($("sTemp").value)||0,
-    maxTokens:parseInt($("sTok").value,10)||16384, topP:parseFloat($("sTopP").value)||0.95,
-    reasoningEffort:$("sEffort").value, embeddingModel:$("sEmb").value.trim(),
-    topK:parseInt($("sTopK").value,10)||24, evidenceBudget:parseInt($("sBudget").value,10)||40000,
-    maxHistory:parseInt($("sHist").value,10)||6 };
+  var dialVal = $("sModelDial") ? $("sModelDial").value : "gemini-3.6";
+  var preset = PRESETS[dialVal];
+  var url = $("sUrl").value.trim() || (preset ? preset[0] : "https://generativelanguage.googleapis.com/v1beta/openai");
+  var mod = $("sModel").value.trim() || (preset ? preset[1] : "gemini-3.6-flash");
+  return {
+    baseUrl: url,
+    apiKey: $("sKey").value,
+    model: mod,
+    temperature: parseFloat($("sTemp").value)||0.5,
+    maxTokens: parseInt($("sTok").value,10)||16384,
+    topP: parseFloat($("sTopP").value)||0.95,
+    reasoningEffort: $("sEffort").value,
+    embeddingModel: $("sEmb").value.trim() || "gemini-embedding-2",
+    topK: parseInt($("sTopK").value,10)||24,
+    evidenceBudget: parseInt($("sBudget").value,10)||40000,
+    maxHistory: parseInt($("sHist").value,10)||6
+  };
 }
 
 /* ---------------- history ---------------- */

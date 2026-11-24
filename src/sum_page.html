@@ -96,10 +96,11 @@ body{background:var(--bg); color:var(--text); font-family:"Segoe UI",sans-serif;
 #bStart:disabled,#bReset:disabled{opacity:.35; cursor:default;}
 
 /* ---- Row 2: Range Chips & Selects ---- */
-#rangeRow{display:flex; align-items:center; justify-content:center; gap:5px;
+#rangeWrap{display:flex; flex-wrap:wrap; align-items:center; justify-content:center; gap:6px;
   margin:7px 14px 2px;}
-#comboRow{display:flex; align-items:center; justify-content:center; gap:8px;
-  margin:4px 14px 2px;}
+#rangePanel{display:flex; align-items:center; justify-content:center; gap:5px;}
+.range-divider{width:1px; height:20px; background:var(--cardborder); margin:0 4px; opacity:0.7;}
+#comboPanel{display:flex; align-items:center; justify-content:center; gap:8px;}
 #chipsWeb{display:flex; align-items:center; justify-content:center; gap:8px;
   margin:6px 14px 2px;}
 .chip{height:28px; min-width:38px; padding:0 9px; font-size:11.5px; font-weight:600;
@@ -129,8 +130,8 @@ select{
 select:hover{background-color:#333333; border-color:#505050;}
 select:focus{border-color:var(--selfg);}
 select option{background-color:#242424; color:#e0e0e0;}
-#words{width:110px;} #lang{width:130px;} #genre{width:170px;} #prompt{width:170px;}
-#wordsW{width:110px;} #langW{width:130px;}
+#words{width:90px;} #lang{width:112px;} #genre{width:150px;} #prompt{width:150px;}
+#wordsW{width:90px;} #langW{width:112px;}
 
 /* ---- Row 3: The Digest (Justified Typeset Page) ---- */
 #digestWrap{flex:1 1 auto; margin:6px 14px 2px; position:relative; min-height:0;}
@@ -188,8 +189,8 @@ select option{background-color:#242424; color:#e0e0e0;}
     <div id="mark"><b>docsy</b><span> - Page Summary</span></div>
     <div id="tbtns">
       <button class="tbtn" id="bTest" title="Test this range in AI Test">&#xE9D9;</button>
-      <button class="tbtn" id="bFontDn" title="Smaller digest text">&#xE949;</button>
-      <button class="tbtn" id="bFontUp" title="Larger digest text">&#xE94A;</button>
+      <button class="tbtn" id="bFontDn" title="Smaller digest text" style="font-family:'Segoe UI',sans-serif; font-size:14px; font-weight:600;">&#x2212;</button>
+      <button class="tbtn" id="bFontUp" title="Larger digest text" style="font-family:'Segoe UI',sans-serif; font-size:14px; font-weight:600;">+</button>
       <button class="tbtn close" id="bClose" title="Close (Esc)">&#xE8BB;</button>
     </div>
   </div>
@@ -225,63 +226,69 @@ select option{background-color:#242424; color:#e0e0e0;}
       <button id="bStart" title="Start summarizing the selected page range">Start</button>
       <button id="bReset" title="Reset summary and start over">Reset</button>
     </div>
-    <!-- Row 2a: Range Chips -->
-    <div class="row" id="rangeRow">
-      <button class="chip" data-p="1">1</button>
-      <button class="chip" data-p="5">5</button>
-      <button class="chip on" data-p="20">20</button>
-      <button class="chip" data-p="40">40</button>
-      <button class="chip" data-p="60">60</button>
-      <button class="chip" data-p="80">80</button>
-      <button class="chip" data-p="100">100</button>
-      <button class="chip" data-p="all">All</button>
-    </div>
-    <!-- Row 2b: Dropdowns -->
-    <div class="row" id="comboRow">
-      <select id="words" title="Target word limit for summary">
-        <option value="500">500 words</option>
-        <option value="1000" selected>1,000 words</option>
-        <option value="1500">1,500 words</option>
-        <option value="2000">2,000 words</option>
-      </select>
-      <select id="lang" title="Output summary language">
-        <option value="English" selected>English</option>
-        <option value="Spanish">Spanish</option>
-        <option value="French">French</option>
-        <option value="German">German</option>
-        <option value="Italian">Italian</option>
-        <option value="Portuguese">Portuguese</option>
-        <option value="Russian">Russian</option>
-        <option value="Chinese">Chinese</option>
-        <option value="Japanese">Japanese</option>
-        <option value="Korean">Korean</option>
-        <option value="Arabic">Arabic</option>
-      </select>
-      <select id="genre" title="Document genre prompt template">
-        <option value="nonfiction_classic" selected>Nonfiction</option>
-        <option value="fiction_literary">Fiction</option>
-        <option value="technical_academic">Technical / Academic</option>
-        <option value="biography_memoir">Biography / Memoir</option>
-        <option value="history">History</option>
-        <option value="philosophy">Philosophy</option>
-        <option value="science">Science</option>
-        <option value="selfhelp_business">Self-Help / Business</option>
-      </select>
+    <!-- Row 2: Range Chips & Dropdowns (Avalanche WrapPanel) -->
+    <div class="row" id="rangeWrap">
+      <div id="rangePanel">
+        <button class="chip" data-p="1">1</button>
+        <button class="chip" data-p="5">5</button>
+        <button class="chip on" data-p="20">20</button>
+        <button class="chip" data-p="40">40</button>
+        <button class="chip" data-p="60">60</button>
+        <button class="chip" data-p="80">80</button>
+        <button class="chip" data-p="100">100</button>
+        <button class="chip" data-p="all">All</button>
+      </div>
+      <div class="range-divider"></div>
+      <div id="comboPanel">
+        <select id="words" title="Target word limit for summary">
+          <option value="500">500</option>
+          <option value="750">750</option>
+          <option value="1000" selected>1,000</option>
+          <option value="1500">1,500</option>
+          <option value="2000">2,000</option>
+          <option value="3000">3,000</option>
+          <option value="4500">4,500</option>
+        </select>
+        <select id="lang" title="Output summary language">
+          <option value="English" selected>English</option>
+          <option value="French">French</option>
+          <option value="Spanish">Spanish</option>
+          <option value="Italian">Italian</option>
+          <option value="Arabic">Arabic</option>
+          <option value="German">German</option>
+          <option value="Chinese">Chinese</option>
+          <option value="Japanese">Japanese</option>
+          <option value="Russian">Russian</option>
+          <option value="Portuguese">Portuguese</option>
+        </select>
+        <select id="genre" title="Document genre prompt persona">
+          <option value="nonfiction_classic" selected>Nonfiction</option>
+          <option value="fiction">Fiction</option>
+          <option value="philosophical_fiction">Philosophical</option>
+          <option value="research_papers">Research</option>
+          <option value="self_help">Self-help</option>
+          <option value="law">Law</option>
+          <option value="history">History</option>
+          <option value="science">Science</option>
+          <option value="biography">Biography</option>
+        </select>
+      </div>
     </div>
     <div class="row" id="chipsWeb" style="display:none">
       <select id="prompt" title="Web summary prompt">
         <option value="web_nonfiction_classic" selected>Nonfiction</option>
       </select>
       <select id="wordsW" title="Target word limit">
-        <option value="500">500 words</option>
-        <option value="1000" selected>1,000 words</option>
-        <option value="1500">1,500 words</option>
-        <option value="2000">2,000 words</option>
+        <option value="500">500</option>
+        <option value="750">750</option>
+        <option value="1000" selected>1,000</option>
+        <option value="1500">1,500</option>
+        <option value="2000">2,000</option>
       </select>
       <select id="langW" title="Summary language">
         <option value="English" selected>English</option>
-        <option value="Spanish">Spanish</option>
         <option value="French">French</option>
+        <option value="Spanish">Spanish</option>
         <option value="German">German</option>
       </select>
     </div>
@@ -573,7 +580,7 @@ function refreshNav(){
   }
   $("bPrev").disabled=S.start<=1;
   $("bNext").disabled=end>=S.pageCount;
-  document.querySelectorAll("#chips .chip").forEach(function(c){
+  document.querySelectorAll(".chip").forEach(function(c){
     var p=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
     c.className="chip"+(p===S.rangePages?" on":"");
   });
@@ -691,8 +698,7 @@ function handleHostMessage(m){
 
     var isWeb=S.mode==="web";
     $("nav").style.display=isWeb?"none":"flex";
-    $("rangeRow").style.display=isWeb?"none":"flex";
-    $("comboRow").style.display=isWeb?"none":"flex";
+    $("rangeWrap").style.display=isWeb?"none":"flex";
     $("chipsWeb").style.display=isWeb?"flex":"none";
     fillCombos(m);
     refreshNav();

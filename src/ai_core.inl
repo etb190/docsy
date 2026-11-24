@@ -132,19 +132,17 @@ static std::wstring AiBearerKeyFor(const std::wstring& url, const std::wstring& 
 }
 
 // ---- the settings (AiProviderConfig + AiSettingsViewModel's fields) ----
-// Defaults wear the canonical nemotron: AiProviderConfig's own defaults ARE
-// the app's first brain - NVIDIA's NIM cloud API and
-// nvidia/nemotron-3-ultra-550b-a55b - the same seat the reference's fresh
-// config wears, with NIM's own embedding model on the same door.
+// Defaults wear the canonical Google Gemini 3.6 Flash guest on Google AI Studio:
+// fast (<1s), responsive, and authenticated via the bundled guest key.
 struct AiCfg {
-    std::wstring baseUrl = L"https://integrate.api.nvidia.com/v1";
+    std::wstring baseUrl = L"https://generativelanguage.googleapis.com/v1beta/openai";
     std::wstring apiKey;                       // empty = the bundled guest key rides
-    std::wstring model = L"nvidia/nemotron-3-ultra-550b-a55b";
-    double temperature = 0.2;
-    int maxTokens = 4096;
-    double topP = 1.0;
-    std::wstring reasoningEffort = L"low";     // low | medium | high | (empty)
-    std::wstring embeddingModel = L"nvidia/nemotron-3-embed-1b";
+    std::wstring model = L"gemini-3.6-flash";
+    double temperature = 0.5;
+    int maxTokens = 16384;
+    double topP = 0.95;
+    std::wstring reasoningEffort = L"";     // low | medium | high | (empty)
+    std::wstring embeddingModel = L"gemini-embedding-2";
     std::wstring embDocPrefix = L"title: none | text: ";
     std::wstring embQueryPrefix = L"task: search results | query: ";
     int topK = 24;

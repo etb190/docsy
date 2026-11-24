@@ -538,6 +538,7 @@ static void EditorToggle(bool on) {
     g_editOn = on;
     AiModeChanged();                               // the panel rebinds: editor <-> reader
     if (on) {
+        g_edSide = g.sideOn;
         if (g_webOn) WebToggle(false);
         if (g.side) ShowWindow(g.side, (g_edSide && !g.full) ? SW_SHOWNOACTIVATE : SW_HIDE);
         if (g.rail && !g.full) ShowWindow(g.rail, SW_SHOWNOACTIVATE);
@@ -555,6 +556,7 @@ static void EditorToggle(bool on) {
             EditorRailSync();                          // load and every change after it
         }
     } else {
+        g.sideOn = g_edSide;
         if (g_edCtr) g_edCtr->put_IsVisible(FALSE);
         if (g_etool) ShowWindow(g_etool, SW_HIDE);
         if (!g_webOn) {
@@ -578,7 +580,7 @@ static RECT EditorBtnRect(int id, int w, int h) {
     RECT res{ 0, 0, 0, 0 };
     for (int i = 0; i < EB_COUNT; i++) {
         RECT rc{ 0, 0, 0, 0 };
-        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Segoe UI"));
         DrawTextW(dc, EbLabel[i], -1, &rc, DT_CALCRECT | DT_SINGLELINE);
         SelectObject(dc, of);
         int bw = max((int)(24 * g.dpi), (int)(rc.right - rc.left)) + (int)(12 * g.dpi);
@@ -615,7 +617,7 @@ static void EditorToolDraw(HDC dc, int w, int h) {
     int capH = 0;
     {
         RECT mc{ 0, 0, 0, 0 };
-        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Segoe UI"));
         DrawTextW(dc, L"Editor", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
         SelectObject(dc, of);
         capH = mc.bottom - mc.top;
@@ -663,7 +665,7 @@ static void EditorToolDraw(HDC dc, int w, int h) {
         DrawTextW(dc, EbGlyph[i], -1, &gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         // Draw Label
-        SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Segoe UI"));
         SetTextColor(dc, RGB(16, 16, 16));
         RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
         DrawTextW(dc, EbLabel[i], -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);

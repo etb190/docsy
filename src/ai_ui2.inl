@@ -89,11 +89,8 @@ static void AiRangeStart(const std::wstring& path, int first, int last, int what
     g_range.text.clear();
     g_range.what = what;
     g_range.gen = gen;
-    // one page per 150ms, not 30: TtFor's first build on a dense page can eat
-    // 100-200ms of the UI thread, and a tick every 30ms with that inside it
-    // saturates the thread - the whole app read as 5 fps while the index built.
-    // At 150ms the thread keeps half its time free between pages.
-    SetTimer(g.main, 4714, 150, nullptr);
+    // Fast batch extraction at 15ms interval
+    SetTimer(g.main, 4714, 15, nullptr);
 }
 static void AiRangeTick() {
     if (!g_range.active) { KillTimer(g.main, 4714); return; }
@@ -105,8 +102,35 @@ static void AiRangeTick() {
         KillTimer(g.main, 4714);
         return;
     }
-    int p = g_range.cur;
-    if (p > g_range.last) {
+
+    DWORD startTick = GetTickCount();
+    while (g_range.cur <= g_range.last) {
+        int p = g_range.cur; // 1-based page number
+        std::wstring t = AiPageTextFrom(D, p - 1); // 0-based page index
+        if (!t.empty()) g_range.text += L"[p. " + std::to_wstring(p) + L"]\n" + t + L"\n\n";
+        g_range.cur++;
+
+        // Surface extraction progress to UI
+        if (g_range.what == 0) {
+            SumPost("{\"cmd\":\"progress\",\"gen\":" + std::to_string(g_range.gen) +
+                    ",\"text\":\"Reading pages " + std::to_string(g_range.first) + "-" +
+                    std::to_string(min(g_range.cur - 1, g_range.last)) + " of " +
+                    std::to_string(g_range.last) + "\u2026\"}");
+        } else if (g_range.what == 1 && (p & 3) == 0) {
+            AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
+            e->flag = true;
+            wchar_t b[160];
+            _snwprintf_s(b, _TRUNCATE, L"Extracting page %d of %d\u2026", p - g_range.first + 1,
+                         g_range.last - g_range.first + 1);
+            e->a = WxU(b);
+            AiPost(e);
+        }
+
+        // Limit each tick to ~20ms to keep UI responsive
+        if (GetTickCount() - startTick >= 20) break;
+    }
+
+    if (g_range.cur > g_range.last) {
         g_range.active = false;
         KillTimer(g.main, 4714);
         AiEv* e = AiEvMake(AIEV_EXTRACT_DONE);
@@ -115,18 +139,6 @@ static void AiRangeTick() {
         e->key = std::to_string(g_range.what);
         AiPost(e);
         return;
-    }
-    std::wstring t = AiPageTextFrom(D, p);
-    if (!t.empty()) g_range.text += L"[p. " + std::to_wstring(p + 1) + L"]\n" + t + L"\n\n";
-    g_range.cur++;
-    if (g_range.what == 1 && (p & 3) == 0) {
-        AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
-        e->flag = true;
-        wchar_t b[160];
-        _snwprintf_s(b, _TRUNCATE, L"Extracting page %d of %d\u2026", p - g_range.first + 1,
-                     g_range.last - g_range.first + 1);
-        e->a = WxU(b);
-        AiPost(e);
     }
 }
 
@@ -922,7 +934,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
     AiCfg cfg = g_aiCfg;
     std::wstring bodyW = std::regex_replace(rangeText,
         std::wregex(L"\\[{1,2}p\\.\\s*\\d+\\]{1,2}"), L"");
-    if (AiLetters(bodyW) < 250) {
+    if (AiLetters(bodyW) < 50) {
         AiEv* e = AiEvMake(AIEV_SUM_NOTEXT);
         e->gen = gen;
         AiPost(e);                       // the panel learns on the pump's thread
@@ -961,14 +973,18 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
     int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
     if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
     std::string user = WxU(rangeText);
+    SumPost("{\"cmd\":\"progress\",\"gen\":" + std::to_string(gen) +
+            ",\"text\":\"Connecting to " + WxJsonStr(model) + "\u2026\"}");
     AiError err;
     std::string full;
     bool ok = AiChatStream(cfg, sys, {}, user, budget, nullptr, true,
-                           [&](const std::string&) {
-                               AiEv* e = AiEvMake(AIEV_SUM_DELTA);
-                               e->gen = gen;
-                               e->a = WxU(AiExtractStreamingAnswer(full));
-                               AiPost(e);
+                           [&](const std::string& piece) {
+                               if (!piece.empty()) {
+                                   AiEv* e = AiEvMake(AIEV_SUM_DELTA);
+                                   e->gen = gen;
+                                   e->a = piece;
+                                   AiPost(e);
+                               }
                            }, full, err, &g_sumCancel);
     if (g_sumCancel.load()) {
         AiEv* e = AiEvMake(AIEV_SUM_PROGRESS);
@@ -977,7 +993,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
         g_sumBusy = false;
         return;
     }
-    if (!ok || AiExtractStreamingAnswer(full).empty()) {
+    if (!ok || full.empty()) {
         // one quiet buffered retry at twice the budget
         std::string content;
         AiError e2;
@@ -989,6 +1005,7 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
             e->gen = gen;
             std::wstring msg = !e2.detail.empty() ? e2.Friendly() : err.Friendly();
             if (msg.empty()) msg = !err.detail.empty() ? err.detail : L"Failed to generate summary. Please check your AI API key and connection.";
+            if (err.cat == AI_ERR_AUTH) msg = L"Authentication failed (API key invalid or expired). Please check your AI API key in Settings.";
             e->a = WxU(msg);
             AiPost(e);
             g_sumBusy = false;
