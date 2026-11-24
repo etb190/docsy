@@ -972,8 +972,8 @@ static void SumOpen(int mode) {
     // desktop behavior the popup is here to bury)
     RECT mr{ 0, 0, 0, 0 };
     if (g.main) GetWindowRect(g.main, &mr);
-    int x = mr.left + max(0, ((mr.right - mr.left) - w) / 2);
-    int y = mr.top + max(0, ((mr.bottom - mr.top) - h) / 3);
+    int x = mr.left + max(0, (int)(((mr.right - mr.left) - w) / 2));
+    int y = mr.top + max(0, (int)(((mr.bottom - mr.top) - h) / 3));
     std::string sRX = AiGetSetting("summary.win.relx");
     std::string sRY = AiGetSetting("summary.win.rely");
     if (!sRX.empty() && !sRY.empty()) {
