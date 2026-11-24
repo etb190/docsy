@@ -861,7 +861,16 @@ static void SumSendInit() {
 static void SumEnsure() {
     if (g_sumCtr || g_sumBuilding) return;
     WebEnsureEnv();
-    if (!g_wvEnv) return;
+    if (!g_wvEnv) {
+        // the engine warms up asynchronously: a silent bail here left the seat
+        // permanently empty, because the env's own completion retries the tabs
+        // and the editor but never this seat - the popup's first open then
+        // showed nothing but grain. A quiet knock retries until the env
+        // answers, and stands down the moment the runtime is declared absent.
+        if (g_sumWnd && !g_webFail) SetTimer(g_sumWnd, 4722, 250, nullptr);
+        return;
+    }
+    if (g_sumWnd) KillTimer(g_sumWnd, 4722);
     g_sumBuilding = true;
     g_wvEnv->CreateCoreWebView2Controller(
         g_sumWnd,
@@ -870,6 +879,11 @@ static void SumEnsure() {
                 g_sumBuilding = false;
                 if (FAILED(hr) || !c) return S_OK;
                 g_sumCtr = c;
+                // born against a hidden window (the prewarm seat): the runtime
+                // hands the controller over not-rendered, and it stays that way
+                // even after the popup unfolds - the grain showed, the page
+                // never did. The one who shows the window says it may draw.
+                c->put_IsVisible(IsWindowVisible(g_sumWnd) ? TRUE : FALSE);
                 c->get_CoreWebView2(&g_sumWeb);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
@@ -912,6 +926,12 @@ static void SumHide(bool fromOutside) {
     if (!g_sumWnd) return;
     if (g_sumWeb)   // the digest's reader seat rides out before the fold
         g_sumWeb->ExecuteScript(L"window.__sumSaveScroll&&window.__sumSaveScroll();", nullptr);
+    if (g_sumCtr) g_sumCtr->put_IsVisible(FALSE);   // folded = not rendered, not
+                                                    // dead: the page keeps its
+                                                    // DOM, a generation keeps
+                                                    // streaming into it, and the
+                                                    // compositor stops burning
+                                                    // frames nobody can see
     SumSavePlacement();
     ShowWindow(g_sumWnd, SW_HIDE);
     SumUnhookMouse();
@@ -1084,6 +1104,11 @@ static void SumOpen(int mode) {
         if (g_sumCtr) { g_sumCtr->Close(); g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false; }
     }
     ShowWindow(g_sumWnd, SW_SHOWNOACTIVATE);
+    if (g_sumCtr) g_sumCtr->put_IsVisible(TRUE);   // the fold took the render
+                                                   // away; the unfold hands it
+                                                   // back (the webview was born
+                                                   // hidden and never auto-follows
+                                                   // its parent's visibility)
     SetForegroundWindow(g_sumWnd);
     SumHookMouse();
     SumEnsure();   // no-ops while the webview lives; re-arms it after a mode switch
@@ -1492,6 +1517,13 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_APP + 61:   // the mouse watcher's verdict, run on the pump: a click
         SumHide(true);  // inside the frame folded the navigator from outside
         return 0;
+    case WM_TIMER:
+        if (wp == 4722) {   // the seat's knock on the engine's door: the env was
+            KillTimer(h, 4722);   // still warming when SumEnsure last looked;
+            SumEnsure();          // SumEnsure re-arms the knock itself until the
+            return 0;             // runtime answers or is declared absent
+        }
+        break;
     case WM_SIZE: {
         if (g_sumCtr) {
             RECT r; GetClientRect(h, &r);
