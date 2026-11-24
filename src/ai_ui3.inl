@@ -445,8 +445,10 @@ static void AiHandleEvent(AiEv* e) {
             int words = 1000;
             std::string lang = "English", genre = "nonfiction_classic";
             std::string docId = "web_" + AiSha256Hex16(pageText);
-            std::thread([gen, docId, pageText, words, lang, genre]() {
-                AiSumRun(gen, docId, pageText, 1, 1, words, lang, genre, false);
+            unsigned long long run = g_sumRun;          // this thread's owner token
+            auto cancel = g_sumCancel;                  // this run's own stop flag
+            std::thread([gen, run, cancel, docId, pageText, words, lang, genre]() {
+                AiSumRun(gen, run, cancel, docId, pageText, 1, 1, words, lang, genre, false);
             }).detach();
         }
         break;
