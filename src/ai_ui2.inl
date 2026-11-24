@@ -88,13 +88,20 @@ struct AiRangeJob {
     std::wstring path;
     int first = 0, last = 0, cur = 0;
     std::wstring text;
-    int what = 0;                        // 0 summary, 1 notes
+    int what = 0;                        // 0 summary, 1 notes, 2 beaker, 3 buffer
     unsigned long long gen = 0;
     int words = 1000;
     std::string lang = "English", genre = "nonfiction_classic";
     bool bypass = false;
 };
 static AiRangeJob g_range;
+// the buffer's deferred seat: the page's prefetch request waits a beat after
+// the popup unfolds (the first paint lands unmolested), then rides the pump
+static struct {
+    bool on = false;
+    int first = 0, pages = 0, words = 1000;
+    std::string lang = "English", genre = "nonfiction_classic";
+} g_sumPf;
 
 static void AiRangeStart(const std::wstring& path, int first, int last, int what,
                          unsigned long long gen) {
@@ -104,12 +111,13 @@ static void AiRangeStart(const std::wstring& path, int first, int last, int what
     g_range.text.clear();
     g_range.what = what;
     g_range.gen = gen;
-    // Fast batch extraction at 15ms interval
-    SetTimer(g.main, 4714, 15, nullptr);
+    SetTimer(g.main, 4714, 30, nullptr);   // the tick itself re-cadences: its
+                                           // idle tail scales with what the
+                                           // pages actually cost (see AiRangeTick)
 }
 static void AiRangeTick() {
     if (!g_range.active) { KillTimer(g.main, 4714); return; }
-    if (g_range.what == 0 && !g_sumWnd) return;
+    if ((g_range.what == 0 || g_range.what == 3) && !g_sumWnd) return;
     if (g_range.what == 1 && !g_sideNotes) return;
     if (g_range.what == 2 && !g_sumWnd) return;   // the beaker's range test rides the summary window
     DocState& D = DVF();
@@ -149,14 +157,83 @@ static void AiRangeTick() {
             e->a = WxU(b);
             AiPost(e);
         }
+        // the buffer fills in silence: its status line already says
+        // "Buffer: generating", and a progress post would stomp it
 
-        // Limit each tick to ~20ms to keep UI responsive
-        if (GetTickCount() - startTick >= 20) break;
+        // The yield rule: one page minimum; extras only while the tick is
+        // still fresh. The check runs AFTER a page completes and one OCR page
+        // can cost 100-300ms on this thread, so a small budget here means the
+        // loop breaks between pages - never mid-page.
+        if (GetTickCount() - startTick >= 12) break;
     }
+
+    // The idle tail scales with what the pages actually cost. The old pump
+    // (15ms tick, 20ms budget) was a continuous saturate - the message loop
+    // never drained, and the low-level mouse hook riding it stalled the whole
+    // machine's pointer for as long as the extraction ran. Cheap cached pages
+    // keep the run brisk; OCR-heavy pages earn the loop a long clean breath
+    // between blocks. Start (what=0) leans a little tighter - someone is
+    // waiting; the background jobs (1/2/3) yield generously.
+    DWORD spent = GetTickCount() - startTick;
+    DWORD idle = g_range.what == 0 ? max<DWORD>(30, min<DWORD>(120, spent))
+                                   : max<DWORD>(50, min<DWORD>(280, spent * 2));
 
     if (g_range.cur > g_range.last) {
         g_range.active = false;
         KillTimer(g.main, 4714);
+        if (g_range.what == 3) {
+            // the buffer's quiet fill: cache first, then a background model
+            // thread - nothing here needs the event pump
+            DocState& D = DVF();
+            if (D.path.empty() || D.path != g_range.path || g_range.text.empty()) return;
+            int first = g_range.first, last = g_range.last, words = g_range.words;
+            std::string lang = g_range.lang, genre = g_range.genre;
+            std::string docId = AiDocSessionKey(D.path);
+            std::string model = WxU(g_aiCfg.model);
+            std::string variant = lang + ":" + std::to_string(words) + ":" + genre;
+            std::wstring rangeText = g_range.text;
+            unsigned char sha[32];
+            crxk::Sha256((const unsigned char*)rangeText.data(),
+                         rangeText.size() * sizeof(wchar_t), sha);
+            static const char* hx = "0123456789abcdef";
+            std::string hash(64, '0');
+            for (int i = 0; i < 32; i++) { hash[i * 2] = hx[sha[i] >> 4]; hash[i * 2 + 1] = hx[sha[i] & 15]; }
+            std::string cached;
+            if (AiCacheGet(docId, first, last, model, variant, hash, cached)) {
+                SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
+                        ",\"text\":" + WxJsonStr(cached) + "}");
+            } else if (!g_sumBusy) {
+                std::thread([docId, rangeText, first, last, words, lang, genre, hash]() {
+                    AiLoadSettings();
+                    AiCfg cfg = g_aiCfg;
+                    std::string sys = PromptBodyOf(genre.c_str());
+                    if (sys.empty()) sys = PromptBodyOf("nonfiction_classic");
+                    {
+                        std::string ph = std::to_string(words);
+                        size_t pos;
+                        while ((pos = sys.find("{words}")) != std::string::npos) sys.replace(pos, 7, ph);
+                        while ((pos = sys.find("{language}")) != std::string::npos) sys.replace(pos, 10, lang);
+                    }
+                    int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
+                    if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
+                    std::string user = WxU(rangeText);
+                    std::string content;
+                    AiError err;
+                    std::atomic<bool> cancel{ false };
+                    if (AiChatBuffered(cfg, sys, {}, user, budget, nullptr, true, content, err, &cancel) && !content.empty()) {
+                        std::string answer = AiExtractStreamingAnswer(content);
+                        if (answer.empty()) answer = AiParseStructured(AiStripThinkSpans(content)).answer;
+                        if (answer.empty()) answer = content;
+                        std::string mdl = WxU(cfg.model);
+                        std::string var = lang + ":" + std::to_string(words) + ":" + genre;
+                        AiCachePut(docId, first, last, mdl, var, hash, answer);
+                        SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
+                                ",\"text\":" + WxJsonStr(answer) + "}");
+                    }
+                }).detach();
+            }
+            return;
+        }
         AiEv* e = AiEvMake(AIEV_EXTRACT_DONE);
         e->a = WxU(g_range.text);
         e->gen = g_range.gen;
@@ -164,6 +241,7 @@ static void AiRangeTick() {
         AiPost(e);
         return;
     }
+    SetTimer(g.main, 4714, idle, nullptr);
 }
 
 // ---- the document index pump (OCR one page per tick) ----
@@ -1068,12 +1146,17 @@ static void SumCreateWindow() {
         if (y < mr.top) y = mr.top;
         if (y > maxY) y = maxY;
     }
-    // WS_POPUP + THICKFRAME: the history popup's "part of the app" birth with
-    // the resize bands kept; no caption boxes, so the HTML bar's drag handle
-    // can't maximize it by accident. TOOLWINDOW keeps it out of Alt-Tab -
-    // it is a pane that floats, not a window that lives on its own. Born
-    // HIDDEN: the prewarm seat is built before anyone looks at it.
-    DWORD style = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
+    // The main frame's own birth - OVERLAPPEDWINDOW minus CAPTION - with the
+    // resize bands kept. WS_POPUP + THICKFRAME was tried first and Windows 11
+    // punished it: DWM paints a popup's top frame strip in the system's light
+    // theme colors and no NCCALCSIZE can claim it away - the white band that
+    // rode the card's top edge. The main-family style is claimable; the main
+    // frame has worn it captionless its whole life with no such band. No
+    // caption boxes, so the HTML bar's drag handle can't maximize it by
+    // accident. TOOLWINDOW keeps it out of Alt-Tab - it is a pane that
+    // floats, not a window that lives on its own. Born HIDDEN: the prewarm
+    // seat is built before anyone looks at it.
+    DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_CAPTION) | WS_CLIPCHILDREN;
     RECT rc{ 0, 0, w, h };
     AdjustWindowRect(&rc, style, FALSE);
     g_sumWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"docsy_sum", L"Page Summary",
@@ -1373,56 +1456,21 @@ static void SumPanelMessage(const wchar_t* json) {
             std::string genre = gr && gr->t == 's' ? gr->s : "nonfiction_classic";
             DocState& D = DVF();
             if (!D.path.empty() && first <= D.n) {
-                int last = min(first + pages - 1, D.n);
-                std::string docId = AiDocSessionKey(D.path);
-                std::string model = WxU(g_aiCfg.model);
-                std::string variant = lang + ":" + std::to_string(words) + ":" + genre;
-                std::wstring rangeText;
-                for (int p = first; p <= last; p++) {
-                    std::wstring txt = AiPageTextFrom(D, p - 1);   // 0-based, like AiRangeTick
-                    if (!txt.empty()) rangeText += L"[p. " + std::to_wstring(p) + L"]\n" + txt + L"\n\n";
-                }
-                if (!rangeText.empty()) {
-                    unsigned char sha[32];
-                    crxk::Sha256((const unsigned char*)rangeText.data(), rangeText.size() * sizeof(wchar_t), sha);
-                    static const char* hx = "0123456789abcdef";
-                    std::string hash(64, '0');
-                    for (int i = 0; i < 32; i++) { hash[i * 2] = hx[sha[i] >> 4]; hash[i * 2 + 1] = hx[sha[i] & 15]; }
-                    std::string cached;
-                    if (AiCacheGet(docId, first, last, model, variant, hash, cached)) {
-                        SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
-                                ",\"text\":" + WxJsonStr(cached) + "}");
-                    } else if (!g_sumBusy) {
-                        std::thread([docId, rangeText, first, last, words, lang, genre, hash]() {
-                            AiLoadSettings();
-                            AiCfg cfg = g_aiCfg;
-                            std::string sys = PromptBodyOf(genre.c_str());
-                            if (sys.empty()) sys = PromptBodyOf("nonfiction_classic");
-                            {
-                                std::string ph = std::to_string(words);
-                                size_t pos;
-                                while ((pos = sys.find("{words}")) != std::string::npos) sys.replace(pos, 7, ph);
-                                while ((pos = sys.find("{language}")) != std::string::npos) sys.replace(pos, 10, lang);
-                            }
-                            int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
-                            if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
-                            std::string user = WxU(rangeText);
-                            std::string content;
-                            AiError err;
-                            std::atomic<bool> cancel{ false };
-                            if (AiChatBuffered(cfg, sys, {}, user, budget, nullptr, true, content, err, &cancel) && !content.empty()) {
-                                std::string answer = AiExtractStreamingAnswer(content);
-                                if (answer.empty()) answer = AiParseStructured(AiStripThinkSpans(content)).answer;
-                                if (answer.empty()) answer = content;
-                                std::string mdl = WxU(cfg.model);
-                                std::string var = lang + ":" + std::to_string(words) + ":" + genre;
-                                AiCachePut(docId, first, last, mdl, var, hash, answer);
-                                SumPost("{\"cmd\":\"prefetch-ready\",\"start\":" + std::to_string(first) +
-                                        ",\"text\":" + WxJsonStr(answer) + "}");
-                            }
-                        }).detach();
-                    }
-                }
+                // This used to extract the whole range right here, on the UI
+                // thread - sixty pages of OCR inside one message handler, the
+                // machine frozen for as long as the range took, the popup's
+                // own open feeling like a system crash. The fill now waits a
+                // beat (the open's paint lands unmolested) and then rides the
+                // same idle pump the Start button uses. Start owns the pump
+                // first: if it is busy the JS asks again on the next done.
+                if (g_range.active) return;
+                g_sumPf.on = true;
+                g_sumPf.first = first;
+                g_sumPf.pages = pages;
+                g_sumPf.words = words;
+                g_sumPf.lang = lang;
+                g_sumPf.genre = genre;
+                if (g_sumWnd) SetTimer(g_sumWnd, 4723, 1200, nullptr);
             }
         }
     }
@@ -1522,6 +1570,21 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             KillTimer(h, 4722);   // still warming when SumEnsure last looked;
             SumEnsure();          // SumEnsure re-arms the knock itself until the
             return 0;             // runtime answers or is declared absent
+        }
+        if (wp == 4723) {   // the buffer's deferred kick: the open's paint has
+            KillTimer(h, 4723);   // landed; if the pump is free, the background
+            g_sumPf.on = false;   // reader starts turning pages for the next
+            if (!g_range.active) {   // stretch
+                DocState& D = DVF();
+                if (!D.path.empty() && g_sumPf.first >= 1 && g_sumPf.first <= D.n) {
+                    g_range.words = g_sumPf.words;   // the cache key and the
+                    g_range.lang = g_sumPf.lang;     // prompt ride the job, set
+                    g_range.genre = g_sumPf.genre;   // at fire time, not request
+                    int last = min(g_sumPf.first + g_sumPf.pages - 1, D.n);
+                    AiRangeStart(D.path, g_sumPf.first, last, 3, 0);
+                }
+            }
+            return 0;
         }
         break;
     case WM_SIZE: {
