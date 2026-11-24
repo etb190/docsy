@@ -97,6 +97,7 @@ static void AiRangeTick() {
     if (!g_range.active) { KillTimer(g.main, 4714); return; }
     if (g_range.what == 0 && !g_sumWnd) return;
     if (g_range.what == 1 && !g_sideNotes) return;
+    if (g_range.what == 2 && !g_sumWnd) return;   // the beaker's range test rides the summary window
     DocState& D = DVF();
     if (D.path.empty() || D.path != g_range.path) {
         g_range.active = false;
@@ -114,6 +115,11 @@ static void AiRangeTick() {
         // Surface extraction progress to UI
         if (g_range.what == 0) {
             SumPost("{\"cmd\":\"progress\",\"gen\":" + std::to_string(g_range.gen) +
+                    ",\"text\":\"Reading pages " + std::to_string(g_range.first) + "-" +
+                    std::to_string(min(g_range.cur - 1, g_range.last)) + " of " +
+                    std::to_string(g_range.last) + "\u2026\"}");
+        } else if (g_range.what == 2) {
+            SumPost("{\"cmd\":\"test-progress\",\"gen\":" + std::to_string(g_range.gen) +
                     ",\"text\":\"Reading pages " + std::to_string(g_range.first) + "-" +
                     std::to_string(min(g_range.cur - 1, g_range.last)) + " of " +
                     std::to_string(g_range.last) + "\u2026\"}");
@@ -974,8 +980,12 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
     int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
     if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
     std::string user = WxU(rangeText);
+    // WxJsonStr returns a quoted literal - it can only ride a VALUE position;
+    // embedded raw into "Connecting to ..." it minted a text field with naked
+    // inner quotes, the panel's JSON.parse dropped it, and the connect line
+    // never showed. Quote the whole sentence instead.
     SumPost("{\"cmd\":\"progress\",\"gen\":" + std::to_string(gen) +
-            ",\"text\":\"Connecting to " + WxJsonStr(model) + "\u2026\"}");
+            ",\"text\":" + WxJsonStr("Connecting to " + model + "\xe2\x80\xa6") + "}");
     AiError err;
     std::string full;
     bool ok = AiChatStream(cfg, sys, {}, user, budget, nullptr, true,
@@ -1134,6 +1144,19 @@ static void SumPanelMessage(const wchar_t* json) {
                 if (mdl && mdl->t == 's') AiSetSetting("summary.digest." + docId + ".model", mdl->s);
             }
         }
+    } else if (t == "test-range") {
+        // the title bar's beaker (Avalanche's TestRangeRequested -> OpenAiTestForRange):
+        // the tester_standard probe reads the current stretch and reports the first
+        // and last sentences it saw - proof the extraction carries real text
+        if (g_sumBusy || g_sumMode != 0) return;
+        DocState& D = DVF();
+        if (D.path.empty()) return;
+        const crxk::J* f = m.get("first"), * l = m.get("last");
+        int first = f && f->t == 'd' ? max(1, (int)f->d) : g_sumStart;
+        int last = l && l->t == 'd' ? min((int)l->d, D.n) : min(g_sumStart + g_sumRange - 1, D.n);
+        if (first > last) return;
+        g_sumBusy = true;
+        AiRangeStart(D.path, first, last, 2, ++g_sumGen);
     } else if (t == "prefetch") {
         const crxk::J* st = m.get("start"), * rg = m.get("range"),
             * w = m.get("words"), * lg = m.get("lang"), * gr = m.get("genre");
@@ -1151,8 +1174,8 @@ static void SumPanelMessage(const wchar_t* json) {
                 std::string variant = lang + ":" + std::to_string(words) + ":" + genre;
                 std::wstring rangeText;
                 for (int p = first; p <= last; p++) {
-                    std::wstring txt = AiPageTextFrom(D, p);
-                    if (!txt.empty()) rangeText += L"[p. " + std::to_wstring(p + 1) + L"]\n" + txt + L"\n\n";
+                    std::wstring txt = AiPageTextFrom(D, p - 1);   // 0-based, like AiRangeTick
+                    if (!txt.empty()) rangeText += L"[p. " + std::to_wstring(p) + L"]\n" + txt + L"\n\n";
                 }
                 if (!rangeText.empty()) {
                     unsigned char sha[32];

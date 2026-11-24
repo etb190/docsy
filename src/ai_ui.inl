@@ -746,20 +746,9 @@ static void AiOverlayLayout() {
 static void AiChatToggle() {
     g_aiOn = !g_aiOn;
     AiLoadSettings();
-    // the workers' event pump: a message-only window, made once
-    if (!g_aiMsg) {
-        static bool cls = false;
-        if (!cls) {
-            cls = true;
-            WNDCLASSW wc{};
-            wc.lpfnWndProc = DefWindowProcW;
-            wc.lpszClassName = L"docsy_ai_pump";
-            wc.hInstance = g.hinst;
-            RegisterClassW(&wc);
-        }
-        g_aiMsg = CreateWindowExW(0, L"docsy_ai_pump", L"", 0, 0, 0, 0, 0,
-                                  HWND_MESSAGE, nullptr, g.hinst, nullptr);
-    }
+    // the workers' events ride g.main's own queue (ai_evt.inl) - no message-only
+    // pump window, no per-surface dependency: a summary or notes opened before
+    // the chat panel still hears its workers
     if (g_aiOn && !g_aiCtr) AiPanelEnsure();
     if (g_aiOn) AiBindContext();
     // the dock: the view gives the strip its width back and takes it again

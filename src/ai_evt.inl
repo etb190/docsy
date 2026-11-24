@@ -1,6 +1,11 @@
 // ---------------- docsy AI: the workers' event pump ----------------
-// The one channel every AI worker talks back through: heap events posted to a
-// message-only window, handled on the UI thread (ai_ui3.inl's AiHandleEvent).
+// The one channel every AI worker talks back through: heap events posted to
+// the main frame, whose proc (main_window.inl) forwards WM_APP + 71 into
+// ai_ui3.inl's AiHandleEvent on the UI thread. The first cut routed them to a
+// message-only window whose wndproc was DefWindowProc - it swallowed every
+// WM_APP + 71, so no chat answer, no summary, no notes card ever came home
+// (and the pump window itself was only born when the chat panel toggled, so
+// the summary window's whole chain died in silence before it even started).
 // Declared this early because the editor's own page messages join the flow.
 #pragma once
 
@@ -25,9 +30,11 @@ struct AiEv {
     double d = 0;
     bool flag = false;
 };
-static HWND g_aiMsg = nullptr;               // the workers' event pump (message-only)
 static void AiPost(AiEv* e) {
-    if (g_aiMsg) PostMessageW(g_aiMsg, WM_APP + 71, 0, (LPARAM)e);
+    // the main frame owns the AI event queue: its proc answers WM_APP + 71
+    // with AiHandleEvent, on the UI thread, whether or not any AI surface is
+    // open - the summary window's chain needs no other seat to live
+    if (g.main) PostMessageW(g.main, WM_APP + 71, 0, (LPARAM)e);
     else delete e;
 }
 static AiEv* AiEvMake(AiEvKind k) { AiEv* e = new AiEv(); e->kind = k; return e; }

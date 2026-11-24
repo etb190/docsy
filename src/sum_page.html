@@ -172,6 +172,7 @@ select option{background-color:#242424; color:#e0e0e0;}
   justify-content:center; text-align:center; padding:16px 24px; color:var(--muted); font-size:12.5px;
   line-height:1.6; max-width:480px; margin:auto;}
 #overlay.err{color:#f87171;}
+#ovText{white-space:pre-wrap; word-break:break-word; user-select:text; cursor:auto;}
 
 /* ---- Rows 4-5: Hairline & Status Bar ---- */
 #rule{flex:0 0 auto; height:1px; background:var(--cardborder); opacity:.85; margin:5px 14px 0;}
@@ -375,7 +376,13 @@ function applyFont(){
 }
 $("bFontDn").onclick=function(){ F=Math.max(10,F-1); applyFont(); };
 $("bFontUp").onclick=function(){ F=Math.min(24,F+1); applyFont(); };
-$("bTest").onclick=function(){ post({type:"test-range", first:S.start, last:fmtRange()}); };
+$("bTest").onclick=function(){
+  if(S.busy) return;
+  setBusy(true);   // the C++ side blocks Start while a test runs - mirror it here
+  overlay("Verifying the extraction for pages "+S.start+"-"+fmtRange()+"\u2026",false);
+  status("Testing range\u2026");
+  post({type:"test-range", first:S.start, last:fmtRange()});
+};
 applyFont();
 
 /* ---- Web Audio API: Avalanche Ping chime (two-tone D5 -> A5) ---- */
@@ -431,7 +438,7 @@ function inline(t){
     if(m[1]) out+="<code>"+esc(m[1].slice(1,-1))+"</code>";
     else if(m[3]!==undefined) out+="<strong>"+esc(m[3])+"</strong>";
     else if(m[5]!==undefined) out+="<em>"+esc(m[5])+"</em>";
-    else if(m[6]!==undefined) out+='<a href="'+m[7]+'">'+esc(m[6])+"</a>";
+    else if(m[8]!==undefined) out+='<a href="'+esc(m[8])+'">'+esc(m[7])+"</a>";
     li=m.index+m[0].length; }
   return out+t.slice(li);
 }
@@ -700,6 +707,7 @@ function handleHostMessage(m){
     $("nav").style.display=isWeb?"none":"flex";
     $("rangeWrap").style.display=isWeb?"none":"flex";
     $("chipsWeb").style.display=isWeb?"flex":"none";
+    if(isWeb) $("stBuffer").textContent="";   // the buffer is a doc-mode animal
     fillCombos(m);
     refreshNav();
     $("stModel").textContent=m.model?("Model: "+m.model):"";
@@ -716,6 +724,27 @@ function handleHostMessage(m){
 
   case "progress":
     status(m.text||"");
+    break;
+
+  case "test-progress":
+    overlay(m.text||"Testing\u2026",false);
+    status(m.text||"");
+    break;
+
+  case "test-out":
+    // the beaker's probe: what the model actually saw of this range
+    setBusy(false); emptyState(false,false);
+    var shown=m.text||"";
+    try{ var probe=JSON.parse(shown);
+      if(probe&&typeof probe==="object"){
+        shown="first_page_marker: "+(probe.first_page_marker||"-")+"\n"+
+              "first_sentence_seen: "+(probe.first_sentence_seen||"-")+"\n\n"+
+              "last_page_marker: "+(probe.last_page_marker||"-")+"\n"+
+              "last_sentence_seen: "+(probe.last_sentence_seen||"-");
+      }
+    }catch(err){}
+    overlay(shown, !m.ok);
+    status(m.ok?("Test complete \u00b7 pages "+S.start+"-"+fmtRange()+" carry readable text"):"Test failed");
     break;
 
   case "delta":
@@ -850,6 +879,7 @@ function curSel(){
 
 /* ---- Panel -> C++ ---- */
 function startGen(bypass){
+  if(S.busy) return;   // the host drops a start while it is busy - stay in step
   var c=curSel();
   S.gen++; S.generating=true; S.full=""; S.shown=0; S.incoming=[];
   S.genStartTime=Date.now();

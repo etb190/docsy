@@ -132,12 +132,13 @@ static std::wstring AiBearerKeyFor(const std::wstring& url, const std::wstring& 
 }
 
 // ---- the settings (AiProviderConfig + AiSettingsViewModel's fields) ----
-// Defaults wear the canonical Google Gemini 3.6 Flash guest on Google AI Studio:
-// fast (<1s), responsive, and authenticated via the bundled guest key.
+// Defaults wear the canonical Google Gemini 3.8 Flash guest on Google AI Studio -
+// Avalanche v1.37's own first brain (AiSurfaceModels.GeminiModel), fast (<1s),
+// responsive, and authenticated via the bundled guest key.
 struct AiCfg {
     std::wstring baseUrl = L"https://generativelanguage.googleapis.com/v1beta/openai";
     std::wstring apiKey;                       // empty = the bundled guest key rides
-    std::wstring model = L"gemini-3.6-flash";
+    std::wstring model = L"gemini-3.8-flash";
     double temperature = 0.5;
     int maxTokens = 16384;
     double topP = 0.95;

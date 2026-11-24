@@ -68,7 +68,6 @@
           <option value="glm-5.3">GLM 5.3 (NIM)</option>
           <option value="gemma-4">Google Gemma 4 31B (NIM)</option>
           <option value="deepseek">DeepSeek V4.1 Flash (NIM)</option>
-          <option value="gpt-oss">Local Ollama (gpt-oss:120b-cloud)</option>
         </select>
         <div class="flabel" style="margin-top:10px;">Custom API Key <span style="font-weight:normal; font-size:10px; color:var(--muted);">(optional - built-in Google & NIM guest keys included)</span></div>
         <input class="fbox" id="sKey" type="password" placeholder="Using built-in guest key">
@@ -376,8 +375,7 @@ var PRESETS={
   "glm-flash":["https://integrate.api.nvidia.com/v1","z-ai/glm-5.3-flash"],
   "glm-5.3":["https://integrate.api.nvidia.com/v1","z-ai/glm-5.3"],
   "gemma-4":["https://integrate.api.nvidia.com/v1","google/gemma-4-31b-it"],
-  "deepseek":["https://integrate.api.nvidia.com/v1","deepseek-ai/deepseek-v4.1-flash"],
-  "gpt-oss":["http://localhost:11434/v1","gpt-oss:120b-cloud"]
+  "deepseek":["https://integrate.api.nvidia.com/v1","deepseek-ai/deepseek-v4.1-flash"]
 };
 var dialEl = $("sModelDial");
 if(dialEl){
@@ -425,7 +423,7 @@ $("setOvl").addEventListener("mousedown", function(e){
 function fillSettings(s){
   $("sUrl").value=s.baseUrl||"https://generativelanguage.googleapis.com/v1beta/openai";
   $("sKey").value=s.apiKey||"";
-  $("sModel").value=s.model||"gemini-3.6-flash";
+  $("sModel").value=s.model||"gemini-3.8-flash";
   $("sTemp").value=s.temperature!=null?s.temperature:0.5;
   $("sTok").value=s.maxTokens!=null?s.maxTokens:16384;
   $("sTopP").value=s.topP!=null?s.topP:0.95;
@@ -452,10 +450,9 @@ function fillSettings(s){
     else if(s.model.indexOf("glm-5.3") !== -1) foundKey = "glm-5.3";
     else if(s.model.indexOf("deepseek") !== -1) foundKey = "deepseek";
     else if(s.model.indexOf("gemma-4") !== -1) foundKey = "gemma-4";
-    else if(s.model.indexOf("gpt-oss") !== -1) foundKey = "gpt-oss";
   }
   if(foundKey && $("sModelDial")) $("sModelDial").value = foundKey;
-  else if($("sModelDial")) $("sModelDial").value = "gemini-3.6";
+  else if($("sModelDial")) $("sModelDial").value = "gemini";
 
   var local=/localhost|127\.0\.0\.1|\[::1?\]/.test($("sUrl").value)||!$("sUrl").value;
   $("cloudNote").style.display=local?"none":"block";

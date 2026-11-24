@@ -467,6 +467,30 @@ static void AiHandleEvent(AiEv* e) {
             std::wstring text = WxW(e->a);
             int first = g_range.first, last = g_range.last;
             AiNotesRunModel(text, first, last);
+        } else if (what == 2) {
+            // the beaker's range test: the tester probe answers what it saw
+            unsigned long long gen = e->gen;
+            std::wstring text = WxW(e->a);
+            std::thread([gen, text]() {
+                if (AiLetters(text) < 50) {
+                    SumPost("{\"cmd\":\"test-out\",\"gen\":" + std::to_string(gen) +
+                            ",\"text\":\"The selected pages have no readable text to verify.\",\"ok\":false}");
+                    g_sumBusy = false;
+                    return;
+                }
+                AiLoadSettings();
+                AiCfg cfg = g_aiCfg;
+                std::string sys = PromptBodyOf("tester_standard");
+                std::string content;
+                AiError err;
+                bool ok = AiChatBuffered(cfg, sys, {}, WxU(text), 2048,
+                                         nullptr, true, content, err, nullptr);
+                std::string out = ok ? content : WxU(err.Friendly());
+                SumPost("{\"cmd\":\"test-out\",\"gen\":" + std::to_string(gen) +
+                        ",\"text\":" + WxJsonStr(out) +
+                        ",\"ok\":" + (ok ? "true" : "false") + "}");
+                g_sumBusy = false;
+            }).detach();
         } else if (what == 0) {
             // summary: the thread takes the text
             if (g_sumThread.joinable()) g_sumThread.join();
