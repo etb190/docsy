@@ -637,6 +637,11 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (wp == 4713) { AiIndexTick(); return 0; }   // the AI index's OCR pump: one
                                                        // page per tick, like the find scan
         if (wp == 4714) { AiRangeTick(); return 0; }   // the AI range extraction's pump
+        if (wp == 4721) {                              // the summary seat's idle prewarm:
+            KillTimer(h, 4721);                        // one shot, two and a half seconds
+            SumPrewarm();                              // in - the navigator is built and
+            return 0;                                  // loaded before anyone clicks it
+        }
         break;                                 // (the find bar's pumps ride the view)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
     case WM_APP + 71: AiHandleEvent((AiEv*)lp); return 0;   // the AI workers' event pump

@@ -637,6 +637,7 @@ static void ToggleSplit();
 static void ToggleSide();               // defined with the main window (the Pages button)
 static void AiChatToggle();             // the AI panel's toolbar button (defined in ai_ui.inl)
 static void SumToggle(int mode);        // the Page Summary navigator (defined in ai_ui2.inl)
+static void SumPrewarm();               // its idle seat: window + webview build hidden (ai_ui2.inl)
 static int g_aiDockW = 0;               // the AI panel's docked strip width this pass:
                                         // LayoutMain reserves it right of the view, the
                                         // panel's bounds read it back (ai_ui.inl)

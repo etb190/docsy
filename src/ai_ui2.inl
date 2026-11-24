@@ -8,12 +8,20 @@ static void AiPanelMessage(const wchar_t* json);
 static void SumPanelMessage(const wchar_t* json);
 static void SumPost(const std::string& j);
 static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
-static void SumCloseSoon();      // the popup contract: deactivate rolls it up
+static void SumHide(bool fromOutside);   // the popup contract: a click outside
+                                         // its borders folds it, alive
+static void SumPrewarm();        // the idle seat: window + webview build hidden
 static void SumSavePlacement();  // one settings write per gesture, not per pixel
 
-static bool g_sumClosePending = false;   // a delayed teardown is on the clock
+static DWORD g_sumHideTick = 0;          // when an outside click folded it: the
+                                         // toolbar's own click must not reopen
 static RECT g_sumOwnerPrev{};            // the frame's last screen rect: the
                                          // popup rides its moves like a pane
+static HHOOK g_sumMouseHook = nullptr;   // the click-outside watcher, only
+                                         // while the popup is unfolded
+static std::string g_sumInitDoc;         // what the page's last init was built
+                                         // for - a reopen only re-inits when the
+                                         // document moved under the hood
 
 // ---- the page text builder: [p. N] anchored, running paragraphs ----
 static std::wstring AiPageTextFrom(const DocState& D, int page) {
@@ -847,6 +855,7 @@ static void SumSendInit() {
     }
     j += ",\"model\":" + WxJsonStr(g_aiCfg.model);
     j += "}";
+    g_sumInitDoc = (g_sumMode == 0) ? AiDocSessionKey(DVF().path) : std::string("web");
     SumPost(j);
 }
 static void SumEnsure() {
@@ -887,16 +896,45 @@ static void SumEnsure() {
             }).Get());
 }
 // ---- the popup contract's helpers ----
-// The navigator is a popup of the frame, not a free window: it closes on a
-// click anywhere outside its borders (WM_ACTIVATE's WA_INACTIVE below), and
-// that close walks out slowly - one script call first, so the digest's scroll
-// position lands in the settings file before the webview tears down.
-static void SumCloseSoon() {
-    if (!g_sumWnd || g_sumClosePending) return;
-    g_sumClosePending = true;
-    if (g_sumWeb)   // the digest's scroll rides out before the teardown
+// The navigator is a popup of the frame, not a free window: a MOUSE CLICK
+// anywhere inside the frame but outside its borders folds it. Folding is a
+// hide, never a teardown - the webview keeps breathing behind the fold, so a
+// generation in flight keeps streaming into it, the digest keeps its scroll,
+// and the next open is a ShowWindow away instead of a controller rebuild.
+// Deactivation alone folds nothing: task-switching away and back must find
+// the navigator standing (a WH_MOUSE_LL watcher below sees the actual clicks,
+// so alt-tab, the taskbar, other apps and even the popup's own select
+// dropdowns never trip the contract).
+static void SumUnhookMouse() {
+    if (g_sumMouseHook) { UnhookWindowsHookEx(g_sumMouseHook); g_sumMouseHook = nullptr; }
+}
+static void SumHide(bool fromOutside) {
+    if (!g_sumWnd) return;
+    if (g_sumWeb)   // the digest's reader seat rides out before the fold
         g_sumWeb->ExecuteScript(L"window.__sumSaveScroll&&window.__sumSaveScroll();", nullptr);
-    SetTimer(g_sumWnd, 4719, 300, nullptr);
+    SumSavePlacement();
+    ShowWindow(g_sumWnd, SW_HIDE);
+    SumUnhookMouse();
+    if (fromOutside) g_sumHideTick = GetTickCount();
+}
+static LRESULT CALLBACK SumMouseHookProc(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && g_sumWnd && IsWindowVisible(g_sumWnd)) {
+        switch (wp) {
+        case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN: case WM_NCLBUTTONDOWN: case WM_NCRBUTTONDOWN: {
+            POINT pt = ((MSLLHOOKSTRUCT*)lp)->pt;
+            HWND w = WindowFromPoint(pt);
+            HWND root = w ? GetAncestor(w, GA_ROOT) : nullptr;
+            if (root && root != g_sumWnd && (root == g.main || IsChild(g.main, root)))
+                PostMessageW(g_sumWnd, WM_APP + 61, 0, 0);   // a click inside the
+            break; }   // frame, outside the navigator - the fold itself runs on
+        }                  // the pump: a hook must never do file I/O
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
+static void SumHookMouse() {
+    if (!g_sumMouseHook)
+        g_sumMouseHook = SetWindowsHookExW(WH_MOUSE_LL, SumMouseHookProc, g.hinst, 0);
 }
 static void SumSavePlacement() {
     if (!g_sumWnd || IsIconic(g_sumWnd)) return;
@@ -928,27 +966,42 @@ static void SumOwnerMoved() {
     g_sumOwnerPrev = mr;
 }
 static void SumToggle(int mode) {
-    if (g_sumWnd && IsWindowVisible(g_sumWnd) && !g_sumClosePending && g_sumMode == mode) {
-        SumCloseSoon();   // the toolbar button is a toggle: open again rolls it up
+    if (g_sumHideTick && GetTickCount() - g_sumHideTick < 400) {
+        g_sumHideTick = 0;   // this button click IS the outside click that just
+        return;              // folded it - a toggle-off, not an invitation back
+    }
+    if (g_sumWnd && IsWindowVisible(g_sumWnd) && g_sumMode == mode) {
+        SumHide(false);   // the toolbar button is a toggle: open again rolls it up
         return;
     }
     SumOpen(mode);
 }
-static void SumOpen(int mode) {
-    if (g_sumWnd) {
-        g_sumClosePending = false;               // a pending close is withdrawn:
-        KillTimer(g_sumWnd, 4719);               // the user came back before the bell
-        if (g_sumMode != mode) {
-            g_sumMode = mode;
-            if (g_sumCtr) { g_sumCtr->Close(); g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false; }
-            if (g_sumMode == 1) g_sumReady = true;   // web init needs no book
-        }
-        ShowWindow(g_sumWnd, SW_SHOWNOACTIVATE);
-        SetForegroundWindow(g_sumWnd);
-        if (g_sumReady) SumSendInit();
-        return;
-    }
-    g_sumMode = mode;
+// what the page's current init was built for - a reopen only re-sends init
+// when the document or surface moved under the hood, because re-initing a
+// living page wipes its digest view, its busy state and its scroll, exactly
+// the "close it and everything resets" the fold was built to stop
+static bool SumInitStale() {
+    std::string key = (g_sumMode == 0) ? AiDocSessionKey(DVF().path) : std::string("web");
+    return key != g_sumInitDoc;
+}
+// the frame moved while the popup was folded: a reopen re-seats it inside the
+// frame (the WM_WINDOWPOSCHANGING clamp only rides real moves, and a bare
+// ShowWindow carries none)
+static void SumClampIntoFrame() {
+    if (!g_sumWnd || !g.main || IsIconic(g.main)) return;
+    RECT mr; GetWindowRect(g.main, &mr);
+    if (mr.right <= mr.left || mr.bottom <= mr.top) return;
+    RECT wr; GetWindowRect(g_sumWnd, &wr);
+    int w = wr.right - wr.left, hgt = wr.bottom - wr.top;
+    int x = max(mr.left, min(wr.left, mr.right - w));
+    int y = max(mr.top, min(wr.top, mr.bottom - hgt));
+    if (x != wr.left || y != wr.top)
+        SetWindowPos(g_sumWnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+// the window itself, born hidden: SumPrewarm builds the seat at idle and the
+// first SumOpen just unfolds it
+static void SumCreateWindow() {
+    if (g_sumWnd) return;
     static bool cls = false;
     if (!cls) {
         cls = true;
@@ -998,12 +1051,13 @@ static void SumOpen(int mode) {
     // WS_POPUP + THICKFRAME: the history popup's "part of the app" birth with
     // the resize bands kept; no caption boxes, so the HTML bar's drag handle
     // can't maximize it by accident. TOOLWINDOW keeps it out of Alt-Tab -
-    // it is a pane that floats, not a window that lives on its own.
+    // it is a pane that floats, not a window that lives on its own. Born
+    // HIDDEN: the prewarm seat is built before anyone looks at it.
     DWORD style = WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN;
     RECT rc{ 0, 0, w, h };
     AdjustWindowRect(&rc, style, FALSE);
     g_sumWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"docsy_sum", L"Page Summary",
-                               style | WS_VISIBLE,
+                               style,
                                x, y,
                                rc.right - rc.left, rc.bottom - rc.top,
                                g.main, nullptr, g.hinst, nullptr);
@@ -1014,8 +1068,27 @@ static void SumOpen(int mode) {
         g_sumOwnerPrev = RECT{};
         if (g.main) GetWindowRect(g.main, &g_sumOwnerPrev);
     }
-    if (g_sumMode == 1) g_sumReady = true;
+}
+// the idle seat: two and a half seconds after launch the frame builds its
+// navigator hidden - window, controller, page and all - so the first click on
+// the toolbar unfolds a living popup instead of a construction site
+static void SumPrewarm() {
+    SumCreateWindow();
     SumEnsure();
+}
+static void SumOpen(int mode) {
+    SumCreateWindow();
+    if (!g_sumWnd) return;
+    if (g_sumMode != mode) {
+        g_sumMode = mode;
+        if (g_sumCtr) { g_sumCtr->Close(); g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false; }
+    }
+    ShowWindow(g_sumWnd, SW_SHOWNOACTIVATE);
+    SetForegroundWindow(g_sumWnd);
+    SumHookMouse();
+    SumEnsure();   // no-ops while the webview lives; re-arms it after a mode switch
+    SumClampIntoFrame();
+    if (g_sumReady && SumInitStale()) SumSendInit();
 }
 
 // ---- the summary's generation thread ----
@@ -1202,8 +1275,10 @@ static void SumPanelMessage(const wchar_t* json) {
             }
         }
     } else if (t == "close") {
-        // the chrome's own close chip (DialogChrome's red mark)
-        if (g_sumWnd) DestroyWindow(g_sumWnd);
+        // the chrome's own close chip (DialogChrome's red mark) or Esc: the
+        // fold is a hide - the webview, its digest and a running generation
+        // all keep breathing behind it
+        SumHide(false);
     } else if (t == "drag") {
         // the HTML title bar's drag handle: hand the move to the OS caption
         // loop - ReleaseCapture is what lets the mouse leave the WebView2
@@ -1407,32 +1482,6 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         EndPaint(h, &ps);
         return 0;
     }
-    case WM_ACTIVATE: {   // the popup contract (the ask dialog's): a click
-                          // anywhere outside - the main frame, another app,
-                          // the taskbar - rolls the window up. The one pardon:
-                          // an activation that stays in our own tree (the
-                          // webview's dropdown popups are owned by us, and
-                          // their GA_ROOT still lands on this window)
-        if (g_sumWnd == h) {
-            if (LOWORD(wp) == WA_INACTIVE) {
-                HWND to = (HWND)lp;
-                if (!to || (GetAncestor(to, GA_ROOT) != h && !IsChild(h, to)))
-                    SumCloseSoon();
-            } else {
-                g_sumClosePending = false;   // back on top before the bell:
-                KillTimer(h, 4719);          // the close is withdrawn
-            }
-        }
-        return 0;
-    }
-    case WM_TIMER:
-        if (wp == 4719) {   // SumCloseSoon's bell: the scroll is saved by now
-            g_sumClosePending = false;
-            KillTimer(h, 4719);
-            DestroyWindow(h);
-            return 0;
-        }
-        break;
     case WM_GETMINMAXINFO: {   // SummaryWindow: MinWidth 460, MinHeight 390
         DefWindowProcW(h, m, wp, lp);
         MINMAXINFO* mmi = (MINMAXINFO*)lp;
@@ -1440,6 +1489,9 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         mmi->ptMinTrackSize.y = (int)(390 * g.dpi);
         return 0;
     }
+    case WM_APP + 61:   // the mouse watcher's verdict, run on the pump: a click
+        SumHide(true);  // inside the frame folded the navigator from outside
+        return 0;
     case WM_SIZE: {
         if (g_sumCtr) {
             RECT r; GetClientRect(h, &r);
@@ -1453,10 +1505,12 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                             // times a pixel while the window dragged
         SumSavePlacement();
         return 0;
-    case WM_DESTROY: {
+    case WM_DESTROY: {   // the one true teardown: the frame died (owned popups
+                         // go with it) - only here does the navigator really
+                         // stop: hook out, placement saved, generation cancelled
         SumSavePlacement();
-        KillTimer(h, 4719);
-        g_sumClosePending = false;
+        SumUnhookMouse();
+        g_sumHideTick = 0;
         g_sumCancel = true;
         g_sumWnd = nullptr;
         g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false;

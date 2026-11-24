@@ -403,6 +403,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     HistLoad();
     ShowWindow(g.main, show);
     UpdateWindow(g.main);
+    SetTimer(g.main, 4721, 2500, nullptr);   // the summary navigator's idle prewarm:
+                                             // its hidden seat builds itself before
+                                             // the first click needs it
     if (argc > 1) TabOpenInto(false, argv[1]);
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }

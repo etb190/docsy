@@ -16,6 +16,10 @@
    Row 5: Status bar (progress/counts, model, buffer state, pages left).
    Palette = Themes/Dark.xaml. */
 :root {
+  color-scheme: dark;   /* the family's dark face for every NATIVE surface the
+                           engine paints: the select dropdown lists, scrollbars,
+                           form chrome - without it Chromium hands back light-mode
+                           white popups for the dropdowns this card uses */
   --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
   --cardborder:#454545; --primary:#1ea54c; --text:#e0e0e0; --muted:#a0a0a0;
   --dim:#6a6a6a; --danger:#ef4444; --selbg:#1c5e38; --selfg:#ffffff;
