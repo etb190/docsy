@@ -6,6 +6,7 @@
 
 static void AiPanelMessage(const wchar_t* json);
 static void SumPanelMessage(const wchar_t* json);
+static void SumPost(const std::string& j);
 static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 
 // ---- the page text builder: [p. N] anchored, running paragraphs ----
@@ -1005,7 +1006,8 @@ static void AiSumRun(unsigned long long gen, const std::string& docId,
             e->gen = gen;
             std::wstring msg = !e2.detail.empty() ? e2.Friendly() : err.Friendly();
             if (msg.empty()) msg = !err.detail.empty() ? err.detail : L"Failed to generate summary. Please check your AI API key and connection.";
-            if (err.cat == AI_ERR_AUTH) msg = L"Authentication failed (API key invalid or expired). Please check your AI API key in Settings.";
+            if (err.cat == AI_ERR_NOT_SIGNED_IN || e2.cat == AI_ERR_NOT_SIGNED_IN)
+                msg = L"Authentication failed (API key invalid or expired). Please check your AI API key in Settings.";
             e->a = WxU(msg);
             AiPost(e);
             g_sumBusy = false;
