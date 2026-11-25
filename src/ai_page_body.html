@@ -57,12 +57,12 @@
       <div class="obody">
         <div class="flabel" style="font-weight:600; color:var(--text); margin-top:4px;">AI Model (Avalanche Model Dial)</div>
         <select class="fbox" id="sModelDial" style="font-weight:600; font-size:12px; height:32px;">
-          <option value="gemini-3.6" selected>Google Gemini 3.6 Flash (Recommended)</option>
+          <option value="nemotron" selected>NVIDIA Nemotron (NIM Cloud) — Recommended</option>
+          <option value="gemini-3.6">Google Gemini 3.6 Flash</option>
           <option value="gemini-3.5">Google Gemini 3.5 Flash</option>
           <option value="gemini-3.5-lite">Google Gemini 3.5 Flash Lite</option>
           <option value="gemini-3.7">Google Gemini 3.7 Flash</option>
           <option value="gemini">Google Gemini 3.8 Flash</option>
-          <option value="nemotron">NVIDIA Nemotron (NIM Cloud)</option>
           <option value="kimi">Moonshot Kimi K3 (NIM)</option>
           <option value="glm-flash">GLM 5.3 Flash (NIM)</option>
           <option value="glm-5.3">GLM 5.3 (NIM)</option>
@@ -76,9 +76,9 @@
           <summary style="font-weight:600; color:var(--text); padding:4px 0; outline:none;">Advanced Settings</summary>
           <div style="padding-top:8px;">
             <div class="flabel">Base URL</div>
-            <input class="fbox" id="sUrl" placeholder="https://generativelanguage.googleapis.com/v1beta/openai">
+            <input class="fbox" id="sUrl" placeholder="https://integrate.api.nvidia.com/v1">
             <div class="flabel">Model ID</div>
-            <input class="fbox" id="sModel" placeholder="gemini-3.6-flash">
+            <input class="fbox" id="sModel" placeholder="nvidia/nemotron-3-ultra-550b-a55b">
             <div style="display:flex; gap:8px;">
               <div style="flex:1;">
                 <div class="flabel">Temperature</div>
@@ -471,9 +471,9 @@ $("setOvl").addEventListener("mousedown", function(e){
 
 /* ---------------- settings ---------------- */
 function fillSettings(s){
-  $("sUrl").value=s.baseUrl||"https://generativelanguage.googleapis.com/v1beta/openai";
+  $("sUrl").value=s.baseUrl||"https://integrate.api.nvidia.com/v1";
   $("sKey").value=s.apiKey||"";
-  $("sModel").value=s.model||"gemini-3.8-flash";
+  $("sModel").value=s.model||"nvidia/nemotron-3-ultra-550b-a55b";
   $("sTemp").value=s.temperature!=null?s.temperature:0.5;
   $("sTok").value=s.maxTokens!=null?s.maxTokens:16384;
   $("sTopP").value=s.topP!=null?s.topP:0.95;
@@ -502,17 +502,17 @@ function fillSettings(s){
     else if(s.model.indexOf("gemma-4") !== -1) foundKey = "gemma-4";
   }
   if(foundKey && $("sModelDial")) $("sModelDial").value = foundKey;
-  else if($("sModelDial")) $("sModelDial").value = "gemini";
+  else if($("sModelDial")) $("sModelDial").value = "nemotron";
 
   var local=/localhost|127\.0\.0\.1|\[::1?\]/.test($("sUrl").value)||!$("sUrl").value;
   $("cloudNote").style.display=local?"none":"block";
   $("cloudNote").textContent="Cloud endpoint: questions and document passages leave this machine.";
 }
 function readSettings(){
-  var dialVal = $("sModelDial") ? $("sModelDial").value : "gemini-3.6";
+  var dialVal = $("sModelDial") ? $("sModelDial").value : "nemotron";
   var preset = PRESETS[dialVal];
-  var url = $("sUrl").value.trim() || (preset ? preset[0] : "https://generativelanguage.googleapis.com/v1beta/openai");
-  var mod = $("sModel").value.trim() || (preset ? preset[1] : "gemini-3.6-flash");
+  var url = $("sUrl").value.trim() || (preset ? preset[0] : "https://integrate.api.nvidia.com/v1");
+  var mod = $("sModel").value.trim() || (preset ? preset[1] : "nvidia/nemotron-3-ultra-550b-a55b");
   return {
     baseUrl: url,
     apiKey: $("sKey").value,

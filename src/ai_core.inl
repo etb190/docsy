@@ -153,13 +153,19 @@ static std::wstring AiBearerKeyFor(const std::wstring& url, const std::wstring& 
 }
 
 // ---- the settings (AiProviderConfig + AiSettingsViewModel's fields) ----
-// Defaults wear the canonical Google Gemini 3.8 Flash guest on Google AI Studio -
-// Avalanche v1.37's own first brain (AiSurfaceModels.GeminiModel), fast (<1s),
-// responsive, and authenticated via the bundled guest key.
+// Defaults wear NVIDIA's own table: the chat brain rides nemotron-3-ultra on
+// integrate.api.nvidia.com, authenticated via the bundled guest key. Google's
+// gate named itself the verdict: every chat request it answers with "User
+// location is not supported for the API use." (400 FAILED_PRECONDITION,
+// measured against the app's exact body), so the Gemini seat the old defaults
+// kept was a door this reader's region can never walk through. The retrieval
+// brain already moved to nemotron on the user's word; the chat brain follows
+// the same verdict - and the door was measured landing the app's streaming
+// body (json_object + enable_thinking) in 1-3 seconds.
 struct AiCfg {
-    std::wstring baseUrl = L"https://generativelanguage.googleapis.com/v1beta/openai";
+    std::wstring baseUrl = L"https://integrate.api.nvidia.com/v1";
     std::wstring apiKey;                       // empty = the bundled guest key rides
-    std::wstring model = L"gemini-3.8-flash";
+    std::wstring model = L"nvidia/nemotron-3-ultra-550b-a55b";
     double temperature = 0.5;
     int maxTokens = 16384;
     double topP = 0.95;
@@ -236,6 +242,22 @@ static void AiLoadSettings() {
         g_aiCfg.embeddingModel.find(L"gemini-embedding") != std::wstring::npos ||
         g_aiCfg.embeddingModel == L"nvidia/nemotron-3-embed-1b")
         g_aiCfg.embeddingModel = L"nvidia/nemotron-3.5-embed-8b";
+    // the chat brain's migration: a settings.json saved while the chat rode
+    // Google's gate upgrades on load - the gate's own verdict ("User location
+    // is not supported for the API use.") holds for this reader's region no
+    // matter whose key rides, so the seat moves to NVIDIA's table where the
+    // app's exact streaming body was measured landing in seconds
+    {
+        std::string hostL = WxU(g_aiCfg.baseUrl);
+        for (auto& ch : hostL) ch = (char)tolower((unsigned char)ch);
+        std::string modelL = WxU(g_aiCfg.model);
+        for (auto& ch : modelL) ch = (char)tolower((unsigned char)ch);
+        if (hostL.find("generativelanguage.googleapis.com") != std::string::npos ||
+            modelL.find("gemini") != std::string::npos) {
+            g_aiCfg.baseUrl = L"https://integrate.api.nvidia.com/v1";
+            g_aiCfg.model = L"nvidia/nemotron-3-ultra-550b-a55b";
+        }
+    }
     gs("embDocPrefix", g_aiCfg.embDocPrefix);
     gs("embQueryPrefix", g_aiCfg.embQueryPrefix);
     gi("topK", g_aiCfg.topK);
@@ -570,8 +592,14 @@ static bool AiHttpGetRaw(const std::wstring& url, const std::wstring& apiKey,
 static void AiJsonVerdict(const std::string& body, std::wstring& said) {
     said.clear();
     crxk::J j;
-    if (!crxk::JParse(body, j) || j.t != 'o') return;
-    const crxk::J* er = j.get("error");
+    if (!crxk::JParse(body, j)) return;
+    // the root walks through Google's array dialect (the error object wrapped
+    // in [ ]) - a pointer, never a copy: j.a[0] lives inside j and copying it
+    // over j would be self-assignment from a subobject (undefined)
+    const crxk::J* root = &j;
+    if (j.t == 'a' && !j.a.empty() && j.a[0].t == 'o') root = &j.a[0];
+    if (root->t != 'o') return;
+    const crxk::J* er = root->get("error");
     if (er) {
         if (er->t == 's') { said = WxW(er->s); return; }
         if (er->t == 'o') {
@@ -579,7 +607,7 @@ static void AiJsonVerdict(const std::string& body, std::wstring& said) {
             if (m && m->t == 's') { said = WxW(m->s); return; }
         }
     }
-    const crxk::J* dt = j.get("detail");
+    const crxk::J* dt = root->get("detail");
     if (dt && dt->t == 's') { said = WxW(dt->s); return; }
     if (dt && dt->t == 'a') {                        // FastAPI validation array
         std::wstring all;
@@ -602,9 +630,9 @@ static void AiJsonVerdict(const std::string& body, std::wstring& said) {
         }
         if (!all.empty()) { said = all; return; }
     }
-    const crxk::J* ms = j.get("message");
+    const crxk::J* ms = root->get("message");
     if (ms && ms->t == 's') { said = WxW(ms->s); return; }
-    const crxk::J* ti = j.get("title");
+    const crxk::J* ti = root->get("title");
     if (ti && ti->t == 's') said = WxW(ti->s);
 }
 static void AiClassifyHttp(int status, const std::string& body, const std::wstring& model, AiError& e) {
@@ -851,7 +879,20 @@ static bool AiChatStream(const AiCfg& c, const std::string& system,
     }
     full = sse.full;
     if (sse.cutOff) { err.cat = AI_ERR_CUTOFF; return false; }
-    return !full.empty();
+    if (full.empty()) {
+        // a 200 whose stream carried no readable text used to end here with
+        // the error UNSET - the caller's Friendly() then fell to its bare
+        // default and the user saw "Error communicating with AI service."
+        // with nothing to act on. Speak: the status, the content type, the
+        // body's own head - every dialect the door might have used.
+        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+        err.detail = L"The reply streamed no readable text (HTTP " +
+                     std::to_wstring(status) +
+                     (ct.empty() ? std::wstring() : (L", content-type " + ct)) +
+                     L") - body head: " + AiBodyHead(resp);
+        return false;
+    }
+    return true;
 }
 // The buffered call (Define / Explain / Recap / tester / notes / retries).
 static bool AiChatBuffered(const AiCfg& c, const std::string& system,
