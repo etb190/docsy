@@ -431,6 +431,12 @@ struct AiError {
     // mismatch, not a width problem: no batch size cures it, so the embed
     // pass retries once at the same width and then speaks, never halving
     bool shapeMismatch = false;
+    // the door's content screen refused the input - NVIDIA's safety screening
+    // rejects the WHOLE batch when ONE chunk trips it. Halving cures it (the
+    // flagged chunk is isolated at width 1 and stays home keyword-only); a
+    // same-width retry never does, and the generic ladder ground each poisoned
+    // batch through hundreds of calls before the pass died at "a certain point"
+    bool contentFlagged = false;
     std::wstring Friendly() const {      // MapErrorToFriendlyMessage, Ollama booted
         if (!detail.empty()) return detail;
         switch (cat) {
@@ -635,6 +641,20 @@ static void AiJsonVerdict(const std::string& body, std::wstring& said) {
     const crxk::J* ti = root->get("title");
     if (ti && ti->t == 's') said = WxW(ti->s);
 }
+// the content screen names itself in the body regardless of which envelope
+// carries it - a 4xx status or a 200 with an error json. A flagged batch must
+// halve (isolate the flagged chunk at width 1), never ride the generic ladder.
+static bool AiBodySaysFlagged(const std::string& body) {
+    if (body.empty()) return false;
+    std::string low = AiClipUtf8(body, 500);
+    for (auto& ch : low) ch = (char)tolower((unsigned char)ch);
+    return low.find("content safety") != std::string::npos ||
+           low.find("safety screening") != std::string::npos ||
+           low.find("content_filter") != std::string::npos ||
+           low.find("content filtering") != std::string::npos ||
+           low.find("inappropriate") != std::string::npos ||
+           low.find("flagged") != std::string::npos;
+}
 static void AiClassifyHttp(int status, const std::string& body, const std::wstring& model, AiError& e) {
     e.status = status; e.model = model;
     // ExtractServerDetail, every dialect: the verdict extractor walks error /
@@ -646,6 +666,7 @@ static void AiClassifyHttp(int status, const std::string& body, const std::wstri
         std::string t = AiClipUtf8(body, 300);
         e.detail = WxW(t);
     }
+    if (AiBodySaysFlagged(body)) e.contentFlagged = true;
     switch (status) {
     case 401: case 403: e.cat = AI_ERR_NOT_SIGNED_IN; break;
     case 402: e.cat = AI_ERR_USAGE_LIMIT; break;    // credits ran dry - no width cures it
@@ -1393,6 +1414,7 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
     if (got != fly.size()) {
         err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
         err.shapeMismatch = true;
+        if (AiBodySaysFlagged(resp)) err.contentFlagged = true;
         // a 200 whose JSON holds no vectors is the door refusing in its own
         // dialect - a region note, a quota line, a middlebox's verdict. The
         // verdict rides the reply's own words first, else the body's

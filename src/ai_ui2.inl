@@ -663,36 +663,45 @@ static void AiSemanticStart() {
                 // "stopped". The probe names the wall in under a minute,
                 // before the lanes exist.
                 {
-                    AiEv* wk = AiEvMake(AIEV_SEM_STATUS);
-                    wk->a = WxU(L"Waking the embedding door…");
-                    AiPost(wk);
-                    std::vector<std::string> probe;
-                    probe.push_back(WxU(docPrefix) + "warm-up");
-                    std::vector<std::vector<float>> pv;
-                    AiError pe;
-                    bool ok = false;
-                    for (int a = 0; a < 2 && !ok; a++) {
-                        if (g_aiSemCancel.load()) break;
-                        ok = AiEmbedBatch(cfg, probe, false, pv, pe, &g_aiSemCancel, 10 * 1000);
-                        if (!ok && a == 0) Sleep(400);
+                    // the probe rides once per door per session: a rebuild that
+                    // follows a fresh wake (a second document, a re-run after a
+                    // few flagged chunks) starts instantly instead of paying
+                    // the warm-up latency again
+                    std::string probeKey = WxU(cfg.baseUrl) + "|" + model;
+                    if (g_aiSemProbeKey != probeKey) {
+                        AiEv* wk = AiEvMake(AIEV_SEM_STATUS);
+                        wk->a = WxU(L"Waking the embedding door…");
+                        AiPost(wk);
+                        std::vector<std::string> probe;
+                        probe.push_back(WxU(docPrefix) + "warm-up");
+                        std::vector<std::vector<float>> pv;
+                        AiError pe;
+                        bool ok = false;
+                        for (int a = 0; a < 2 && !ok; a++) {
+                            if (g_aiSemCancel.load()) break;
+                            ok = AiEmbedBatch(cfg, probe, false, pv, pe, &g_aiSemCancel, 10 * 1000);
+                            if (!ok && a == 0) Sleep(400);
+                        }
+                        if (g_aiSemCancel.load()) {
+                            g_aiSemActive = false;
+                            AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                            ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
+                            AiPost(ev);
+                            return;
+                        }
+                        if (!ok) {
+                            g_aiSemActive = false;
+                            AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                            ev->a = WxU(L"Semantic search can't start: the embedding door didn't answer "
+                                        L"two 10-second warm-up calls — ") + WxU(pe.Friendly()) +
+                                    WxU(L" — keyword search stays available. Press the beaker to try again.");
+                            AiPost(ev);
+                            return;
+                        }
+                        g_aiSemProbeKey = probeKey;   // woke once: the session believes
                     }
-                    if (g_aiSemCancel.load()) {
-                        g_aiSemActive = false;
-                        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
-                        ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
-                        AiPost(ev);
-                        return;
-                    }
-                    if (!ok) {
-                        g_aiSemActive = false;
-                        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
-                        ev->a = WxU(L"Semantic search can't start: the embedding door didn't answer "
-                                    L"two 10-second warm-up calls — ") + WxU(pe.Friendly()) +
-                                WxU(L" — keyword search stays available. Press the beaker to try again.");
-                        AiPost(ev);
-                        return;
-                    }
-                    anyLanded.store(true);   // the door proved alive: width-1 refusals may stay home
+                    anyLanded.store(true);   // the door proved alive (fresh probe or cached):
+                                             // width-1 refusals may stay home
                 }
                 pix->vectors.assign(total, {});
                 pix->dim = 0;
@@ -757,35 +766,18 @@ static void AiSemanticStart() {
                     if (e.cat == AI_ERR_MODEL_NOT_FOUND || e.cat == AI_ERR_NOT_SIGNED_IN ||
                         e.cat == AI_ERR_USAGE_LIMIT)
                         return false;                    // no width cures these
-                    if (e.shapeMismatch) {               // the reader's mismatch
-                        if (retries < 1)
-                            return self(self, b0, b1, depth, retries + 1, eOut);
-                        return false;                    // speaks at full width
-                    }
-                    if (e.cat == AI_ERR_BUSY) {          // 429 / 503: a rate or concurrency
-                        // signal - halving the width never cures it (the ladder's
-                        // 511 one-line calls make a rate limit WORSE, and they
-                        // grind silently for the better part of an hour with the
-                        // seat marked active, so every beaker press read
-                        // "stopped"). Back off at the SAME width, twice, then
-                        // speak the verdict.
-                        if (retries < 2) {
-                            if (g_aiSemCancel.load()) return false;
-                            if (depth == 0) {
-                                AiEv* hb = AiEvMake(AIEV_SEM_STATUS);
-                                hb->a = WxU(L"Building semantic search… the embedding door is "
-                                            L"busy — backing off before the next attempt.");
-                                AiPost(hb);
-                            }
-                            Sleep(retries == 0 ? 1200 : 3000);
-                            return self(self, b0, b1, depth, retries + 1, eOut);
-                        }
-                        return false;
-                    }
-                    bool refused = (e.status == 400 || e.status == 413 || e.status == 422);
+                    bool refused = (e.contentFlagged ||
+                                    e.status == 400 || e.status == 413 || e.status == 422);
                     if (refused) {
-                        // width 1 with the door proven alive: one poison chunk
-                        // stays home, keyword-only, its siblings still land
+                        // a width refusal or the content screen - NVIDIA's safety
+                        // screening rejects the WHOLE batch when ONE chunk trips
+                        // it, so the cure is the same: halve until the flagged
+                        // chunk stands alone at width 1 and stays home keyword-
+                        // only while its siblings land. The old bail at width 4
+                        // made the ladder die a few steps short of the cure -
+                        // one flagged paragraph killed the whole pass with the
+                        // "content safety screening" verdict, after grinding the
+                        // generic ladder's hundreds of calls first.
                         if (b1 - b0 <= 1 && anyLanded.load()) {
                             pix->vectors[b0].clear();
                             skipped.fetch_add(1);
@@ -799,10 +791,40 @@ static void AiSemanticStart() {
                             }
                             return true;
                         }
-                        if (b1 - b0 <= 4) return false;  // the wall speaks, the pass ends
+                        if (b1 - b0 <= 1 || !anyLanded.load())
+                            return false;                // the wall speaks, the pass ends
                         size_t mid = b0 + (b1 - b0) / 2;
                         return self(self, b0, mid, depth + 1, 0, eOut) &&
                                self(self, mid, b1, depth + 1, 0, eOut);
+                    }
+                    if (e.shapeMismatch) {               // the reader's mismatch - and the
+                        // content screen never rides here: a flagged 200-body rides
+                        // contentFlagged above, so a real reader bug still retries
+                        // its width once without the ladder eating the clock
+                        if (retries < 1)
+                            return self(self, b0, b1, depth, retries + 1, eOut);
+                        return false;                    // speaks at full width
+                    }
+                    if (e.cat == AI_ERR_BUSY) {          // 429 / 503: a rate or concurrency
+                        // signal - halving the width never cures it (the ladder's
+                        // 511 one-line calls make a rate limit WORSE, and they
+                        // grind silently for the better part of an hour with the
+                        // seat marked active, so every beaker press read
+                        // "stopped"). Back off at the SAME width - four patient
+                        // breaths, a burst budget recovers without the pass dying
+                        // at "a certain point" - then speak the verdict.
+                        if (retries < 4) {
+                            if (g_aiSemCancel.load()) return false;
+                            if (depth == 0) {
+                                AiEv* hb = AiEvMake(AIEV_SEM_STATUS);
+                                hb->a = WxU(L"Building semantic search… the embedding door is "
+                                            L"busy — backing off before the next attempt.");
+                                AiPost(hb);
+                            }
+                            Sleep(retries == 0 ? 1200 : (retries == 1 ? 3000 : 6000));
+                            return self(self, b0, b1, depth, retries + 1, eOut);
+                        }
+                        return false;
                     }
                     if (b1 - b0 <= 1 || depth >= 8) return false;
                     if (retries < 2) {                   // a hiccup (timeout / busy /

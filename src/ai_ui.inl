@@ -67,6 +67,9 @@ static std::atomic<bool> g_aiSemRestart{ false };   // the second press during a
                                                     // starts it when the pass lands
 static std::thread g_aiSemThread;
 static std::set<std::string> g_aiSemRequested;
+static std::string g_aiSemProbeKey;      // model|url the warm-up call already woke
+                                         // this session - a rebuild that follows a
+                                         // fresh wake skips the 10-second probe
 
 // the reply thread
 static std::thread g_aiReplyThread;
