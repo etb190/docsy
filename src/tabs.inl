@@ -28,6 +28,11 @@ static DocState* DocById(int id) {          // the render results' owner lookup:
     return nullptr;
 }
 
+static void AiOcrFlightArrive(int docId, int page,
+                              winrt::Windows::Graphics::Imaging::SoftwareBitmap soft);
+                       // the OCR flight's raster landed (defined in ai_ui2.inl):
+                       // the drain hands it over and the recognition starts there
+
 // The worker's finished renders land here on the UI thread: each result
 // re-validated against what the owner still wants (the page may have been
 // zoomed, rotated or closed meanwhile) and inserted into the very cache the
@@ -38,6 +43,11 @@ static void RqDrain() {
     if (done.empty()) return;
     bool viewInv = false;
     for (auto& r : done) {
+        if (r.kind == RJ_OCR) {
+            AiOcrFlightArrive(r.docId, r.page, r.soft);   // never a cache entry:
+                                                          // the flight owns it
+            continue;
+        }
         if (r.kind == RJ_PAGE) {
             DocState* D = DocById(r.docId);
             if (!D || r.page < 0 || r.page >= D->n) { if (r.b) DeleteObject(r.b); continue; }

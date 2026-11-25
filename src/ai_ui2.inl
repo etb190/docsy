@@ -134,14 +134,22 @@ static int AiLetters(const std::wstring& s) {
 // 100-300ms a page ON THE CALLING THREAD, and the extraction pump calling it
 // froze the message loop for the whole range. The app hitched, and the
 // low-level mouse hook riding that loop stalled the machine's pointer with
-// it. The flight keeps the render on this thread (the PDF document is
-// apartment-bound) and hands the recognition to its own async completion: the
-// pump parks, the message loop breathes, and the arrival re-kicks whoever was
-// waiting. One page in flight at a time - both pumps park on the same flight.
+// it. The flight keeps BOTH halves off this thread now: the render rides the
+// render worker's queue (the same gate and the same thread every display
+// raster uses - the old flight still rendered its 2x input right here, a
+// 50-250ms hitch per page under the render gate, and the machine stuttered
+// its way through every reading phase), and the recognition runs on its own
+// async completion. The pump parks, the message loop breathes, and the
+// arrivals re-kick whoever was waiting. One page in flight at a time - both
+// pumps park on the same flight.
 struct AiOcrFlight {
     bool busy = false;
     std::wstring path;
+    int docId = 0;                       // the render queue's stable handle: the
+                                         // drain's OCR results match against it
     int page = -1;
+    int ow = 0, oh = 0;                  // the raster the flight asked for - the
+                                         // payload's boxes are native to it
     DWORD born = 0;
 };
 static AiOcrFlight g_ocrFlight;
@@ -152,41 +160,31 @@ static bool AiOcrPrewarm(DocState& D, int pageIdx) {
     if (g_ocrFlight.busy) return true;      // a page is already flying: the caller parks
     auto eng = OcrEngineGet();
     if (!eng || !D.n || pageIdx < 0 || pageIdx >= D.n) return false;
+    if (!D.id || !D.doc) return false;      // no render seat to ride (never for a
+                                            // live document; the guard keeps the
+                                            // flight from parking on a dead ask)
     int ow = std::clamp((int)std::lround(D.pw[pageIdx] * 2), 800, 1600);
     int oh = max(1, (int)std::lround(ow * D.ph[pageIdx] / max(1.f, D.pw[pageIdx])));
-    auto soft = RenderSoft(D, pageIdx, ow, oh);   // the one this-thread step
-                                                  // (~20-80ms; the OCR itself -
-                                                  // the 100-300ms bulk - runs away
-                                                  // from this thread)
-    if (!soft) return false;                // render failed: the page reads empty
+    int rot = D.prot.count(pageIdx) ? D.prot[pageIdx] : 0;
+    int flip = D.pflip.count(pageIdx) ? D.pflip[pageIdx] : 0;
     g_ocrFlight.busy = true;
     g_ocrFlight.path = D.path;
+    g_ocrFlight.docId = D.id;
     g_ocrFlight.page = pageIdx;
+    g_ocrFlight.ow = ow; g_ocrFlight.oh = oh;
     g_ocrFlight.born = GetTickCount();
-    AiOcrPayload* pl = new AiOcrPayload();
-    pl->path = D.path;
-    pl->page = pageIdx;
-    pl->ow = ow; pl->oh = oh;
-    auto op = eng.RecognizeAsync(soft);
-    op.Completed([pl](auto&& async, auto&&) {
-        try {
-            auto res = async.GetResults();
-            for (winrt::Windows::Media::Ocr::OcrLine line : res.Lines())
-                for (winrt::Windows::Media::Ocr::OcrWord wd : line.Words()) {
-                    auto r = wd.BoundingRect();
-                    if (r.Width <= 0 || r.Height <= 0 || wd.Text().empty()) continue;
-                    TxtCell c;
-                    c.text = std::wstring(wd.Text());
-                    c.l = r.X; c.t = r.Y; c.r = c.l + r.Width; c.b = c.t + r.Height;
-                    pl->cells.push_back(std::move(c));
-                }
-            pl->ok = true;
-        } catch (...) { pl->ok = false; }
-        if (g.main) PostMessageW(g.main, WM_APP + 72, 0, (LPARAM)pl);
-        else { delete pl; g_ocrFlight.busy = false; }   // no frame left to land on
-    });
-    return true;   // parked; the arrival re-kicks the waiting pump
+    RqEnqueue(D, pageIdx, RJ_OCR, ow, oh, rot, flip);   // the render rides the
+                        // worker's queue like every other raster; the drain
+                        // lands it in AiOcrFlightArrive, the recognition
+                        // still runs away from this thread, and this thread
+                        // gives the machine its frame budget back
+    return true;   // parked; the drain's arrival re-kicks the waiting pump
 }
+
+static void AiOcrFlightArrive(int docId, int page,
+                              winrt::Windows::Graphics::Imaging::SoftwareBitmap soft);
+                             // the drain's landing - the recognition starts there;
+                             // defined below, beside AiOcrArrive and the pumps it re-kicks
 
 // ---- the range extraction pump (one OCR page per tick) ----
 struct AiRangeJob {
@@ -202,6 +200,60 @@ struct AiRangeJob {
 };
 static AiRangeJob g_range;
 
+// The drain landed the flight's raster: the recognition starts HERE - one
+// async call, never a wait - and the boxes ride home on WM_APP + 72 exactly
+// as they always have. A render that failed parks its page empty through the
+// same arrival (ok=false): re-firing would just re-queue the same failing
+// raster forever. A result nobody waits for (the document died mid-flight,
+// the seat moved on) frees the flight and re-kicks the waiting pumps itself.
+static void AiOcrFlightArrive(int docId, int page,
+                              winrt::Windows::Graphics::Imaging::SoftwareBitmap soft) {
+    DocState* D = DocById(docId);
+    bool ours = g_ocrFlight.busy && g_ocrFlight.docId == docId &&
+                g_ocrFlight.page == page && D && !D->path.empty();
+    if (!ours) {
+        g_ocrFlight.busy = false;
+        g_ocrFlight.page = -1;
+        if (g_range.active) SetTimer(g.main, 4714, 1, nullptr);
+        if (g_aiIndexing) SetTimer(g.main, 4713, 1, nullptr);
+        return;
+    }
+    AiOcrPayload* pl = new AiOcrPayload();
+    pl->path = D->path;
+    pl->page = page;
+    pl->ow = g_ocrFlight.ow; pl->oh = g_ocrFlight.oh;
+    if (!soft) {   // the render failed: the page reads empty, the pump moves on
+        pl->ok = false;
+        if (g.main) PostMessageW(g.main, WM_APP + 72, 0, (LPARAM)pl);
+        else delete pl;
+        return;
+    }
+    pl->ok = true;
+    try {
+        auto op = OcrEngineGet().RecognizeAsync(soft);
+        op.Completed([pl](auto&& async, auto&&) {
+            try {
+                auto res = async.GetResults();
+                for (winrt::Windows::Media::Ocr::OcrLine line : res.Lines())
+                    for (winrt::Windows::Media::Ocr::OcrWord wd : line.Words()) {
+                        auto r = wd.BoundingRect();
+                        if (r.Width <= 0 || r.Height <= 0 || wd.Text().empty()) continue;
+                        TxtCell c;
+                        c.text = std::wstring(wd.Text());
+                        c.l = r.X; c.t = r.Y; c.r = c.l + r.Width; c.b = c.t + r.Height;
+                        pl->cells.push_back(std::move(c));
+                    }
+                pl->ok = true;
+            } catch (...) { pl->ok = false; }
+            if (g.main) PostMessageW(g.main, WM_APP + 72, 0, (LPARAM)pl);
+            else { delete pl; g_ocrFlight.busy = false; }   // no frame left to land on
+        });
+    } catch (...) {   // the engine pack vanished between the ask and the start:
+        pl->ok = false;                      // the page parks empty, the pump moves on
+        if (g.main) PostMessageW(g.main, WM_APP + 72, 0, (LPARAM)pl);
+        else delete pl;
+    }
+}
 static void AiOcrArrive(AiOcrPayload* pl) {
     std::wstring path = std::move(pl->path);
     int page = pl->page, ow = pl->ow, oh = pl->oh;
@@ -1214,6 +1266,18 @@ static void SumHide(bool fromOutside) {
     SumUnhookMouse();
     if (fromOutside) g_sumHideTick = GetTickCount();
 }
+// The frame's folds drive the seat's render. A minimize is a fold SumHide
+// never sees: Windows hides an owned popup with its owner, the controller
+// keeps claiming visible, and the surface its composition rode on is thrown
+// away - the restore then re-shows the popup over a dead surface and the
+// webview paints the white card the user reported. The handback must be
+// explicit: FALSE on the way down, TRUE on the way back rebuilds the
+// composition fresh. Both calls no-op when nothing actually moved.
+static void SumSyncVisible() {
+    if (!g_sumCtr || !g_sumWnd) return;
+    BOOL want = (IsWindowVisible(g_sumWnd) && g.main && !IsIconic(g.main)) ? TRUE : FALSE;
+    g_sumCtr->put_IsVisible(want);
+}
 static LRESULT CALLBACK SumMouseHookProc(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION && g_sumWnd && IsWindowVisible(g_sumWnd)) {
         switch (wp) {
@@ -1784,7 +1848,13 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 1;
     }
     case WM_PAINT: {   // the transparent webview lets the grain through - the
-                       // window itself lays the tile down on every expose
+                       // window itself lays the tile down on every expose, and
+                       // every expose also re-arms the render: the frame's
+                       // minimize folded this window without a SumHide (owned
+                       // windows hide with their owner) and its restore re-shows
+                       // it over a composition the surface threw away - the
+                       // white card. The handback below rebuilds it fresh; on a
+                       // living controller it is a no-op.
         PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
         RECT rc; GetClientRect(h, &rc);
         if (g.main) {
@@ -1793,6 +1863,7 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         FillRect(dc, &rc, GrainBrush(1));
         EndPaint(h, &ps);
+        SumSyncVisible();
         return 0;
     }
     case WM_GETMINMAXINFO: {   // SummaryWindow: MinWidth 460, MinHeight 390

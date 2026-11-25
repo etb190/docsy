@@ -241,7 +241,7 @@ static std::condition_variable g_rqCv;
 static bool g_rqQuit = false;
 static HANDLE g_rqThread = nullptr;
 static unsigned long long g_rqSeq = 0;      // bump on every ask; the worker answers the newest first
-enum { RJ_PAGE, RJ_THUMB };
+enum { RJ_PAGE, RJ_THUMB, RJ_OCR };   // OCR: the summary flight's 2x text raster
 struct RJob {
     int docId, page, kind;
     int w, h, rot, flip;                    // rot: quarter-turns; flip: 1=X 2=Y (RenderCore's own bits)
@@ -253,6 +253,9 @@ struct RRes {
     int w, h, rot, flip;                    // pages: rot = the packed Ent key (quarter | flip<<4)
     HBITMAP b;                              // may be null: a failed thumb caches its null as a placeholder
     unsigned long long seq;
+    winrt::Windows::Graphics::Imaging::SoftwareBitmap soft{ nullptr };   // OCR jobs only:
+                                            // the flight's raster - the drain hands it
+                                            // to the recognition, never into a cache
 };
 static std::vector<RJob> g_rq;              // pending, consumed by the worker
 static std::vector<RRes> g_rqDone;          // finished, drained on the UI thread
@@ -286,6 +289,11 @@ static void RqPurgeThumbs(int docId, int first, int last) {
         g_rq[k] = g_rq.back(); g_rq.pop_back(); k--;    // left behind: neither will ever be looked at,
     }                                                   // so the worker must not spend renders on them
 }
+// the worker's own OCR raster: the SoftwareBitmap input the recognition consumes
+// (defined below the page render, forward-declared here because the queue runs first)
+static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoftDoc(
+        winrt::agile_ref<winrt::Windows::Data::Pdf::PdfDocument> doc,
+        int i, int w, int h, int rot, int flip);
 static DWORD WINAPI RqWorker(LPVOID) {
     try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
     for (;;) {
@@ -301,16 +309,24 @@ static DWORD WINAPI RqWorker(LPVOID) {
             if (!have)                                  // held the eye's page hostage behind the whole
                 for (size_t k = 0; k < g_rq.size(); k++)// card shelf - seconds of white pages on every
                     if (!have || g_rq[k].seq > bs) { best = k; bs = g_rq[k].seq; have = true; }
+            // an OCR flight's raster rides the same recency pass as the thumbs:
+            // one flight at a time means at most one in the queue, and both are
+            // background work
             j = g_rq[best];
             g_rq[best] = g_rq.back(); g_rq.pop_back();
         }
         HBITMAP b = nullptr;
-        try { b = RenderCore(j.doc.get(), j.page, j.w, j.h, j.rot, j.flip); } catch (...) {}
+        winrt::Windows::Graphics::Imaging::SoftwareBitmap soft{ nullptr };
+        try {
+            if (j.kind == RJ_OCR) soft = RenderSoftDoc(j.doc, j.page, j.w, j.h, j.rot, j.flip);
+            else b = RenderCore(j.doc.get(), j.page, j.w, j.h, j.rot, j.flip);
+        } catch (...) {}
         {
             std::lock_guard<std::mutex> lk(g_rqM);
             int protp = j.rot, flipp = j.flip;
             g_rqDone.push_back(RRes{ j.docId, j.page, j.kind, j.w, j.h,
-                                     j.kind == RJ_PAGE ? (protp | (flipp << 4)) : 0, flipp, b, j.seq });
+                                     j.kind == RJ_PAGE ? (protp | (flipp << 4)) : 0, flipp, b, j.seq,
+                                     std::move(soft) });
         }
         if (g.view) PostMessageW(g.view, WM_APP + 2, 0, 0);   // the drain paints the result
     }
@@ -370,14 +386,17 @@ static HBITMAP GetBmp(DocState& D, int i, int w, int h) {
 // The same render as Render(), decoded as a SoftwareBitmap - the input format the
 // OS OCR engine consumes for the text-selection pass. Rotated/flipped pages bake
 // their transform the same way, so a transformed page's OCR cells land in its
-// new coordinate space and selection keeps working there.
-static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D, int i, int w, int h) {
+// new coordinate space and selection keeps working there. The core touches NO
+// DocState - rot/flip ride as parameters - so the render worker can run it for
+// the OCR flight's queue jobs, and the UI thread never waits under the render
+// gate for a 2x raster it did not ask to look at.
+static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoftDoc(
+        winrt::agile_ref<winrt::Windows::Data::Pdf::PdfDocument> doc,
+        int i, int w, int h, int rot, int flip) {
     try {
-        std::lock_guard<std::mutex> lk(g_renderM);   // the same gate: this render runs on the
-        int rot = D.prot.count(i) ? D.prot[i] : 0;   // UI thread beside the worker's own
-        int flip = D.pflip.count(i) ? D.pflip[i] : 0;
-        int rw = (rot % 2 == 0) ? w : h, rh = (rot % 2 == 0) ? h : w;
-        auto page = D.doc.GetPage((uint32_t)i);
+        std::lock_guard<std::mutex> lk(g_renderM);   // the same gate: Windows.Data.Pdf
+        int rw = (rot % 2 == 0) ? w : h, rh = (rot % 2 == 0) ? h : w;   // takes one render at a time
+        auto page = doc.get().GetPage((uint32_t)i);
         PdfPageRenderOptions o;
         o.DestinationWidth((uint32_t)max(1, rw));
         o.DestinationHeight((uint32_t)max(1, rh));
@@ -418,6 +437,11 @@ static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D,
         auto dec2 = winrt::Windows::Graphics::Imaging::BitmapDecoder::CreateAsync(st2).get();
         return dec2.GetSoftwareBitmapAsync().get();
     } catch (...) { return nullptr; }
+}
+static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D, int i, int w, int h) {
+    int rot = D.prot.count(i) ? D.prot[i] : 0;
+    int flip = D.pflip.count(i) ? D.pflip[i] : 0;
+    return RenderSoftDoc(winrt::make_agile(D.doc), i, w, h, rot, flip);
 }
 
 static const long long PAGE_CACHE_BUDGET = 160LL << 20;   // per document: hundreds of

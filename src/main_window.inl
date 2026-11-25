@@ -277,6 +277,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_SIZE:
+        SumSyncVisible();   // minimize folds the seat's render (the OS hides its
+                            // owned popup without our SumHide); the restore's
+                            // handback must be explicit or the popup comes back
+                            // over a dead composition and paints white
         LayoutMain();
         InvalidateCap(h);   // the buttons anchor to the right edge: a resize only
                             // invalidates the exposed strip, so without this the
