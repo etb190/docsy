@@ -96,7 +96,7 @@
             <div class="flabel">Reasoning Effort</div>
             <select class="fbox" id="sEffort"><option value="">Default</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
             <div class="flabel">Embedding Model</div>
-            <input class="fbox" id="sEmb" placeholder="gemini-embedding-2">
+            <input class="fbox" id="sEmb" placeholder="nvidia/nemotron-3.5-embed-8b">
             <input type="hidden" id="sTopK" value="24">
             <input type="hidden" id="sBudget" value="40000">
             <input type="hidden" id="sHist" value="6">
@@ -428,8 +428,10 @@ if(dialEl){
   dialEl.onchange=function(){
     var p=PRESETS[this.value]; if(!p) return;
     $("sUrl").value=p[0]; $("sModel").value=p[1];
-    if(this.value.startsWith("gemini")) $("sEmb").value="gemini-embedding-2";
-    else if(this.value.startsWith("nemotron") || this.value==="kimi" || this.value.startsWith("glm") || this.value==="deepseek" || this.value==="gemma-4") $("sEmb").value="nvidia/nemotron-3-embed-1b";
+    /* the retrieval brain is one model for every dial guest: embeddings ride
+       NVIDIA's own door (nemotron-3.5-embed-8b) no matter whose table hosts
+       the chat - Google's embedding door is off the seat */
+    $("sEmb").value="nvidia/nemotron-3.5-embed-8b";
     var local=/localhost|127\.0\.0\.1|\[::1?\]/.test($("sUrl").value);
     $("cloudNote").style.display=local?"none":"block";
   };
@@ -476,7 +478,7 @@ function fillSettings(s){
   $("sTok").value=s.maxTokens!=null?s.maxTokens:16384;
   $("sTopP").value=s.topP!=null?s.topP:0.95;
   $("sEffort").value=s.reasoningEffort||"";
-  $("sEmb").value=s.embeddingModel||"gemini-embedding-2";
+  $("sEmb").value=s.embeddingModel||"nvidia/nemotron-3.5-embed-8b";
   $("sTopK").value=s.topK!=null?s.topK:24;
   $("sBudget").value=s.evidenceBudget!=null?s.evidenceBudget:40000;
   $("sHist").value=s.maxHistory!=null?s.maxHistory:6;
@@ -519,7 +521,7 @@ function readSettings(){
     maxTokens: parseInt($("sTok").value,10)||16384,
     topP: parseFloat($("sTopP").value)||0.95,
     reasoningEffort: $("sEffort").value,
-    embeddingModel: $("sEmb").value.trim() || "gemini-embedding-2",
+    embeddingModel: $("sEmb").value.trim() || "nvidia/nemotron-3.5-embed-8b",
     topK: parseInt($("sTopK").value,10)||24,
     evidenceBudget: parseInt($("sBudget").value,10)||40000,
     maxHistory: parseInt($("sHist").value,10)||6

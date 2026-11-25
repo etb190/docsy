@@ -482,7 +482,11 @@ static void AiRunReply(const std::string& key, const std::string& input) {
             // the query embedding rides the same thread (network is free here)
             std::vector<float> qvec;
             std::string q = AiBuildRetrievalQuery(input, msgsSnapshot);
-            std::vector<std::string> one = { WxU(cfg.embQueryPrefix) + AiClipUtf8(q, 1200) };
+            // the query rides raw on the NIM dialect (input_type names the
+            // side); Google's task prefix only fits Google's own door
+            std::vector<std::string> one = {
+                WxU(AiEmbIsNimModel(cfg.embeddingModel) ? std::wstring() : cfg.embQueryPrefix) +
+                AiClipUtf8(q, 1200) };
             std::vector<std::vector<float>> vecs;
             AiError e2;
             if (snap.dim > 0 && snap.vectors.size() == snap.chunks.size() &&

@@ -156,7 +156,12 @@ struct AiCfg {
     int maxTokens = 16384;
     double topP = 0.95;
     std::wstring reasoningEffort = L"";     // low | medium | high | (empty)
-    std::wstring embeddingModel = L"gemini-embedding-2";
+    // the retrieval brain rides NVIDIA's own door: nemotron-3.5-embed-8b,
+    // the model build.nvidia.com hosts (the URL slug spells it nemotron-3_5
+    // - the API id spells it with dots). Google's embedding door came off
+    // the seat: its answers reached the app in a shape the reader could not
+    // parse, and the user's call was unambiguous - embeddings on nemotron.
+    std::wstring embeddingModel = L"nvidia/nemotron-3.5-embed-8b";
     std::wstring embDocPrefix = L"title: none | text: ";
     std::wstring embQueryPrefix = L"task: search results | query: ";
     int topK = 24;
@@ -216,6 +221,13 @@ static void AiLoadSettings() {
     gn("topP", g_aiCfg.topP);
     gs("reasoningEffort", g_aiCfg.reasoningEffort);
     gs("embeddingModel", g_aiCfg.embeddingModel);
+    // the embedding model's migration: a settings.json saved while Google's
+    // door held the seat (or naming the retired 1b id) is upgraded on load -
+    // the user's directive moved the retrieval brain to nemotron for good
+    if (g_aiCfg.embeddingModel.empty() ||
+        g_aiCfg.embeddingModel.find(L"gemini-embedding") != std::wstring::npos ||
+        g_aiCfg.embeddingModel == L"nvidia/nemotron-3-embed-1b")
+        g_aiCfg.embeddingModel = L"nvidia/nemotron-3.5-embed-8b";
     gs("embDocPrefix", g_aiCfg.embDocPrefix);
     gs("embQueryPrefix", g_aiCfg.embQueryPrefix);
     gi("topK", g_aiCfg.topK);
@@ -952,20 +964,36 @@ static std::string AiExtractStreamingAnswer(const std::string& raw) {
 // request that arrives without it; the field rides only on the NIM door,
 // the OpenAI-compatible doors never asked for it and the strict ones would
 // reject it.
+// The embeddings' host routing: an NVIDIA-family model rides NIM's own door
+// no matter whose table the chat brain sits on - the chat can live on Google's
+// OpenAI-compatible endpoint while the retrieval side speaks nemotron. The
+// callers prefix-check through the same door: NIM's retrieval dialect names
+// its side with input_type, and Google's task prefixes would ride INSIDE the
+// text as noise (NVIDIA's own guide: the wrong surface costs retrieval).
+static bool AiEmbIsNimModel(const std::wstring& modelRaw) {
+    std::wstring m = modelRaw.empty() ? std::wstring(L"nvidia/nemotron-3.5-embed-8b") : modelRaw;
+    std::string ml = WxU(m);
+    for (auto& ch : ml) ch = (char)tolower((unsigned char)ch);
+    return ml.rfind("nvidia/", 0) == 0 || ml.find("nemotron") != std::string::npos ||
+           ml.find("nv-embed") != std::string::npos || ml.find("embedqa") != std::string::npos;
+}
 static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                          bool query, std::vector<std::vector<float>>& out,
                          AiError& err, std::atomic<bool>* cancel) {
     out.clear();
-    std::wstring model = c.embeddingModel.empty() ? L"nvidia/nemotron-3-embed-1b" : c.embeddingModel;
+    std::wstring model = c.embeddingModel.empty() ? L"nvidia/nemotron-3.5-embed-8b" : c.embeddingModel;
     std::wstring root = c.baseUrl;
     while (!root.empty() && root.back() == L'/') root.pop_back();
     if (root.empty()) root = L"https://integrate.api.nvidia.com/v1";
+    std::string ruLow = WxU(root);
+    for (auto& ch : ruLow) ch = (char)tolower((unsigned char)ch);
+    bool nim = AiEmbIsNimModel(model) ||
+               ruLow.find("integrate.api.nvidia.com") != std::string::npos;
+    if (nim && ruLow.find("integrate.api.nvidia.com") == std::string::npos)
+        root = L"https://integrate.api.nvidia.com/v1";   // the brain rides its own host
     std::string ru = WxU(root), ml = WxU(model);
     for (auto& ch : ru) ch = (char)tolower((unsigned char)ch);
     for (auto& ch : ml) ch = (char)tolower((unsigned char)ch);
-    bool nim = ru.find("integrate.api.nvidia.com") != std::string::npos ||
-               ml.rfind("nvidia/", 0) == 0 || ml.find("nemotron") != std::string::npos ||
-               ml.find("nv-embed") != std::string::npos || ml.find("embedqa") != std::string::npos;
     std::string body = "{\"model\":" + WxJsonStr(WxU(model)) + ",\"input\":[";
     for (size_t i = 0; i < inputs.size(); i++) {
         if (i) body += ",";

@@ -624,10 +624,17 @@ static void AiSemanticStart() {
         ix = g_aiIndex;
     }
     AiCfg cfg = g_aiCfg;
-    std::wstring prefixKey = cfg.embDocPrefix + L"\x01" + cfg.embQueryPrefix;
-    std::string model = WxU(cfg.embeddingModel.empty() ? L"nvidia/nemotron-3-embed-1b"
+    // the NIM doors name their side with input_type - Google's task prefixes
+    // would ride INSIDE the text as noise on that dialect, so the nemotron
+    // seat speaks raw passage text. The prefix key follows: a seat that
+    // switched dialects must rebuild, never mix two vocabularies.
+    bool nim = AiEmbIsNimModel(cfg.embeddingModel);
+    std::wstring docPrefix = nim ? std::wstring() : cfg.embDocPrefix;
+    std::wstring prefixKey = nim ? (std::wstring(L"\x01") + L"nim")
+                                 : (cfg.embDocPrefix + L"\x01" + cfg.embQueryPrefix);
+    std::string model = WxU(cfg.embeddingModel.empty() ? L"nvidia/nemotron-3.5-embed-8b"
                                                        : cfg.embeddingModel);
-    std::thread([ix, cfg, prefixKey, model]() mutable {
+    std::thread([ix, cfg, docPrefix, prefixKey, model]() mutable {
         // the guard is the rule for every AI worker: an uncaught exception on a
         // detached thread is std::terminate - the whole app dying with the
         // beaker line frozen. The catch folds the pass and speaks.
@@ -652,7 +659,7 @@ static void AiSemanticStart() {
                         // the clamp, not a raw resize: a cut inside a multibyte
                         // sequence ships invalid UTF-8 and the door's 400 rides
                         // every halved retry - one curly quote killed the pass
-                        std::string inp = WxU(cfg.embDocPrefix) + ix.chunks[i].text;
+                        std::string inp = WxU(docPrefix) + ix.chunks[i].text;
                         inputs.push_back(AiClipUtf8(inp, 1200));
                     }
                     std::vector<std::vector<float>> vecs;
