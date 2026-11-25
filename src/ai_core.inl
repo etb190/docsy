@@ -927,20 +927,32 @@ static bool AiChatStream(const AiCfg& c, const std::string& system,
     // trailing partial line parsed
     auto drain = [](const std::string& resp, const std::wstring& ct, AiSse& sse) {
         if (ct.find(L"event-stream") == std::wstring::npos) {
-            // the endpoint ignored stream:true: the whole body is one JSON answer
-            sse.full.clear();
+            // the endpoint SAYS it is not a stream: the body should be one
+            // JSON answer. It may still BE a stream - doors exist that ship
+            // SSE under a mangled content-type ("text/event-strea", text/plain,
+            // nothing at all) - and the sink already parsed every data: frame
+            // they sent. The old code wiped sse.full here FIRST, so a door
+            // that answered perfectly still ended "no readable text" with the
+            // whole answer sitting in the verdict's own body head. Parse the
+            // one-JSON shape; if that yields nothing, KEEP what the sink
+            // collected - the frame parser is content-type-agnostic and the
+            // deltas are the truth of what arrived.
             crxk::J j;
+            std::string one;
             if (crxk::JParse(resp, j) && j.t == 'o') {
                 const crxk::J* ch = j.get("choices");
                 if (ch && ch->t == 'a' && !ch->a.empty()) {
                     const crxk::J* msg = ch->a[0].get("message");
                     if (msg && msg->t == 'o') {
                         const crxk::J* ctn = msg->get("content");
-                        if (ctn && ctn->t == 's') sse.full = ctn->s;
+                        if (ctn && ctn->t == 's') one = ctn->s;
                     }
                 }
             }
-            if (sse.onDelta && !sse.full.empty()) sse.onDelta(sse.full);
+            if (!one.empty()) {
+                sse.full = one;
+                if (sse.onDelta && !sse.full.empty()) sse.onDelta(sse.full);
+            }
         } else if (!sse.buf.empty() && sse.buf.rfind("data:", 0) == 0) {
             std::string payload = sse.buf.substr(5);
             while (!payload.empty() && (payload.front() == ' ' || payload.front() == '\r'))
