@@ -666,7 +666,11 @@ static void AiSemanticStart() {
                     AiError e;
                     if (AiEmbedBatch(cfg, inputs, false, vecs, e, &g_aiSemCancel) &&
                         vecs.size() == b1 - b0) {
-                        if (ix.dim == 0 && !vecs.empty()) ix.dim = (int)vecs[0].size();
+                        // the dim rides the first real vector - blank chunks
+                        // come home with empty vectors and must not pin the
+                        // seat's dim to 0
+                        if (ix.dim == 0)
+                            for (auto& v : vecs) if (!v.empty()) { ix.dim = (int)v.size(); break; }
                         for (size_t i = b0; i < b1; i++) ix.vectors[i] = std::move(vecs[i - b0]);
                         AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
                         wchar_t b[128];

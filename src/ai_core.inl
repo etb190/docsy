@@ -132,15 +132,23 @@ static std::wstring AiGoogleGuestKey() {
 static const wchar_t* const kAiNimGuestKey =
     L"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";
 // GoogleIdentity: the request's Bearer. The reader's key survives; the
-// guest's own key carries the request when the field is empty.
+// guest's own key carries the request when the field is empty. The key also
+// rides only the door it belongs to - a saved Google key sent to NVIDIA's
+// host (or the reverse) buys nothing but a 401, so a mismatched key steps
+// aside and the door's own guest key speaks.
 static std::wstring AiBearerKeyFor(const std::wstring& url, const std::wstring& key) {
-    if (!key.empty()) return key;
     std::string u = WxU(url);
     for (auto& c : u) c = (char)tolower((unsigned char)c);
-    if (u.find("generativelanguage.googleapis.com") != std::string::npos)
-        return AiGoogleGuestKey();
-    if (u.find("integrate.api.nvidia.com") != std::string::npos)
-        return kAiNimGuestKey;
+    bool nim = u.find("integrate.api.nvidia.com") != std::string::npos;
+    bool google = u.find("generativelanguage.googleapis.com") != std::string::npos;
+    if (!key.empty()) {
+        std::string k = WxU(key);
+        if (nim && k.rfind("nvapi-", 0) != 0) return kAiNimGuestKey;
+        if (google && k.rfind("AIza", 0) != 0) return AiGoogleGuestKey();
+        return key;
+    }
+    if (google) return AiGoogleGuestKey();
+    if (nim) return kAiNimGuestKey;
     return key;
 }
 
@@ -549,7 +557,9 @@ static bool AiHttpGetRaw(const std::wstring& url, const std::wstring& apiKey,
 }
 static void AiClassifyHttp(int status, const std::string& body, const std::wstring& model, AiError& e) {
     e.status = status; e.model = model;
-    // ExtractServerDetail: error.message verbatim, else the trimmed body
+    // ExtractServerDetail: error.message verbatim, NVIDIA's flat {"detail"}
+    // next, else a trimmed body prefix - every door's own words ride to the
+    // status line, never one bare phrase standing in for four failures
     crxk::J j;
     if (crxk::JParse(body, j)) {
         const crxk::J* root = (j.t == 'o') ? &j : ((j.t == 'a' && !j.a.empty() && j.a[0].t == 'o') ? &j.a[0] : nullptr);
@@ -561,10 +571,14 @@ static void AiClassifyHttp(int status, const std::string& body, const std::wstri
             } else if (er && er->t == 's') {
                 e.detail = WxW(er->s);
             }
+            if (e.detail.empty()) {
+                const crxk::J* dt = root->get("detail");
+                if (dt && dt->t == 's') e.detail = WxW(dt->s);
+            }
         }
     }
     if (e.detail.empty() && !body.empty()) {
-        std::string t = body.substr(0, 2000);
+        std::string t = body.substr(0, 300);
         e.detail = WxW(t);
     }
     switch (status) {
@@ -590,6 +604,19 @@ static void AiClassifyTransport(DWORD err, const std::wstring& baseUrl, AiError&
         swprintf_s(buf, L"Could not connect to AI service (WinHTTP error %lu). Check your internet connection.", err);
         e.detail = buf;
     }
+}
+// The reply body's own head, printable - a bare "could not read" tells the
+// reader nothing, while its first words (a proxy page, a captive portal, a
+// stray reply) name the failure from the status line alone.
+static std::wstring AiBodyHead(const std::string& resp) {
+    std::string clean;
+    for (size_t k = 0; k < resp.size() && clean.size() < 160; k++) {
+        unsigned char u = (unsigned char)resp[k];
+        if (u >= 32 && u < 127) clean += (char)u;
+        else if (u == '\n' || u == '\r' || u == '\t') clean += ' ';
+        else clean += '?';
+    }
+    return clean.empty() ? std::wstring(L"(empty body)") : WxW(clean);
 }
 // The learned field drops (per endpoint key: 400 naming the field drops it).
 struct AiDrops { bool jsonDropped = false, effortDropped = false; };
@@ -800,7 +827,12 @@ static bool AiChatBuffered(const AiCfg& c, const std::string& system,
     if (!AiSendChat(c, body, resp, status, err, cancel, 8 * 60 * 1000, summary))
         return false;
     crxk::J j;
-    if (!crxk::JParse(resp, j) || j.t != 'o') { err.cat = AI_ERR_BAD_RESPONSE; return false; }
+    if (!crxk::JParse(resp, j) || j.t != 'o') {
+        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+        err.detail = L"HTTP " + std::to_wstring(status) +
+                     L" came back with a body the reader could not parse: " + AiBodyHead(resp);
+        return false;
+    }
     // a 200 body carrying an error object speaks the error itself
     const crxk::J* er = j.get("error");
     if (er) {
@@ -810,20 +842,33 @@ static bool AiChatBuffered(const AiCfg& c, const std::string& system,
         } else if (er->t == 's') { err.cat = AI_ERR_OTHER; err.detail = WxW(er->s); return false; }
     }
     const crxk::J* ch = j.get("choices");
-    if (!ch || ch->t != 'a' || ch->a.empty()) { err.cat = AI_ERR_BAD_RESPONSE; return false; }
+    if (!ch || ch->t != 'a' || ch->a.empty()) {
+        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+        err.detail = L"The reply carried no choices: " + AiBodyHead(resp);
+        return false;
+    }
     const crxk::J* msg = ch->a[0].get("message");
-    if (!msg || msg->t != 'o') { err.cat = AI_ERR_BAD_RESPONSE; return false; }
+    if (!msg || msg->t != 'o') {
+        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+        err.detail = L"The reply's message block was unreadable: " + AiBodyHead(resp);
+        return false;
+    }
     const crxk::J* ct = msg->get("content");
     content = ct && ct->t == 's' ? ct->s : "";
     const crxk::J* fr = ch->a[0].get("finish_reason");
     if (fr && fr->t == 's' && fr->s == "length") { err.cat = AI_ERR_CUTOFF; return false; }
     // content empty but reasoning present: the model's whole budget went to thinking
     if (content.empty()) {
+        bool thinking = false;
         for (const char* k : { "reasoning_content", "reasoning" }) {
             const crxk::J* rs = msg->get(k);
-            if (rs && rs->t == 's' && !rs->s.empty()) break;
+            if (rs && rs->t == 's' && !rs->s.empty()) { thinking = true; break; }
         }
-        err.cat = AI_ERR_BAD_RESPONSE;
+        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+        err.detail = thinking
+            ? L"The model spent its whole budget thinking and returned no answer - "
+              L"raise Max Tokens in AI settings or ask again."
+            : L"The reply carried an empty answer: " + AiBodyHead(resp);
         return false;
     }
     return true;
@@ -977,6 +1022,35 @@ static bool AiEmbIsNimModel(const std::wstring& modelRaw) {
     return ml.rfind("nvidia/", 0) == 0 || ml.find("nemotron") != std::string::npos ||
            ml.find("nv-embed") != std::string::npos || ml.find("embedqa") != std::string::npos;
 }
+// the invisible-text probe: NVIDIA's embeddings door 400s any input with no
+// visible character ("input[i] must not be blank or empty") - real PDFs grow
+// blank and image-only pages, and one such chunk would drag every batch that
+// carries it down the halving ladder for nothing. True when s holds nothing
+// but whitespace and zero-width code points, walked as UTF-8.
+static bool AiTextBlank(const std::string& s) {
+    size_t i = 0;
+    while (i < s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        unsigned cp; int len;
+        if (c < 0x80) { cp = c; len = 1; }
+        else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) { cp = (unsigned)(c & 31u) << 6 | (s[i + 1] & 63u); len = 2; }
+        else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) { cp = (unsigned)(c & 15u) << 12 | (unsigned)(s[i + 1] & 63u) << 6 | (s[i + 2] & 63u); len = 3; }
+        else if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) { cp = (unsigned)(c & 7u) << 18 | (unsigned)(s[i + 1] & 63u) << 12 | (unsigned)(s[i + 2] & 63u) << 6 | (s[i + 3] & 63u); len = 4; }
+        else { cp = c; len = 1; }                    // a broken byte counts as visible
+        switch (cp) {
+        case 0x09: case 0x0A: case 0x0B: case 0x0C: case 0x0D: case 0x20: case 0x85:
+        case 0xA0: case 0x1680: case 0x2000: case 0x2001: case 0x2002: case 0x2003:
+        case 0x2004: case 0x2005: case 0x2006: case 0x2007: case 0x2008: case 0x2009:
+        case 0x200A: case 0x200B: case 0x200C: case 0x200D: case 0x2028: case 0x2029:
+        case 0x202F: case 0x205F: case 0x2060: case 0x3000: case 0xFEFF:
+            break;
+        default:
+            return false;
+        }
+        i += (size_t)len;
+    }
+    return true;
+}
 static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                          bool query, std::vector<std::vector<float>>& out,
                          AiError& err, std::atomic<bool>* cancel) {
@@ -991,13 +1065,17 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                ruLow.find("integrate.api.nvidia.com") != std::string::npos;
     if (nim && ruLow.find("integrate.api.nvidia.com") == std::string::npos)
         root = L"https://integrate.api.nvidia.com/v1";   // the brain rides its own host
-    std::string ru = WxU(root), ml = WxU(model);
-    for (auto& ch : ru) ch = (char)tolower((unsigned char)ch);
-    for (auto& ch : ml) ch = (char)tolower((unsigned char)ch);
+    // blank texts stay home: the door 400s them and they carry nothing to
+    // embed - the slot keeps an empty vector, AiCosine's shape check returns
+    // 0 for it, and that chunk keeps its keyword-only coverage
+    std::vector<size_t> fly;                             // the inputs that ride
+    for (size_t i = 0; i < inputs.size(); i++)
+        if (!AiTextBlank(inputs[i])) fly.push_back(i);
+    if (fly.empty()) { out.assign(inputs.size(), std::vector<float>()); return true; }
     std::string body = "{\"model\":" + WxJsonStr(WxU(model)) + ",\"input\":[";
-    for (size_t i = 0; i < inputs.size(); i++) {
+    for (size_t i = 0; i < fly.size(); i++) {
         if (i) body += ",";
-        body += WxJsonStr(inputs[i]);
+        body += WxJsonStr(inputs[fly[i]]);
     }
     body += "]";
     if (nim)
@@ -1013,36 +1091,51 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
         return false;
     }
     crxk::J j;
-    if (!crxk::JParse(resp, j) || j.t != 'o') { err.cat = AI_ERR_BAD_RESPONSE; return false; }
-    auto grab = [&](const crxk::J* arr) -> bool {
-        out.clear();
-        for (auto& v : arr->a) {
-            if (v.t != 'a' || v.a.empty()) return false;
-            std::vector<float> vec;
-            for (auto& x : v.a) {
-                if (x.t != 'd') return false;
-                vec.push_back((float)x.d);
-            }
-            out.push_back(std::move(vec));
-        }
-        return out.size() == inputs.size();
+    if (!crxk::JParse(resp, j) || j.t != 'o') {
+        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+        err.detail = L"HTTP " + std::to_wstring(status) +
+                     L" came back with a body the reader could not parse: " + AiBodyHead(resp);
+        return false;
+    }
+    // the vectors land in their own seats: the door names each one's place in
+    // "index" and the wire order speaks when it doesn't - blanks that stayed
+    // home keep their empty vectors and the count always matches the ask
+    std::vector<std::vector<float>> landed(fly.size());
+    auto seatVec = [&](size_t seat, const crxk::J* e) -> bool {
+        if (!e || e->t != 'a' || e->a.empty()) return false;
+        std::vector<float> vec; vec.reserve(e->a.size());
+        for (auto& x : e->a) if (x.t == 'd') vec.push_back((float)x.d);
+        if (vec.empty()) return false;
+        landed[seat] = std::move(vec);
+        return true;
     };
-    const crxk::J* em = j.get("embeddings");
-    if (em && em->t == 'a' && grab(em)) return true;
     const crxk::J* data = j.get("data");
     if (data && data->t == 'a') {
-        std::vector<std::vector<float>> vecs;
-        for (auto& d : data->a) {
+        for (size_t k = 0; k < data->a.size() && k < fly.size(); k++) {
+            const crxk::J& d = data->a[k];
             if (d.t != 'o') continue;
-            const crxk::J* e = d.get("embedding");
-            if (e && e->t == 'a') {
-                std::vector<float> vec;
-                for (auto& x : e->a) if (x.t == 'd') vec.push_back((float)x.d);
-                vecs.push_back(std::move(vec));
-            }
+            size_t seat = k;
+            const crxk::J* ixp = d.get("index");
+            if (ixp && ixp->t == 'd' && ixp->d >= 0 && ixp->d < (double)fly.size())
+                seat = (size_t)ixp->d;
+            seatVec(seat, d.get("embedding"));
         }
-        if (vecs.size() == inputs.size()) { out = std::move(vecs); return true; }
+    } else {
+        const crxk::J* em = j.get("embeddings");         // the flat dialect
+        if (em && em->t == 'a')
+            for (size_t k = 0; k < em->a.size() && k < fly.size(); k++)
+                seatVec(k, &em->a[k]);
     }
-    err.cat = AI_ERR_BAD_RESPONSE;
-    return false;
+    size_t got = 0;
+    for (auto& v : landed) if (!v.empty()) got++;
+    if (got != fly.size()) {
+        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+        err.detail = L"HTTP 200 spoke JSON but carried " + std::to_wstring((unsigned long long)got) +
+                     L" of the " + std::to_wstring((unsigned long long)fly.size()) +
+                     L" embeddings asked for";
+        return false;
+    }
+    out.assign(inputs.size(), std::vector<float>());
+    for (size_t k = 0; k < fly.size(); k++) out[fly[k]] = std::move(landed[k]);
+    return true;
 }
