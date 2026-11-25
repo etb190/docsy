@@ -828,13 +828,27 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
 struct AiSse {
     std::string full, reasoning;
     bool cutOff = false, done = false;
+    int frames = 0;                        // data: lines seen - the stream's own pulse:
+                                           // a door that sent one empty frame and hung
+                                           // up reads nothing like a model that talked
+                                           // for 300 frames and said nothing
+    std::string finish;                    // the last non-null finish_reason the stream said
+    std::wstring errorText;                // an error object some doors stream INSTEAD of
+                                           // choices - its words ride to the verdict
     std::function<void(const std::string&)> onDelta;
     void Frame(const std::string& payload) {
         if (payload == "[DONE]") { done = true; return; }
+        frames++;
         crxk::J f;
         if (!crxk::JParse(payload, f) || f.t != 'o') return;
         const crxk::J* ch = f.get("choices");
-        if (!ch || ch->t != 'a' || ch->a.empty()) return;
+        if (!ch || ch->t != 'a' || ch->a.empty()) {
+            // a frame with no choices is the door speaking about itself - an
+            // error object where the choices would be. Take its words once so
+            // the verdict can name the wall instead of "no readable text".
+            if (errorText.empty()) AiJsonVerdict(payload, errorText);
+            return;
+        }
         const crxk::J* d = ch->a[0].get("delta");
         std::string piece, think;
         if (d && d->t == 'o') {
@@ -858,7 +872,10 @@ struct AiSse {
         if (!think.empty()) reasoning += think;
         if (!piece.empty()) { full += piece; if (onDelta) onDelta(piece); }
         const crxk::J* fr = ch->a[0].get("finish_reason");
-        if (fr && fr->t == 's' && fr->s == "length") cutOff = true;
+        if (fr && fr->t == 's' && !fr->s.empty()) {
+            finish = fr->s;
+            if (fr->s == "length") cutOff = true;
+        }
     }
     // Feed one raw chunk; complete `data:` lines are parsed, the tail kept.
     void Feed(const char* d, size_t n) {
@@ -967,6 +984,10 @@ static bool AiChatStream(const AiCfg& c, const std::string& system,
                 if (sse2.cutOff) { err.cat = AI_ERR_CUTOFF; return false; }
                 if (!full.empty()) return true;
                 sse.reasoning += sse2.reasoning;
+                sse.frames += sse2.frames;
+                if (sse.finish.empty()) sse.finish = sse2.finish;
+                if (sse.errorText.empty()) sse.errorText = sse2.errorText;
+                if (sse2.done) sse.done = true;
                 status = status2; ct = ct2; resp = resp2;
             } else if (err2.cat != AI_OK && err2.cat != AI_ERR_BAD_RESPONSE) {
                 err = err2;                    // the retry's verdict is the better one
@@ -979,7 +1000,21 @@ static bool AiChatStream(const AiCfg& c, const std::string& system,
         // with nothing to act on. Speak: the status, the content type, the
         // body's own head - and, when the stream carried thinking, THAT.
         err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
-        if (!sse.reasoning.empty())
+        if (sse.finish == "content_filter") {
+            // NVIDIA's chat safety screen streams empty deltas and closes
+            // with finish_reason content_filter - the same family of wall
+            // the embedding input screen raises, one channel over. The old
+            // verdict read "no readable text" with no hint the door had
+            // REFUSED to answer.
+            err.detail = L"The AI service's content screen blocked this reply (HTTP " +
+                         std::to_wstring(status) +
+                         L") - the service refused to answer about this text. "
+                         L"Rephrase the question or pick another chat model in AI settings.";
+        } else if (!sse.errorText.empty()) {
+            err.detail = L"The reply stream spoke an error instead of an answer (HTTP " +
+                         std::to_wstring(status) + L"): " +
+                         (sse.errorText.size() > 300 ? sse.errorText.substr(0, 300) : sse.errorText);
+        } else if (!sse.reasoning.empty())
             err.detail = L"The model streamed its thinking and no answer (HTTP " +
                          std::to_wstring(status) +
                          L"). Retry the question or lower the reasoning effort in AI settings.";
@@ -987,6 +1022,9 @@ static bool AiChatStream(const AiCfg& c, const std::string& system,
             err.detail = L"The reply streamed no readable text (HTTP " +
                          std::to_wstring(status) +
                          (ct.empty() ? std::wstring() : (L", content-type " + ct)) +
+                         L"; " + std::to_wstring(sse.frames) + L" data frame(s), finish_reason " +
+                         (sse.finish.empty() ? std::wstring(L"none") : WxW(sse.finish)) +
+                         (sse.done ? std::wstring(L", clean end") : std::wstring(L", stream ended early")) +
                          L") - body head: " + AiBodyHead(resp);
         return false;
     }
