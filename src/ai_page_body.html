@@ -320,7 +320,17 @@ function paintBusy(){
 }
 
 /* ---------------- C++ -> panel ---------------- */
-window.addEventListener("message", function(e){
+/* Host->page frames ride the chrome.webview event target: WebView2 delivers
+   PostWebMessageAsJson on window.chrome.webview's message event, and a plain
+   window listener never fired there - so the panel heard NOTHING from C++:
+   no user bubble, no loading box, no delta, no answer, no error line, no
+   status strip. Send read dead ("message goes nowhere and nothing happens"),
+   the semantic button read dead ("still does nothing"), while page->C++ kept
+   working (postMessage). sum_page and the editor page already subscribe on
+   chrome.webview - that is why the summary popup answers and the sidechat
+   stood mute. The window fallback keeps the page testable outside WebView2. */
+var __wv = (window.chrome && window.chrome.webview) ? window.chrome.webview : window;
+__wv.addEventListener("message", function(e){
   var m=e.data; if(!m||!m.cmd) return;
   switch(m.cmd){
   case "init":

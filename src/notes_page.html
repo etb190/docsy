@@ -167,7 +167,13 @@ function copyText(t){
 }
 
 /* ---------------- C++ -> page ---------------- */
-window.addEventListener("message", function(e){
+/* Host->page frames ride the chrome.webview event target (WebView2 delivers
+   PostWebMessageAsJson there, not on window - the same defect the sidechat
+   panel carried: a window-only listener never heard a frame, so the notes
+   status line and the finished cards never landed). The window fallback
+   keeps the page testable outside WebView2. */
+var __wv = (window.chrome && window.chrome.webview) ? window.chrome.webview : window;
+__wv.addEventListener("message", function(e){
   var m=e.data; if(!m||!m.cmd) return;
   switch(m.cmd){
   case "notes-status":
