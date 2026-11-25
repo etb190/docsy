@@ -646,12 +646,17 @@ static void AiSemanticStart() {
                 size_t total = ix.chunks.size();
                 ix.vectors.assign(total, {});
                 ix.dim = 0;
-                // One batch, any size: an endpoint that refuses N inputs (a 400
-                // on its own batch limit, a 429 on the burst) gets the batch
-                // HALVED and retried - the pass lands whether the door takes
-                // 256 inputs, 100 or 16. A single input's failure is the only
-                // real failure, and that one speaks the model's own verdict.
-                auto slice = [&](auto&& self, size_t b0, size_t b1, int depth,
+                // One batch, any size: a door that refuses N inputs on its own
+                // limit (400 / 413 / 422) gets the batch HALVED and retried -
+                // the pass lands whether the door takes 256 inputs, 100 or 16.
+                // But a reply that arrives WHOLE and parsed yet holds no
+                // vectors is a reader mismatch, not a width problem - the old
+                // ladder walked 64 -> 32 -> ... -> 1 burning a round trip per
+                // floor to report the one-input verdict ("carried 0 of the
+                // 1"), so a mismatch retries the SAME width once and then
+                // speaks its verdict at full width. Auth and model failures
+                // cure themselves at no width and end the pass on first sight.
+                auto slice = [&](auto&& self, size_t b0, size_t b1, int depth, int retries,
                                  AiError& eOut) -> bool {
                     if (g_aiSemCancel.load()) return false;
                     std::vector<std::string> inputs;
@@ -680,22 +685,35 @@ static void AiSemanticStart() {
                         return true;
                     }
                     eOut = e;
-                    if (g_aiSemCancel.load() || b1 - b0 <= 1 || depth >= 8) return false;
+                    if (g_aiSemCancel.load()) return false;
+                    if (e.cat == AI_ERR_MODEL_NOT_FOUND || e.cat == AI_ERR_NOT_SIGNED_IN)
+                        return false;                    // no width cures these
+                    if (e.shapeMismatch) {               // the reader's mismatch
+                        if (retries < 1)
+                            return self(self, b0, b1, depth, retries + 1, eOut);
+                        return false;                    // speaks at full width
+                    }
+                    if (b1 - b0 <= 1 || depth >= 8) return false;
+                    if (retries < 2)                     // a hiccup (timeout / busy /
+                        return self(self, b0, b1, depth, retries + 1, eOut);   // burst) first
                     size_t mid = b0 + (b1 - b0) / 2;
-                    return self(self, b0, mid, depth + 1, eOut) &&
-                           self(self, mid, b1, depth + 1, eOut);
+                    return self(self, b0, mid, depth + 1, 0, eOut) &&
+                           self(self, mid, b1, depth + 1, 0, eOut);
                 };
-                // Google's OpenAI door caps an embeddings batch at 100 texts
-                // / 20000 tokens - the 256-wide opening batch 400'd before the
-                // pass settled in, and the halving burned two round trips
-                // climbing down. Cloud doors open at 64 (64 x 1200 bytes sits
-                // under both caps); a local engine still takes the wide batch.
-                size_t batchN = AiIsLocalHost(WxU(cfg.baseUrl)) ? 256 : 64;
+                // Batch size rides the door: NIM's own table takes 512+ texts
+                // a call and settles 128 real 1200-byte chunks in ~5s against
+                // integrate.api.nvidia.com (measured; extra concurrency just
+                // queues behind the shared key, so one wide sequential stream
+                // wins) - the user asked for 100++ at a time. Google's OpenAI
+                // door caps a batch at 100 texts / 20000 tokens and keeps 64;
+                // a local engine still takes the widest batch.
+                bool nimEmb = AiEmbIsNimModel(cfg.embeddingModel);
+                size_t batchN = AiIsLocalHost(WxU(cfg.baseUrl)) ? 256 : (nimEmb ? 128 : 64);
                 for (size_t b0 = 0; b0 < total; ) {
                     if (g_aiSemCancel.load()) { g_aiSemActive = false; return; }
                     size_t b1 = min(b0 + batchN, total);
                     AiError e;
-                    if (!slice(slice, b0, b1, 0, e)) {
+                    if (!slice(slice, b0, b1, 0, 0, e)) {
                         g_aiSemActive = false;
                         if (g_aiSemCancel.load()) return;
                         AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
@@ -709,7 +727,10 @@ static void AiSemanticStart() {
                             // staring at "semantic search unavailable" had no
                             // way to tell WHICH failure held the pass down
                             std::wstring why = e.Friendly();
-                            if (why.size() > 220) why.resize(220);
+                            // the cap grew from 220: the door's own words now
+                            // ride at the detail's tail and the user's status
+                            // line IS the diagnosis - never cut them off
+                            if (why.size() > 480) why.resize(480);
                             if (e.status > 0 && why.find(L"HTTP ") == std::wstring::npos)
                                 why += L" (HTTP " + std::to_wstring(e.status) + L")";
                             ev->a = WxU(L"Semantic search failed: " + why +

@@ -405,6 +405,10 @@ struct AiError {
     std::wstring detail;                 // the server's own words, verbatim
     int status = 0;
     std::wstring model;
+    // a reply that arrived whole and parsed but held no vectors - a reader
+    // mismatch, not a width problem: no batch size cures it, so the embed
+    // pass retries once at the same width and then speaks, never halving
+    bool shapeMismatch = false;
     std::wstring Friendly() const {      // MapErrorToFriendlyMessage, Ollama booted
         if (!detail.empty()) return detail;
         switch (cat) {
@@ -1083,7 +1087,10 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                 "\",\"encoding_format\":\"float\",\"truncate\":\"END\"";
     body += "}";
     std::string resp; int status = 0;
-    if (!AiHttpPostRaw(root + L"/embeddings", body, c.apiKey, 60 * 1000, resp, status, cancel)) {
+    // 120s receive: a 128-wide batch of real 1200-byte chunks answers in
+    // ~5s on a clean pipe, but a slow link downloading 3.3MB of vectors
+    // plus the door's own compute queue deserves more than a minute
+    if (!AiHttpPostRaw(root + L"/embeddings", body, c.apiKey, 120 * 1000, resp, status, cancel)) {
         if (status == 404) { err.cat = AI_ERR_MODEL_NOT_FOUND; err.model = model; }
         else if (status >= 500 || status == 408) err.cat = AI_ERR_OFFLINE;
         else if (status > 0) AiClassifyHttp(status, resp, model, err);
@@ -1130,9 +1137,34 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
     for (auto& v : landed) if (!v.empty()) got++;
     if (got != fly.size()) {
         err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
-        err.detail = L"HTTP 200 spoke JSON but carried " + std::to_wstring((unsigned long long)got) +
+        err.shapeMismatch = true;
+        // a 200 whose JSON holds no vectors is the door refusing in its own
+        // dialect - a region note, a quota line, a middlebox's verdict. The
+        // verdict rides the reply's own words first (detail / error / message,
+        // every shape this app has met), else the body's printable head -
+        // this was the one branch that kept its mouth shut about the body,
+        // and a user staring at "carried 0 of the 1" had nothing to act on
+        std::wstring said;
+        const crxk::J* dt = j.get("detail");
+        if (dt && dt->t == 's') said = WxW(dt->s);
+        if (said.empty()) {
+            const crxk::J* ms = j.get("message");
+            if (ms && ms->t == 's') said = WxW(ms->s);
+        }
+        if (said.empty()) {
+            const crxk::J* er = j.get("error");
+            if (er && er->t == 's') said = WxW(er->s);
+            else if (er && er->t == 'o') {
+                const crxk::J* m = er->get("message");
+                if (m && m->t == 's') said = WxW(m->s);
+            }
+        }
+        err.detail = L"HTTP " + std::to_wstring(status) +
+                     L" spoke JSON but carried " + std::to_wstring((unsigned long long)got) +
                      L" of the " + std::to_wstring((unsigned long long)fly.size()) +
                      L" embeddings asked for";
+        if (!said.empty()) err.detail += L": " + said;
+        else err.detail += L" — body head: " + AiBodyHead(resp);
         return false;
     }
     out.assign(inputs.size(), std::vector<float>());
