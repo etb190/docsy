@@ -408,6 +408,13 @@ static void AiHandleEvent(AiEv* e) {
         g_aiSemStatus = WxW(e->a);
         if (!g_aiSemActive) g_aiSemReadyFlag = e->a.find("ready") != std::string::npos;
         AiPanelSend(WxW(AiStatusJson("status")));
+        // every pass exit posts a status, so the pre-booked rebuild (the
+        // second press during a drain) starts HERE on the UI thread - the
+        // seat lock and the panel send both belong to this thread
+        if (g_aiSemRestart && !g_aiSemActive) {
+            g_aiSemRestart = false;
+            AiSemanticStart();
+        }
         break;
     case AIEV_SEM_INDEX: {
         // the embedding pass's handback: merge its vectors into the LIVE seat.

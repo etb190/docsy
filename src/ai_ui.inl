@@ -62,6 +62,9 @@ static AiChunker* g_aiIdxChunk = nullptr;
 static std::wstring g_aiSemStatus;       // the current doc's semantic line
 static bool g_aiSemActive = false, g_aiSemReadyFlag = false;
 static std::atomic<bool> g_aiSemCancel{ false };
+static std::atomic<bool> g_aiSemRestart{ false };   // the second press during a drain
+                                                    // pre-books the rebuild - the pump
+                                                    // starts it when the pass lands
 static std::thread g_aiSemThread;
 static std::set<std::string> g_aiSemRequested;
 

@@ -655,6 +655,45 @@ static void AiSemanticStart() {
                              pix->vectors.size() == pix->chunks.size());
             if (!upToDate) {
                 size_t total = pix->chunks.size();
+                // the warm-up call: one short text at a 10-second cap, twice at
+                // most. A door that hangs (a black-holing middlebox, a region
+                // gate, a dead key) used to be discovered BY the lanes - each
+                // in-flight call burning its full 120-second receive timeout
+                // while the line sat silent and every beaker press read
+                // "stopped". The probe names the wall in under a minute,
+                // before the lanes exist.
+                {
+                    AiEv* wk = AiEvMake(AIEV_SEM_STATUS);
+                    wk->a = WxU(L"Waking the embedding door…");
+                    AiPost(wk);
+                    std::vector<std::string> probe;
+                    probe.push_back(WxU(docPrefix) + "warm-up");
+                    std::vector<std::vector<float>> pv;
+                    AiError pe;
+                    bool ok = false;
+                    for (int a = 0; a < 2 && !ok; a++) {
+                        if (g_aiSemCancel.load()) break;
+                        ok = AiEmbedBatch(cfg, probe, false, pv, pe, &g_aiSemCancel, 10 * 1000);
+                        if (!ok && a == 0) Sleep(400);
+                    }
+                    if (g_aiSemCancel.load()) {
+                        g_aiSemActive = false;
+                        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                        ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
+                        AiPost(ev);
+                        return;
+                    }
+                    if (!ok) {
+                        g_aiSemActive = false;
+                        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                        ev->a = WxU(L"Semantic search can't start: the embedding door didn't answer "
+                                    L"two 10-second warm-up calls — ") + WxU(pe.Friendly()) +
+                                WxU(L" — keyword search stays available. Press the beaker to try again.");
+                        AiPost(ev);
+                        return;
+                    }
+                    anyLanded.store(true);   // the door proved alive: width-1 refusals may stay home
+                }
                 pix->vectors.assign(total, {});
                 pix->dim = 0;
                 // One batch, any size: a door that refuses N inputs on its own
@@ -672,9 +711,19 @@ static void AiSemanticStart() {
                 // landed, refusals down the width ladder are a wall (region,
                 // credits, key) and the pass speaks instead of grinding
                 // hundreds of one-chunk calls.
+                // the pass's whole clock: a door that starts answering then
+                // goes silent mid-book used to walk the halving ladder all
+                // night (each hung call burning its receive timeout). Ten
+                // quiet minutes end the pass with a verdict instead.
+                unsigned long long t0 = GetTickCount64();
                 auto slice = [&](auto&& self, size_t b0, size_t b1, int depth, int retries,
                                  AiError& eOut) -> bool {
                     if (g_aiSemCancel.load()) return false;
+                    if (GetTickCount64() - t0 > 600000) {    // ten minutes of pass clock
+                        eOut.cat = AI_ERR_TIMEOUT;
+                        eOut.detail = L"the embedding pass gave up after ten minutes of door silence";
+                        return false;
+                    }
                     std::vector<std::string> inputs;
                     for (size_t i = b0; i < b1; i++) {
                         // the clamp, not a raw resize: a cut inside a multibyte
@@ -713,6 +762,26 @@ static void AiSemanticStart() {
                             return self(self, b0, b1, depth, retries + 1, eOut);
                         return false;                    // speaks at full width
                     }
+                    if (e.cat == AI_ERR_BUSY) {          // 429 / 503: a rate or concurrency
+                        // signal - halving the width never cures it (the ladder's
+                        // 511 one-line calls make a rate limit WORSE, and they
+                        // grind silently for the better part of an hour with the
+                        // seat marked active, so every beaker press read
+                        // "stopped"). Back off at the SAME width, twice, then
+                        // speak the verdict.
+                        if (retries < 2) {
+                            if (g_aiSemCancel.load()) return false;
+                            if (depth == 0) {
+                                AiEv* hb = AiEvMake(AIEV_SEM_STATUS);
+                                hb->a = WxU(L"Building semantic search… the embedding door is "
+                                            L"busy — backing off before the next attempt.");
+                                AiPost(hb);
+                            }
+                            Sleep(retries == 0 ? 1200 : 3000);
+                            return self(self, b0, b1, depth, retries + 1, eOut);
+                        }
+                        return false;
+                    }
                     bool refused = (e.status == 400 || e.status == 413 || e.status == 422);
                     if (refused) {
                         // width 1 with the door proven alive: one poison chunk
@@ -737,7 +806,8 @@ static void AiSemanticStart() {
                     }
                     if (b1 - b0 <= 1 || depth >= 8) return false;
                     if (retries < 2) {                   // a hiccup (timeout / busy /
-                        Sleep(1200);                     // burst) - breathe, then
+                        if (g_aiSemCancel.load()) return false;   // burst) - cancel
+                        Sleep(1200);                     // bites between breaths, then
                         return self(self, b0, b1, depth, retries + 1, eOut);   // ride again
                     }
                     size_t mid = b0 + (b1 - b0) / 2;
@@ -792,7 +862,16 @@ static void AiSemanticStart() {
                     for (unsigned L = 0; L < lanes; L++) ts.emplace_back(lane, L);
                     for (auto& t : ts) t.join();
                 }
-                if (g_aiSemCancel.load()) { g_aiSemActive = false; return; }
+                if (g_aiSemCancel.load()) {
+                    // the drain just settled: the line used to keep whatever the
+                    // toggle last posted - the pre-booked rebuild (second press)
+                    // rides this status home to the pump, which starts it here
+                    g_aiSemActive = false;
+                    AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                    ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
+                    AiPost(ev);
+                    return;
+                }
                 if (failed) {
                     g_aiSemActive = false;
                     AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
@@ -870,10 +949,20 @@ static void AiSemanticToggle() {
     // index not ready, a press with nothing open - and the beaker button read
     // dead no matter which one held it
     if (g_aiSemActive) {
-        g_aiSemCancel = true;
-        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
-        ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
-        AiPost(ev);
+        // the first press stops; the second press pre-books the rebuild. The
+        // old toggle re-posted "stopped" on EVERY press while the drain
+        // settled - with a stalled door that drain held the seat for minutes,
+        // so no press ever rebuilt anything and the line never changed.
+        if (!g_aiSemCancel.exchange(true)) {
+            AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+            ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
+            AiPost(ev);
+        } else {
+            g_aiSemRestart = true;
+            AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+            ev->a = WxU(L"Stopping — the pass rebuilds the moment the door call lets go.");
+            AiPost(ev);
+        }
         return;
     }
     if (g_aiIndexing) {

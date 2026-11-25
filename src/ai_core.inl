@@ -438,7 +438,7 @@ struct AiError {
         case AI_ERR_UNREACHABLE:     return L"The AI service could not be reached. Check your internet connection and try again.";
         case AI_ERR_NOT_SIGNED_IN:   return L"The AI service rejected the API key. Check the key in AI settings.";
         case AI_ERR_MODEL_NOT_FOUND: return L"Model not found" + (model.empty() ? std::wstring() : (L" (" + model + L")")) + L". Pick another model in AI settings.";
-        case AI_ERR_BUSY:            return L"The AI service is busy. Try again in a moment.";
+        case AI_ERR_BUSY:            return L"The AI service is busy or rate-limited (429). Give it a moment and try again.";
         case AI_ERR_USAGE_LIMIT:     return L"Usage limit reached for this AI key. Try again later.";
         case AI_ERR_CUTOFF:          return L"Answer was cut off; try a shorter question or raise the token limit.";
         case AI_ERR_TIMEOUT:         return L"The AI request timed out. Try again.";
@@ -1286,7 +1286,8 @@ static bool AiEmbScanFlat(const std::string& r, size_t expect,
 }
 static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                          bool query, std::vector<std::vector<float>>& out,
-                         AiError& err, std::atomic<bool>* cancel) {
+                         AiError& err, std::atomic<bool>* cancel,
+                         int recvTimeoutMs = 120000) {
     out.clear();
     std::wstring model = c.embeddingModel.empty() ? L"nvidia/nemotron-3.5-embed-8b" : c.embeddingModel;
     std::wstring root = c.baseUrl;
@@ -1316,10 +1317,11 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                 "\",\"encoding_format\":\"float\",\"truncate\":\"END\"";
     body += "}";
     std::string resp; int status = 0;
-    // 120s receive: a 128-wide batch of real 1200-byte chunks answers in
-    // ~5s on a clean pipe, but a slow link downloading 3.3MB of vectors
-    // plus the door's own compute queue deserves more than a minute
-    if (!AiHttpPostRaw(root + L"/embeddings", body, c.apiKey, 120 * 1000, resp, status, cancel)) {
+    // 120s receive: a 256-wide batch of real 1200-byte chunks answers in
+    // ~10s on a clean pipe, but a slow link downloading 10MB of vectors
+    // plus the door's own compute queue deserves more than a minute. The
+    // warm-up probe passes 10s - one short text must not hang the start.
+    if (!AiHttpPostRaw(root + L"/embeddings", body, c.apiKey, recvTimeoutMs, resp, status, cancel)) {
         if (status == 404) { err.cat = AI_ERR_MODEL_NOT_FOUND; err.model = model; }
         else if (status >= 500 || status == 408) err.cat = AI_ERR_OFFLINE;
         else if (status > 0) AiClassifyHttp(status, resp, model, err);
