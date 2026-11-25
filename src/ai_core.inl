@@ -59,6 +59,19 @@ static std::string WxJsonStr(const std::string& u) {
     out += "\"";
     return out;
 }
+// A UTF-8-safe clamp: the raw resize() the embed pass used could land its cut
+// INSIDE a multibyte sequence (a curly quote straddling byte 1200), and the
+// request body then carried invalid UTF-8 - the door answers that with a 400
+// that no batch halving can heal, because the cut rides every retried batch.
+// One poisoned chunk sank the whole semantic pass into "semantic search
+// unavailable". The clamp backs up over continuation bytes (10xxxxxx) so the
+// cut always lands between codepoints.
+static std::string AiClipUtf8(const std::string& s, size_t maxBytes) {
+    if (s.size() <= maxBytes) return s;
+    size_t n = maxBytes;
+    while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80) n--;
+    return s.substr(0, n);
+}
 
 // ---- the paths: %LocalAppData%\docsy\AI\ ----
 static std::wstring AiRootDir() {

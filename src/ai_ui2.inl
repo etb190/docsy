@@ -649,9 +649,11 @@ static void AiSemanticStart() {
                     if (g_aiSemCancel.load()) return false;
                     std::vector<std::string> inputs;
                     for (size_t i = b0; i < b1; i++) {
+                        // the clamp, not a raw resize: a cut inside a multibyte
+                        // sequence ships invalid UTF-8 and the door's 400 rides
+                        // every halved retry - one curly quote killed the pass
                         std::string inp = WxU(cfg.embDocPrefix) + ix.chunks[i].text;
-                        if (inp.size() > 1200) inp.resize(1200);
-                        inputs.push_back(std::move(inp));
+                        inputs.push_back(AiClipUtf8(inp, 1200));
                     }
                     std::vector<std::vector<float>> vecs;
                     AiError e;
@@ -672,9 +674,15 @@ static void AiSemanticStart() {
                     return self(self, b0, mid, depth + 1, eOut) &&
                            self(self, mid, b1, depth + 1, eOut);
                 };
+                // Google's OpenAI door caps an embeddings batch at 100 texts
+                // / 20000 tokens - the 256-wide opening batch 400'd before the
+                // pass settled in, and the halving burned two round trips
+                // climbing down. Cloud doors open at 64 (64 x 1200 bytes sits
+                // under both caps); a local engine still takes the wide batch.
+                size_t batchN = AiIsLocalHost(WxU(cfg.baseUrl)) ? 256 : 64;
                 for (size_t b0 = 0; b0 < total; ) {
                     if (g_aiSemCancel.load()) { g_aiSemActive = false; return; }
-                    size_t b1 = min(b0 + (size_t)256, total);
+                    size_t b1 = min(b0 + batchN, total);
                     AiError e;
                     if (!slice(slice, b0, b1, 0, e)) {
                         g_aiSemActive = false;
@@ -685,7 +693,16 @@ static void AiSemanticStart() {
                                         L" not found — check the Embedding Model field in AI settings."
                                         L" Using keyword search only.");
                         } else {
-                            ev->a = WxU(L"Semantic search is unavailable right now — using keyword search only.");
+                            // the verdict now names itself: the old line buried
+                            // every 401 / 429 / 400 under one phrase, and a user
+                            // staring at "semantic search unavailable" had no
+                            // way to tell WHICH failure held the pass down
+                            std::wstring why = e.Friendly();
+                            if (why.size() > 220) why.resize(220);
+                            if (e.status > 0 && why.find(L"HTTP ") == std::wstring::npos)
+                                why += L" (HTTP " + std::to_wstring(e.status) + L")";
+                            ev->a = WxU(L"Semantic search failed: " + why +
+                                        L" — keyword search stays available.");
                         }
                         AiPost(ev);
                         return;
