@@ -651,6 +651,7 @@ static void AiSemanticStart() {
             std::mutex refusalM;
             std::wstring refusal;                    // the last refusal's own words
             bool upToDate = (pix->embModel == model && pix->prefixKey == WxU(prefixKey) &&
+                             pix->semComplete &&
                              !pix->vectors.empty() &&
                              pix->vectors.size() == pix->chunks.size());
             if (!upToDate) {
@@ -703,8 +704,41 @@ static void AiSemanticStart() {
                     anyLanded.store(true);   // the door proved alive (fresh probe or cached):
                                              // width-1 refusals may stay home
                 }
-                pix->vectors.assign(total, {});
-                pix->dim = 0;
+                // resume, not wipe: a pass that ended early (stall, the old
+                // ten-minute wall, a stop press, a dead network) left its landed
+                // vectors on the seat - keep them and fly only the gaps. The
+                // deck itself must match (same model, same prefix, same count):
+                // a changed doc re-chunks and the count moves, so stale vectors
+                // cannot ride a new deck.
+                bool resume = (pix->embModel == model && pix->prefixKey == WxU(prefixKey) &&
+                               pix->dim > 0 && pix->vectors.size() == total &&
+                               pix->semRefused.size() == total);
+                if (resume) {
+                    size_t have = 0;
+                    int ref = 0;
+                    for (size_t i = 0; i < total; i++) {
+                        if (!pix->vectors[i].empty() || pix->semRefused[i]) have++;
+                        if (pix->semRefused[i]) ref++;
+                    }
+                    doneEmb.store(have);
+                    skipped.store(ref);
+                    pix->semComplete = false;
+                    AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                    ev->a = WxU(L"Resuming semantic search… " +
+                                std::to_wstring((unsigned long long)have) + L"/" +
+                                std::to_wstring((unsigned long long)total) +
+                                L" already in place — flying the rest.");
+                    AiPost(ev);
+                } else {
+                    pix->vectors.assign(total, {});
+                    pix->semRefused.assign(total, 0);
+                    pix->dim = 0;
+                    // the identity rides at pass START, not only at success: a
+                    // failed fresh pass must still resume on the next press
+                    pix->embModel = model;
+                    pix->prefixKey = WxU(prefixKey);
+                    pix->semComplete = false;
+                }
                 // One batch, any size: a door that refuses N inputs on its own
                 // limit (400 / 413 / 422) gets the batch HALVED - those are
                 // deterministic refusals, so no same-width retry rides first
@@ -725,12 +759,27 @@ static void AiSemanticStart() {
                 // night (each hung call burning its receive timeout). Ten
                 // quiet minutes end the pass with a verdict instead.
                 unsigned long long t0 = GetTickCount64();
+                std::atomic<unsigned long long> lastLand{ t0 };   // the watchdog's breath,
+                                                                  // refreshed by every landing
                 auto slice = [&](auto&& self, size_t b0, size_t b1, int depth, int retries,
                                  AiError& eOut) -> bool {
                     if (g_aiSemCancel.load()) return false;
-                    if (GetTickCount64() - t0 > 600000) {    // ten minutes of pass clock
+                    if (GetTickCount64() - lastLand.load() > 180000) {
+                        // three minutes with NOTHING landing: the door went silent
+                        // mid-book (hung calls still break on their receive timeout
+                        // and re-enter here, so the watchdog gets its breath). The
+                        // old wall counted ten minutes of TOTAL pass clock and
+                        // murdered a healthy big book mid-air at 10,000 of 14,000.
                         eOut.cat = AI_ERR_TIMEOUT;
-                        eOut.detail = L"the embedding pass gave up after ten minutes of door silence";
+                        eOut.detail = L"the embedding door went silent — no batch landed for three minutes";
+                        return false;
+                    }
+                    if (GetTickCount64() - t0 > 1800000) {
+                        // 30 minutes total on a huge book: the pass ends with its
+                        // landed work kept - the next press resumes where this one
+                        // stopped
+                        eOut.cat = AI_ERR_TIMEOUT;
+                        eOut.detail = L"this book outgrew one 30-minute pass — press the beaker to resume where it stopped";
                         return false;
                     }
                     std::vector<std::string> inputs;
@@ -753,6 +802,7 @@ static void AiSemanticStart() {
                         for (size_t i = b0; i < b1; i++) pix->vectors[i] = std::move(vecs[i - b0]);
                         anyLanded.store(true);
                         doneEmb.fetch_add(b1 - b0);
+                        lastLand.store(GetTickCount64());
                         AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
                         wchar_t b[128];
                         _snwprintf_s(b, _TRUNCATE, L"Building semantic search… %zu/%zu",
@@ -780,7 +830,9 @@ static void AiSemanticStart() {
                         // generic ladder's hundreds of calls first.
                         if (b1 - b0 <= 1 && anyLanded.load()) {
                             pix->vectors[b0].clear();
+                            pix->semRefused[b0] = 1;
                             skipped.fetch_add(1);
+                            lastLand.store(GetTickCount64());
                             std::wstring why = e.Friendly();
                             if (why.size() > 240) why.resize(240);
                             {
@@ -865,6 +917,10 @@ static void AiSemanticStart() {
                         if (abortPass.load() || g_aiSemCancel.load()) return;
                         size_t b0 = k * batchN;
                         size_t b1 = min(b0 + batchN, total);
+                        bool spanDone = true;            // resume: this span already flew
+                        for (size_t i = b0; i < b1; i++)
+                            if (pix->vectors[i].empty() && !pix->semRefused[i]) { spanDone = false; break; }
+                        if (spanDone) continue;
                         AiError e;
                         if (!slice(slice, b0, b1, 0, 0, e)) {
                             if (g_aiSemCancel.load()) return;
@@ -887,7 +943,13 @@ static void AiSemanticStart() {
                 if (g_aiSemCancel.load()) {
                     // the drain just settled: the line used to keep whatever the
                     // toggle last posted - the pre-booked rebuild (second press)
-                    // rides this status home to the pump, which starts it here
+                    // rides this status home to the pump, which starts it here.
+                    // A stopped pass also hands its landed work home: the next
+                    // press resumes instead of rebuilding from zero.
+                    pix->dim = dimA.load();
+                    AiEv* hb = AiEvMake(AIEV_SEM_INDEX);
+                    hb->heavy = pix;
+                    AiPost(hb);
                     g_aiSemActive = false;
                     AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
                     ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
@@ -895,6 +957,15 @@ static void AiSemanticStart() {
                     return;
                 }
                 if (failed) {
+                    // the landed work rides home even on a failed pass: the live
+                    // seat keeps every vector that landed plus the refusal marks,
+                    // so the next press RESUMES the book instead of rebuilding it
+                    // from zero - ten minutes of embeddings used to die with this
+                    // thread's local copy
+                    pix->dim = dimA.load();
+                    AiEv* hb = AiEvMake(AIEV_SEM_INDEX);
+                    hb->heavy = pix;
+                    AiPost(hb);
                     g_aiSemActive = false;
                     AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
                     if (failErr.cat == AI_ERR_MODEL_NOT_FOUND) {
@@ -933,6 +1004,7 @@ static void AiSemanticStart() {
                 pix->embModel = model;
                 pix->prefixKey = WxU(prefixKey);
                 pix->dim = dimA.load();
+                pix->semComplete = true;
                 AiIndexSave(*pix);
             }
             // the vectors ride home: the pass used to end here with its work in a

@@ -232,7 +232,11 @@ struct AiChunker {
     std::vector<AiChunk> done;
     size_t charOffset = 0;
     std::wstring pendingHeading;           // the heading waiting for its anchor word
-    const size_t Target = 500, Max = 800, MinWords = 20, Overlap = 40;
+    // 1200-char targets: the deck used to split at 500 CHARS, so a 100-page
+    // book came out as ~14,000 slivers and the embed pass flew ~55 wide
+    // batches where 23 carry the same book - and retrieval wants whole
+    // paragraphs anyway. Matches the web splitter's target above.
+    const size_t Target = 1200, Max = 2400, MinWords = 20, Overlap = 50;
 
     void Flush(size_t breakAt) {           // [0, breakAt) becomes a chunk
         AiChunk c;
@@ -413,6 +417,12 @@ struct AiDocIndex {
     std::string embModel;                       // the vectors' identity
     std::string prefixKey;
     std::string contentHash;
+    bool semComplete = false;                   // every chunk landed or stays home refused -
+                                                // a partial seat must rebuild (resume), the
+                                                // old "vectors exist" check called a half-fed
+                                                // seat done
+    std::vector<unsigned char> semRefused;      // parallel to chunks: 1 = width-1 refusal,
+                                                // stays keyword-only, a resume skips it
 };
 static std::string AiFileHash(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -432,13 +442,20 @@ static std::string AiFileHash(const std::wstring& path) {
     return out;
 }
 static bool AiIndexSave(const AiDocIndex& ix) {
+    std::string refused;
+    for (size_t i = 0; i < ix.semRefused.size(); i++) {
+        if (i) refused += ",";
+        refused += ix.semRefused[i] ? "1" : "0";
+    }
     std::string j = "{\"docId\":" + WxJsonStr(WxU(ix.docId)) +
         ",\"path\":" + WxJsonStr(ix.path) +
         ",\"pageCount\":" + std::to_string(ix.pageCount) +
         ",\"dim\":" + std::to_string(ix.dim) +
         ",\"embModel\":" + WxJsonStr(WxU(ix.embModel)) +
         ",\"prefixKey\":" + WxJsonStr(WxU(ix.prefixKey)) +
-        ",\"contentHash\":" + WxJsonStr(WxU(ix.contentHash)) + ",\"chunks\":[";
+        ",\"contentHash\":" + WxJsonStr(WxU(ix.contentHash)) +
+        ",\"semComplete\":" + (ix.semComplete ? "1" : "0") +
+        ",\"semRefused\":[" + refused + "],\"chunks\":[";
     for (size_t i = 0; i < ix.chunks.size(); i++) {
         auto& c = ix.chunks[i];
         if (i) j += ",";
@@ -464,9 +481,15 @@ static bool AiIndexSave(const AiDocIndex& ix) {
         std::vector<unsigned char> bin;
         unsigned hdr[2] = { (unsigned)ix.dim, (unsigned)ix.vectors.size() };
         bin.insert(bin.end(), (unsigned char*)hdr, (unsigned char*)hdr + 8);
-        for (auto& v : ix.vectors)
-            bin.insert(bin.end(), (const unsigned char*)v.data(),
-                       (const unsigned char*)v.data() + v.size() * sizeof(float));
+        for (auto& v : ix.vectors) {
+            if ((int)v.size() == ix.dim)
+                bin.insert(bin.end(), (const unsigned char*)v.data(),
+                           (const unsigned char*)v.data() + v.size() * sizeof(float));
+            else
+                // refused / not-flown slot rides dim zeros: the file must stay
+                // full-size or the loader's need-check rejects the whole index
+                bin.insert(bin.end(), (size_t)ix.dim * sizeof(float), 0);
+        }
         WxWriteFile(AiVecPath(ix.docId), bin.data(), bin.size());
     }
     return true;
@@ -501,6 +524,13 @@ static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
     if ((p = j.get("embModel")) && p->t == 's') ix.embModel = p->s;
     if ((p = j.get("prefixKey")) && p->t == 's') ix.prefixKey = p->s;
     if ((p = j.get("contentHash")) && p->t == 's') ix.contentHash = p->s;
+    if ((p = j.get("semComplete")) && p->t == 'd' && p->d != 0) ix.semComplete = true;
+    const crxk::J* srf = j.get("semRefused");
+    if (srf && srf->t == 'a') {
+        ix.semRefused.assign(srf->a.size(), 0);
+        for (size_t i = 0; i < srf->a.size(); i++)
+            if (srf->a[i].t == 'd' && srf->a[i].d != 0) ix.semRefused[i] = 1;
+    }
     const crxk::J* cs = j.get("chunks");
     if (cs && cs->t == 'a')
         for (auto& c : cs->a) {

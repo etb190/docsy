@@ -431,9 +431,23 @@ static void AiHandleEvent(AiEv* e) {
             if (e->heavy->docId == g_aiIndex.docId &&
                 e->heavy->chunks.size() == g_aiIndex.chunks.size()) {
                 g_aiIndex.dim = e->heavy->dim;
-                g_aiIndex.vectors = std::move(e->heavy->vectors);
+                // slot-wise, not a blind move: a FAILED or stopped pass also
+                // hands back - its landed slots ride home while its gaps keep
+                // whatever the seat already held, so a resume never un-lands
+                // a vector the seat already had
+                if (g_aiIndex.vectors.size() == g_aiIndex.chunks.size() &&
+                    g_aiIndex.vectors.size() == e->heavy->vectors.size()) {
+                    for (size_t i = 0; i < e->heavy->vectors.size(); i++)
+                        if (!e->heavy->vectors[i].empty())
+                            g_aiIndex.vectors[i] = std::move(e->heavy->vectors[i]);
+                } else {
+                    g_aiIndex.vectors = std::move(e->heavy->vectors);
+                }
+                if (e->heavy->semRefused.size() == g_aiIndex.chunks.size())
+                    g_aiIndex.semRefused = e->heavy->semRefused;
                 g_aiIndex.embModel = e->heavy->embModel;
                 g_aiIndex.prefixKey = e->heavy->prefixKey;
+                g_aiIndex.semComplete = e->heavy->semComplete;
             }
         }
         break;
