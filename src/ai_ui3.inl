@@ -90,14 +90,28 @@ static void AiPanelMessage(const wchar_t* json) {
     } else if (t == "send") {
         const crxk::J* tx = m.get("text");
         std::string input = tx && tx->t == 's' ? tx->s : "";
-        if (input.empty() || g_aiCurKey.empty()) return;
+        // the page has already swept the input clean by the time this frame
+        // lands: a silent drop here reads as "the message does not send" - the
+        // composer emptied, nothing came back, no word of why. Every drop
+        // speaks now.
+        if (input.empty()) return;
+        if (g_aiCurKey.empty()) {
+            AiPanelSend("{\"cmd\":\"error\",\"text\":\"Open a PDF first, then ask me about it here.\"}");
+            return;
+        }
         AiCtxState* st = nullptr;
         {
             std::lock_guard<std::mutex> lk(g_aiMtx);
             auto it = g_aiCtx.find(g_aiCurKey);
-            if (it == g_aiCtx.end()) return;
+            if (it == g_aiCtx.end()) {
+                AiPanelSend("{\"cmd\":\"error\",\"text\":\"Open a PDF first, then ask me about it here.\"}");
+                return;
+            }
             st = &it->second;
-            if (st->inflight) return;
+            if (st->inflight) {
+                AiPanelSend("{\"cmd\":\"error\",\"text\":\"One answer is already on its way - let it finish or press the stop button.\"}");
+                return;
+            }
         }
         if (st->mode == 0 && !g_aiIndexReady) {
             // queued behind the index build (or refused when the build failed)
@@ -387,6 +401,28 @@ static void AiHandleEvent(AiEv* e) {
         if (!g_aiSemActive) g_aiSemReadyFlag = e->a.find("ready") != std::string::npos;
         AiPanelSend(WxW(AiStatusJson("status")));
         break;
+    case AIEV_SEM_INDEX: {
+        // the embedding pass's handback: merge its vectors into the LIVE seat.
+        // The old pass saved its file and dropped the memory - the live dim
+        // stayed 0 and every answer in the session retrieved by keyword alone,
+        // so the nemotron embeddings the user just paid for never spoke. A
+        // merge only lands when the seat still holds the same document AND
+        // the same chunk deck (a doc switch or a re-index between the copy
+        // and the handback invalidates the ride: the next pass rebuilds).
+        if (e->heavy && e->heavy->dim > 0 &&
+            !e->heavy->vectors.empty() &&
+            e->heavy->vectors.size() == e->heavy->chunks.size()) {
+            std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+            if (e->heavy->docId == g_aiIndex.docId &&
+                e->heavy->chunks.size() == g_aiIndex.chunks.size()) {
+                g_aiIndex.dim = e->heavy->dim;
+                g_aiIndex.vectors = std::move(e->heavy->vectors);
+                g_aiIndex.embModel = e->heavy->embModel;
+                g_aiIndex.prefixKey = e->heavy->prefixKey;
+            }
+        }
+        break;
+    }
     case AIEV_NOTES_STATUS:
         // the cards report to the sidebar's notes seat, not the chat panel
         NotesPost("{\"cmd\":\"notes-status\",\"text\":" + WxJsonStr(e->a) +

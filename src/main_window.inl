@@ -647,6 +647,11 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SumPrewarm();                              // in - the navigator is built and
             return 0;                                  // loaded before anyone clicks it
         }
+        if (wp == 4723) {                              // the AI panel's cold-start knock:
+            KillTimer(h, 4723);                        // the engine was still warming when
+            AiPanelEnsure();                           // the panel first looked; the quiet
+            return 0;                                  // 250ms retry stands down the moment
+        }                                              // the runtime answers or is absent
         break;                                 // (the find bar's pumps ride the view)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
     case WM_APP + 71: AiHandleEvent((AiEv*)lp); return 0;   // the AI workers' event pump

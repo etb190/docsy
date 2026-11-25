@@ -45,6 +45,14 @@ static std::mutex g_aiMtx;               // guards the ctx map's structural edit
 
 // ---- the document index lives here (one active book) ----
 static AiDocIndex g_aiIndex;
+static std::mutex g_aiIdxMtx;            // guards the index's STRUCTURE (reset,
+                                         // replace, chunks-move, vector merge):
+                                         // the reply thread reads the whole
+                                         // index while the UI thread rebuilds
+                                         // it - the unguarded reads were a
+                                         // use-after-free class that fired
+                                         // exactly while a reply was in flight
+                                         // and the build's end landed
 static bool g_aiIndexReady = false;
 static bool g_aiIndexing = false;
 static int g_aiIdxPage = 0;
@@ -394,6 +402,11 @@ static void AiRunReply(const std::string& key, const std::string& input) {
     bool ok = false, delivered = false;
     int mode = 0;
     std::vector<AiChatMsg> msgsSnapshot;
+    AiDocIndex snap;                     // the retrieval's private index copy -
+                                         // ev's chunk pointers land inside it, so
+                                         // it must outlive the block and die with
+                                         // the function (finalize's source
+                                         // resolution reads through those pointers)
     {
         std::lock_guard<std::mutex> lk(g_aiMtx);
         msgsSnapshot = st->msgs;
@@ -456,16 +469,26 @@ static void AiRunReply(const std::string& key, const std::string& input) {
         // document: retrieval
         ev.clear();
         {
+            // the index rides a SNAPSHOT: the reply thread must never read the
+            // live g_aiIndex across a network call - a kickoff's reset, a
+            // build's end move or a merge landing while the query embedding
+            // flies would free the chunks under the retriever's feet (the
+            // "send, then the app dies" crash). One copy per send, then every
+            // read below touches the snapshot only.
+            {
+                std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+                snap = g_aiIndex;
+            }
             // the query embedding rides the same thread (network is free here)
             std::vector<float> qvec;
             std::string q = AiBuildRetrievalQuery(input, msgsSnapshot);
             std::vector<std::string> one = { WxU(cfg.embQueryPrefix) + q.substr(0, 1200) };
             std::vector<std::vector<float>> vecs;
             AiError e2;
-            if (g_aiIndex.dim > 0 && g_aiIndex.vectors.size() == g_aiIndex.chunks.size() &&
+            if (snap.dim > 0 && snap.vectors.size() == snap.chunks.size() &&
                 AiEmbedBatch(cfg, one, true, vecs, e2, nullptr) && vecs.size() == 1)
                 qvec = vecs[0];
-            ev = AiRetrieve(g_aiIndex, q, qvec.empty() ? nullptr : &qvec,
+            ev = AiRetrieve(snap, q, qvec.empty() ? nullptr : &qvec,
                             cfg.topK, cfg.evidenceBudget);
         }
         if (ev.empty()) {
@@ -707,13 +730,25 @@ static void AiIndexKickoff(const std::wstring& path);   // defined with the pump
 // The panel is a DOCKED column, not an overlay: it parents on the main frame
 // and lives in its own strip right of g.view (LayoutMain reserves the width),
 // the same seat Avalanche's AiChatOverlay holds - the top edge under the
-// toolbar row, the document pushed narrower instead of covered, the window's
-// grain field showing through the WebView's transparent background exactly
-// like the pages rail's surface does.
+// toolbar row, the document pushed narrower instead of covered. The page
+// paints its own opaque #1c1c1c sheet (the chrome tone): the earlier
+// grain-through-transparent read broke in practice - a webview seat that
+// moved onto pixels the book last painted showed those stale pixels straight
+// through its transparent body.
 static void AiPanelEnsure() {
     if (g_aiCtr || g_aiBuilding) return;
     WebEnsureEnv();
-    if (!g_wvEnv) return;
+    if (!g_wvEnv) {
+        // the engine warms up asynchronously: a silent bail here left the
+        // panel's strip permanently empty (the dock reserved the width, the
+        // parent's grain painted behind a webview that never came). The
+        // summary's own cold-start knock (4722) covers its seat - this one
+        // rings the panel's, and stands down the moment the runtime is
+        // declared absent.
+        if (!g_webFail && g.main) SetTimer(g.main, 4723, 250, nullptr);
+        return;
+    }
+    if (g.main) KillTimer(g.main, 4723);
     g_aiBuilding = true;
     g_wvEnv->CreateCoreWebView2Controller(
         g.main,
@@ -725,11 +760,17 @@ static void AiPanelEnsure() {
                 c->get_CoreWebView2(&g_aiWeb);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
-                    c2->put_DefaultBackgroundColor({ 0, 0, 0, 0 });   // transparent:
-                                             // the strip's grain field shows through,
-                                             // the one surface the reference's panel
-                                             // paints over (SidebarPaneBrush is
-                                             // transparent outside 98SE)
+                    c2->put_DefaultBackgroundColor({ 255, 0, 0, 0 });   // opaque: the
+                                             // alpha-0 panel let whatever sat behind
+                                             // the strip's pixels speak - a seat the
+                                             // webview moved onto still carried the
+                                             // book's last frame there, and the page's
+                                             // own transparent body let it straight
+                                             // through ("the background shows the
+                                             // book and the app's background"). The
+                                             // page paints its own #1c1c1c now; the
+                                             // opaque handback only covers the load
+                                             // flash
                 EventRegistrationToken tk;
                 g_aiWeb->add_WebMessageReceived(
                     Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(

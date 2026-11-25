@@ -9,10 +9,12 @@
    Palette = Themes/Dark.xaml: PaneBrush #3a3a3a, RowHoverBrush #404040,
    CardBorderBrush #2e2e2e, PrimaryBrush #1ea54c, TextBrush #e0e0e0,
    MutedTextBrush #a0a0a0, DimTextBrush #6a6a6a, DangerRed #ef4444,
-   SelectionBg #1c5e38. The panel itself paints NOTHING behind the words:
-   SidebarPaneBrush is transparent outside 98SE, so the window's grain field
-   shows through (the WebView's own background is alpha 0) - the same surface
-   the pages rail sits on. The overlays keep BackgroundBrush #1c1c1c. */
+   SelectionBg #1c5e38. The panel paints its OWN opaque sheet: the earlier
+   grain-through-transparent read broke in practice - whatever the strip's
+   pixels last carried (a book frame the shrinking view left behind) showed
+   straight through the alpha-0 body, and the reader saw the book ghosting
+   behind the conversation. BackgroundBrush #1c1c1c - the same tone the
+   caption row and the overlays sit on - is the sheet now, top to bottom. */
 :root{
   --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
   --primary:#1ea54c; --onprimary:#0a0a0a; --text:#e0e0e0; --muted:#a0a0a0;
@@ -23,7 +25,7 @@
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%; overflow:hidden;}
 body{
-  background:transparent; color:var(--text);
+  background:var(--bg); color:var(--text);
   font-family:"Segoe UI","Segoe UI Emoji",sans-serif; font-size:12px;
   -webkit-user-select:none; user-select:none; cursor:default;
 }
@@ -174,7 +176,7 @@ body{
 .hrow .del:hover{color:var(--danger); background:var(--pane);}
 #histEmpty{font-size:11px; color:var(--muted); margin:12px 8px; text-align:center;}
 
-/* the panel's own text sits straight on the grain, like the reference's rail
-text does - no opaque card behind it */
+/* the panel's own text sits straight on the #1c1c1c sheet, like the
+reference's rail text does - no opaque card behind it */
 </style>
 </head>

@@ -471,6 +471,18 @@ static bool AiIndexSave(const AiDocIndex& ix) {
     }
     return true;
 }
+// The build's landing save, off the UI thread. AiIndexSave builds the whole
+// chunk deck as one JSON string - for a real book that is tens of megabytes of
+// escaping and appending, seconds of a frozen message loop at the exact moment
+// the reader starts asking the panel questions (the "send, then the whole app
+// dies five seconds later" report was this save freezing the UI thread at the
+// build's end). The copy is one memcpy sweep; the string build and the write
+// ride the thread. A same-path write that collides with the semantic pass's
+// own save just fails its CreateFile - no corruption, the later save wins.
+static void AiIndexSaveAsync(const AiDocIndex& ix) {
+    std::shared_ptr<AiDocIndex> copy = std::make_shared<AiDocIndex>(ix);
+    std::thread([copy]() { AiIndexSave(*copy); }).detach();
+}
 static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
     std::string s;
     if (!WxReadFile(AiIndexPath(docId), s)) return false;

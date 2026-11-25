@@ -493,7 +493,11 @@ static void AiIndexKickoff(const std::wstring& path) {
     AiDocIndex ix;
     if (AiIndexLoad(docId, ix) && !ix.chunks.empty()) {
         ix.path = path;
-        g_aiIndex = std::move(ix);
+        {   // the index swap rides the seat lock: a reply thread's snapshot
+            // (or an in-flight merge) must never see a half-assigned index
+            std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+            g_aiIndex = std::move(ix);
+        }
         g_aiIndexReady = true;
         AiPanelSend(WxW(AiStatusJson("status")));
         // a cached index re-arms the semantic line the same breath - the
@@ -509,7 +513,10 @@ static void AiIndexKickoff(const std::wstring& path) {
     g_aiIdxPath = path;
     if (g_aiIdxChunk) { delete g_aiIdxChunk; g_aiIdxChunk = nullptr; }
     g_aiIdxChunk = new AiChunker();
-    g_aiIndex = AiDocIndex();
+    {
+        std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+        g_aiIndex = AiDocIndex();
+    }
     g_aiIndex.docId = docId;
     g_aiIndex.path = path;
     g_aiIndex.pageCount = DVF().n;
@@ -536,12 +543,20 @@ static void AiIndexTick() {
     int p = g_aiIdxPage;
     if (p >= D.n) {
         g_aiIdxChunk->Finish();
-        g_aiIndex.chunks = std::move(g_aiIdxChunk->done);
+        {
+            // the build's landing move rides the seat lock - the reply thread's
+            // snapshot or a merge may be mid-read of the old chunks
+            std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+            g_aiIndex.chunks = std::move(g_aiIdxChunk->done);
+        }
         delete g_aiIdxChunk; g_aiIdxChunk = nullptr;
         g_aiIndexing = false;
         KillTimer(g.main, 4713);
         g_aiIndexReady = !g_aiIndex.chunks.empty();
-        AiIndexSave(g_aiIndex);
+        AiIndexSaveAsync(g_aiIndex);   // the deck rides a thread: the JSON build
+                                       // for a real book is seconds of UI-thread
+                                       // freeze at the exact moment the reader
+                                       // starts asking the panel questions
         // Avalanche's DocumentIndexer embeds while it indexes: the lexical
         // chunks are barely down and the semantic pass (nemotron's door) is
         // already riding its thread - the reader never has to find the beaker
@@ -591,7 +606,13 @@ static void AiSemanticStart() {
     g_aiSemCancel = false;
     g_aiSemStatus = L"Ready — building semantic search…";
     AiPanelSend(WxW(AiStatusJson("status")));
-    AiDocIndex ix = g_aiIndex;
+    AiDocIndex ix;
+    {
+        // the pass's working copy rides the seat lock - the copy must not
+        // straddle a kickoff's reset or a build's landing move
+        std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+        ix = g_aiIndex;
+    }
     AiCfg cfg = g_aiCfg;
     std::wstring prefixKey = cfg.embDocPrefix + L"\x01" + cfg.embQueryPrefix;
     std::string model = WxU(cfg.embeddingModel.empty() ? L"nvidia/nemotron-3-embed-1b"
@@ -645,15 +666,54 @@ static void AiSemanticStart() {
             ix.prefixKey = WxU(prefixKey);
             AiIndexSave(ix);
         }
+        // the vectors ride home: the pass used to end here with its work in a
+        // local copy - the file was saved, the memory dropped, and the live
+        // seat's dim stayed 0, so every answer in this session retrieved by
+        // keyword alone and the freshly built nemotron embeddings never spoke
+        // until the app restarted and the index loaded from disk. The handback
+        // event merges them into the live seat on the UI thread.
         g_aiSemActive = false;
         g_aiSemReadyFlag = true;
-        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
-        ev->a = WxU(L"Semantic search ready.");
+        std::shared_ptr<AiDocIndex> done = std::make_shared<AiDocIndex>(std::move(ix));
+        AiEv* ev = AiEvMake(AIEV_SEM_INDEX);
+        ev->heavy = std::move(done);
         AiPost(ev);
+        AiEv* st = AiEvMake(AIEV_SEM_STATUS);
+        st->a = WxU(L"Semantic search ready.");
+        AiPost(st);
     }).detach();
 }
 static void AiSemanticToggle() {
-    if (g_aiSemActive) { g_aiSemCancel = true; return; }
+    // every press speaks: the old toggle was silent in all four states - a
+    // press during the build, a press while the pass flew, a press with the
+    // index not ready, a press with nothing open - and the beaker button read
+    // dead no matter which one held it
+    if (g_aiSemActive) {
+        g_aiSemCancel = true;
+        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+        ev->a = WxU(L"Semantic search stopped — press again to rebuild.");
+        AiPost(ev);
+        return;
+    }
+    if (g_aiIndexing) {
+        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+        wchar_t b[160];
+        // no "ready" in this line: the status pump greps the word to arm the
+        // green button, and a still-building seat must never read armed
+        _snwprintf_s(b, _TRUNCATE, L"Still indexing the document (page %d of %d) — "
+                     L"the semantic pass starts when the index is done.",
+                     g_aiIdxPage, g_aiIndex.pageCount);
+        ev->a = WxU(b);
+        AiPost(ev);
+        return;
+    }
+    if (!g_aiIndexReady || g_aiIndex.chunks.empty()) {
+        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+        if (DVF().path.empty()) ev->a = WxU(L"Open a PDF first — semantic search needs a document to embed.");
+        else ev->a = WxU(L"The document index is unavailable — semantic search is off for this file.");
+        AiPost(ev);
+        return;
+    }
     if (g_aiSemReadyFlag) g_aiSemReadyFlag = false;
     AiSemanticStart();
 }

@@ -16,6 +16,11 @@ enum AiEvKind {
     AIEV_CANCEL,          // the reply was stopped
     AIEV_IDX_STATUS,      // indexing line + progress
     AIEV_SEM_STATUS,      // the semantic line for the current doc
+    AIEV_SEM_INDEX,       // heavy: the finished embedding pass's index - the
+                          // vectors ride home to the LIVE seat here (the old
+                          // pass built them into a local copy, saved the file
+                          // and dropped the memory: the sidechat's retrieval
+                          // stayed keyword-only until the app restarted)
     AIEV_NOTES_STATUS,    // notes busy/status line
     AIEV_NOTES_CARDS,     // b: cards blob
     AIEV_SUM_INIT, AIEV_SUM_PROGRESS, AIEV_SUM_DELTA, AIEV_SUM_DONE,
@@ -24,6 +29,11 @@ enum AiEvKind {
     AIEV_SUM_PREFETCH,    // a: buffer digest (empty = failed); key: first page
     AIEV_SUM_TESTOUT      // a: beaker probe output; flag: ok; gen: the run
 };
+struct AiDocIndex;                       // complete in ai_index.inl - the heavy
+                                         // rider below only moves through here,
+                                         // and shared_ptr manages an incomplete
+                                         // type once make_shared captured its
+                                         // deleter (ai_ui2.inl, complete there)
 struct AiEv {
     AiEvKind kind;
     unsigned long long gen = 0;
@@ -31,6 +41,10 @@ struct AiEv {
     std::string a, b;                    // utf8 payloads
     double d = 0;
     bool flag = false;
+    std::shared_ptr<AiDocIndex> heavy;   // the big riders (an index's vectors)
+                                         // travel by pointer - copying them
+                                         // through the pump would memcpy the
+                                         // document twice per handback
 };
 struct AiOcrPayload {                    // one finished OCR page, marshaled home
                                          // on WM_APP + 72 (the async flight's
@@ -60,6 +74,9 @@ static AiEv* AiEvMake(AiEvKind k) { AiEv* e = new AiEv(); e->kind = k; return e;
 
 // the UI-side entry points the early modules call (defined in ai_ui*.inl)
 static void AiChatToggle();
+static void AiPanelEnsure();           // the panel's own builder: the env's
+                                       // cold-start knock (4723) re-rings it
+                                       // from the main frame's timer block
 static void AiModeChanged();
 static void AiOverlayLayout();
 static void SumToggle(int mode);
