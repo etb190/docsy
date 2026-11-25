@@ -639,6 +639,9 @@ static void AiSemanticStart() {
         // detached thread is std::terminate - the whole app dying with the
         // beaker line frozen. The catch folds the pass and speaks.
         try {
+            int skipped = 0;                     // chunks the door refused at width 1
+            bool anyLanded = false;              // the door proved alive at least once
+            std::wstring refusal;                // the last refusal's own words
             bool upToDate = (ix.embModel == model && ix.prefixKey == WxU(prefixKey) &&
                              !ix.vectors.empty() &&
                              ix.vectors.size() == ix.chunks.size());
@@ -647,15 +650,20 @@ static void AiSemanticStart() {
                 ix.vectors.assign(total, {});
                 ix.dim = 0;
                 // One batch, any size: a door that refuses N inputs on its own
-                // limit (400 / 413 / 422) gets the batch HALVED and retried -
-                // the pass lands whether the door takes 256 inputs, 100 or 16.
-                // But a reply that arrives WHOLE and parsed yet holds no
-                // vectors is a reader mismatch, not a width problem - the old
-                // ladder walked 64 -> 32 -> ... -> 1 burning a round trip per
-                // floor to report the one-input verdict ("carried 0 of the
-                // 1"), so a mismatch retries the SAME width once and then
-                // speaks its verdict at full width. Auth and model failures
-                // cure themselves at no width and end the pass on first sight.
+                // limit (400 / 413 / 422) gets the batch HALVED - those are
+                // deterministic refusals, so no same-width retry rides first
+                // (the old flow let a 4xx fall into the no-vectors reading and
+                // burn the pass at full width). A reply that arrives WHOLE and
+                // parsed yet holds no vectors is a reader mismatch, not a
+                // width problem - it retries the SAME width once and then
+                // speaks its verdict. Auth, model and credit failures cure
+                // themselves at no width and end the pass on first sight. At
+                // width 1 a refusing chunk stays home with keyword-only
+                // coverage - one poison chunk must not drown a whole pass -
+                // but only once the door has proven alive: before anything has
+                // landed, refusals down the width ladder are a wall (region,
+                // credits, key) and the pass speaks instead of grinding
+                // hundreds of one-chunk calls.
                 auto slice = [&](auto&& self, size_t b0, size_t b1, int depth, int retries,
                                  AiError& eOut) -> bool {
                     if (g_aiSemCancel.load()) return false;
@@ -677,6 +685,7 @@ static void AiSemanticStart() {
                         if (ix.dim == 0)
                             for (auto& v : vecs) if (!v.empty()) { ix.dim = (int)v.size(); break; }
                         for (size_t i = b0; i < b1; i++) ix.vectors[i] = std::move(vecs[i - b0]);
+                        anyLanded = true;
                         AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
                         wchar_t b[128];
                         _snwprintf_s(b, _TRUNCATE, L"Building semantic search… %zu/%zu", b1, total);
@@ -686,16 +695,38 @@ static void AiSemanticStart() {
                     }
                     eOut = e;
                     if (g_aiSemCancel.load()) return false;
-                    if (e.cat == AI_ERR_MODEL_NOT_FOUND || e.cat == AI_ERR_NOT_SIGNED_IN)
+                    if (e.cat == AI_ERR_MODEL_NOT_FOUND || e.cat == AI_ERR_NOT_SIGNED_IN ||
+                        e.cat == AI_ERR_USAGE_LIMIT)
                         return false;                    // no width cures these
                     if (e.shapeMismatch) {               // the reader's mismatch
                         if (retries < 1)
                             return self(self, b0, b1, depth, retries + 1, eOut);
                         return false;                    // speaks at full width
                     }
+                    bool refused = (e.status == 400 || e.status == 413 || e.status == 422);
+                    if (refused) {
+                        // width 1 with the door proven alive: one poison chunk
+                        // stays home, keyword-only, its siblings still land
+                        if (b1 - b0 <= 1 && anyLanded) {
+                            ix.vectors[b0].clear();
+                            skipped++;
+                            std::wstring why = e.Friendly();
+                            if (why.size() > 240) why.resize(240);
+                            refusal = (e.status > 0 && why.find(L"HTTP ") == std::wstring::npos)
+                                        ? (L"HTTP " + std::to_wstring(e.status) + L" — " + why)
+                                        : why;
+                            return true;
+                        }
+                        if (b1 - b0 <= 4) return false;  // the wall speaks, the pass ends
+                        size_t mid = b0 + (b1 - b0) / 2;
+                        return self(self, b0, mid, depth + 1, 0, eOut) &&
+                               self(self, mid, b1, depth + 1, 0, eOut);
+                    }
                     if (b1 - b0 <= 1 || depth >= 8) return false;
-                    if (retries < 2)                     // a hiccup (timeout / busy /
-                        return self(self, b0, b1, depth, retries + 1, eOut);   // burst) first
+                    if (retries < 2) {                   // a hiccup (timeout / busy /
+                        Sleep(1200);                     // burst) - breathe, then
+                        return self(self, b0, b1, depth, retries + 1, eOut);   // ride again
+                    }
                     size_t mid = b0 + (b1 - b0) / 2;
                     return self(self, b0, mid, depth + 1, 0, eOut) &&
                            self(self, mid, b1, depth + 1, 0, eOut);
@@ -741,6 +772,17 @@ static void AiSemanticStart() {
                     }
                     b0 = b1;
                 }
+                if (skipped > 0 && skipped >= (int)total) {
+                    // every single chunk the door refused: not a ready seat -
+                    // speak the wall and stop, the vectors stay unsaved
+                    g_aiSemActive = false;
+                    AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                    ev->a = WxU(L"Semantic search failed: the embedding door refused every chunk" +
+                                (refusal.empty() ? std::wstring() : (L" — " + refusal)) +
+                                L" — keyword search stays available.");
+                    AiPost(ev);
+                    return;
+                }
                 ix.embModel = model;
                 ix.prefixKey = WxU(prefixKey);
                 AiIndexSave(ix);
@@ -758,7 +800,14 @@ static void AiSemanticStart() {
             ev->heavy = std::move(done);
             AiPost(ev);
             AiEv* st = AiEvMake(AIEV_SEM_STATUS);
-            st->a = WxU(L"Semantic search ready.");
+            if (skipped > 0)
+                st->a = WxU(L"Semantic search ready — " + std::to_wstring(skipped) +
+                            L" chunk(s) the embedding door refused stay keyword-only" +
+                            (refusal.empty() ? std::wstring()
+                                             : (L" (last refusal: " + refusal + L")")) +
+                            L".");
+            else
+                st->a = WxU(L"Semantic search ready.");
             AiPost(st);
         } catch (...) {
             g_aiSemActive = false;

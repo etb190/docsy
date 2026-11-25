@@ -559,34 +559,68 @@ static bool AiHttpGetRaw(const std::wstring& url, const std::wstring& apiKey,
     }
     return ok;
 }
-static void AiClassifyHttp(int status, const std::string& body, const std::wstring& model, AiError& e) {
-    e.status = status; e.model = model;
-    // ExtractServerDetail: error.message verbatim, NVIDIA's flat {"detail"}
-    // next, else a trimmed body prefix - every door's own words ride to the
-    // status line, never one bare phrase standing in for four failures
+// The door's own verdict, every shape this app has met: OpenAI's
+// {"error":{"message":...}}, NVIDIA's flat {"object":"error","message":...},
+// FastAPI's {"detail":"..."} and FastAPI's validation array
+// {"detail":[{"msg":"...","loc":["body","input",2]}, ...]}, {"title":...}.
+// The 422 the user met was one of the array dialects and the old extractor
+// read detail as a STRING only, so the door's own words never reached the
+// status line. First speaker wins; stays empty when the body carries none
+// of them - the caller falls back to the body's printable head.
+static void AiJsonVerdict(const std::string& body, std::wstring& said) {
+    said.clear();
     crxk::J j;
-    if (crxk::JParse(body, j)) {
-        const crxk::J* root = (j.t == 'o') ? &j : ((j.t == 'a' && !j.a.empty() && j.a[0].t == 'o') ? &j.a[0] : nullptr);
-        if (root) {
-            const crxk::J* er = root->get("error");
-            if (er && er->t == 'o') {
-                const crxk::J* m = er->get("message");
-                if (m && m->t == 's') e.detail = WxW(m->s);
-            } else if (er && er->t == 's') {
-                e.detail = WxW(er->s);
-            }
-            if (e.detail.empty()) {
-                const crxk::J* dt = root->get("detail");
-                if (dt && dt->t == 's') e.detail = WxW(dt->s);
-            }
+    if (!crxk::JParse(body, j) || j.t != 'o') return;
+    const crxk::J* er = j.get("error");
+    if (er) {
+        if (er->t == 's') { said = WxW(er->s); return; }
+        if (er->t == 'o') {
+            const crxk::J* m = er->get("message");
+            if (m && m->t == 's') { said = WxW(m->s); return; }
         }
     }
+    const crxk::J* dt = j.get("detail");
+    if (dt && dt->t == 's') { said = WxW(dt->s); return; }
+    if (dt && dt->t == 'a') {                        // FastAPI validation array
+        std::wstring all;
+        for (auto& it : dt->a) {
+            if (it.t != 'o') continue;
+            const crxk::J* m = it.get("msg");
+            if (!m || m->t != 's') continue;
+            std::wstring loc;
+            const crxk::J* l = it.get("loc");
+            if (l && l->t == 'a') {
+                std::string ls;
+                for (auto& x : l->a) {
+                    if (x.t == 's') { if (!ls.empty()) ls += "."; ls += x.s; }
+                    else if (x.t == 'd') { if (!ls.empty()) ls += "."; ls += std::to_string((long long)x.d); }
+                }
+                loc = WxW(ls);
+            }
+            if (!all.empty()) all += L"; ";
+            all += loc.empty() ? WxW(m->s) : loc + L": " + WxW(m->s);
+        }
+        if (!all.empty()) { said = all; return; }
+    }
+    const crxk::J* ms = j.get("message");
+    if (ms && ms->t == 's') { said = WxW(ms->s); return; }
+    const crxk::J* ti = j.get("title");
+    if (ti && ti->t == 's') said = WxW(ti->s);
+}
+static void AiClassifyHttp(int status, const std::string& body, const std::wstring& model, AiError& e) {
+    e.status = status; e.model = model;
+    // ExtractServerDetail, every dialect: the verdict extractor walks error /
+    // detail (string and validation array) / message / title - the door's own
+    // words ride to the status line, never one bare phrase standing in for
+    // four failures
+    AiJsonVerdict(body, e.detail);
     if (e.detail.empty() && !body.empty()) {
-        std::string t = body.substr(0, 300);
+        std::string t = AiClipUtf8(body, 300);
         e.detail = WxW(t);
     }
     switch (status) {
     case 401: case 403: e.cat = AI_ERR_NOT_SIGNED_IN; break;
+    case 402: e.cat = AI_ERR_USAGE_LIMIT; break;    // credits ran dry - no width cures it
     case 404: e.cat = AI_ERR_MODEL_NOT_FOUND; break;
     case 429: e.cat = (body.find("usage limit") != std::string::npos ||
                        body.find("usage_limit") != std::string::npos ||
@@ -1097,6 +1131,17 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
         else AiClassifyTransport(GetLastError(), root, err);
         return false;
     }
+    // a 4xx reply arrives "whole" - AiHttpPostRaw hands back any complete
+    // response, and a 400 / 413 / 422 body parses as JSON as easily as a 200
+    // does. The old flow let it fall into the no-vectors reading below, whose
+    // same-width retry then burned the pass at full width ("carried 0 of the
+    // 128", the ladder never walked). Route the refusal through the
+    // classifier: the ladder sees a width problem it can halve, and the
+    // door's own words ride the verdict.
+    if (status < 200 || status >= 300) {
+        AiClassifyHttp(status, resp, model, err);
+        return false;
+    }
     crxk::J j;
     if (!crxk::JParse(resp, j) || j.t != 'o') {
         err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
@@ -1140,25 +1185,11 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
         err.shapeMismatch = true;
         // a 200 whose JSON holds no vectors is the door refusing in its own
         // dialect - a region note, a quota line, a middlebox's verdict. The
-        // verdict rides the reply's own words first (detail / error / message,
-        // every shape this app has met), else the body's printable head -
-        // this was the one branch that kept its mouth shut about the body,
-        // and a user staring at "carried 0 of the 1" had nothing to act on
+        // verdict rides the reply's own words first, else the body's
+        // printable head - a user staring at "carried 0 of the N" must have
+        // something to act on
         std::wstring said;
-        const crxk::J* dt = j.get("detail");
-        if (dt && dt->t == 's') said = WxW(dt->s);
-        if (said.empty()) {
-            const crxk::J* ms = j.get("message");
-            if (ms && ms->t == 's') said = WxW(ms->s);
-        }
-        if (said.empty()) {
-            const crxk::J* er = j.get("error");
-            if (er && er->t == 's') said = WxW(er->s);
-            else if (er && er->t == 'o') {
-                const crxk::J* m = er->get("message");
-                if (m && m->t == 's') said = WxW(m->s);
-            }
-        }
+        AiJsonVerdict(resp, said);
         err.detail = L"HTTP " + std::to_wstring(status) +
                      L" spoke JSON but carried " + std::to_wstring((unsigned long long)got) +
                      L" of the " + std::to_wstring((unsigned long long)fly.size()) +
