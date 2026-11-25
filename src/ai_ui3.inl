@@ -40,11 +40,11 @@ static void AiRunTest(std::string settingsJson) {
             finish(ok ? "\xe2\x9c\x93 Chat answered" :
                         ("\xe2\x9c\x97 Chat failed: " + WxU(e.Friendly())));
         }
-        // 3. one embedding
+        // 3. one embedding (a query-shaped probe: the sidechat's retrieval side)
         {
             std::vector<std::vector<float>> vecs;
             AiError e;
-            bool ok = AiEmbedBatch(c, { "connection test" }, vecs, e, nullptr) &&
+            bool ok = AiEmbedBatch(c, { "connection test" }, true, vecs, e, nullptr) &&
                       !vecs.empty() && !vecs[0].empty();
             finish(ok ? "\xe2\x9c\x93 Embeddings ready" :
                         ("\xe2\x9c\x97 Embeddings failed: " + WxU(e.Friendly())));

@@ -104,6 +104,17 @@ body{
   background:rgba(136,136,136,.28); border:1px solid var(--muted); cursor:pointer;}
 .cite:hover{opacity:.75;}
 .cite.dead{opacity:.38; cursor:default;}
+/* footnote plate: the answer's sources as clickable rows (Avalanche's citation
+   list) - a click jumps the PDF page and paints the quote's highlight quad */
+.foot{display:flex; flex-wrap:wrap; gap:4px; margin:2px 0 4px 0; max-width:100%;}
+.frow{display:inline-flex; align-items:center; gap:5px; max-width:100%;
+  padding:2px 7px; border-radius:9px; font-size:10px; cursor:pointer;
+  color:var(--muted); background:rgba(136,136,136,.16); border:1px solid var(--line);}
+.frow:hover{border-color:var(--primary); color:var(--text);}
+.frow b{color:var(--primary); font-size:9.5px;}
+.frow .pg{color:var(--text); font-weight:600; white-space:nowrap;}
+.frow i{color:var(--muted); font-style:normal; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; max-width:150px;}
 
 /* ---- empty state: the invitation shows the moment the panel opens - the
      first user message sweeps it away (setEmpty) ---- */

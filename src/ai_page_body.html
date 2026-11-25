@@ -224,6 +224,11 @@ var PERSON='<svg width="14" height="14" viewBox="0 0 24 24" fill="#e0e0e0">'+
  '<circle cx="12" cy="8" r="4"/><path d="M4 20c0-4.4 3.6-7 8-7s8 2.6 8 7v1H4z"/></svg>';
 
 function addMsg(role, content, sources){
+  // the transcript's own sources ride back into the chip map: a restored
+  // conversation's inline citations were dead chips - the msgs frame never
+  // refilled S.sources, and the click gate swallowed every one of them
+  if(role!=="user"&&sources) for(var s of sources)
+    if(s&&s.id&&!S.sources[s.id]) S.sources[s.id]=s;
   var wrap=document.createElement("div");
   wrap.className="msg "+(role==="user"?"user":"bot");
   var ava=document.createElement("div"); ava.className="ava";
@@ -233,7 +238,28 @@ function addMsg(role, content, sources){
   var b=document.createElement("div"); b.className="bubble";
   if(role==="user") b.textContent=content;
   else { renderMd(content, b); }
-  cell.appendChild(b); wrap.appendChild(ava); wrap.appendChild(cell);
+  cell.appendChild(b);
+  // the footnote plate: the answer's sources as clickable rows under the
+  // bubble (Avalanche's citation list) - number, page, the reason's head;
+  // a click jumps the PDF page and paints the quote's highlight quad
+  if(role!=="user"&&sources&&sources.length){
+    var f=document.createElement("div"); f.className="foot";
+    for(var s of sources){ if(!s||!s.id) continue;
+      var n=citeNum(s.id);
+      var row=document.createElement("span"); row.className="frow";
+      row.setAttribute("data-src",s.id);
+      var q=(s.reason||s.quote||""); if(q.length>72)q=q.slice(0,72)+"…";
+      row.innerHTML="<b>"+n+"</b>";
+      var pg=document.createElement("span"); pg.className="pg";
+      pg.textContent=s.page?("Page "+s.page):s.id;
+      row.appendChild(pg);
+      if(q){ var rr=document.createElement("i"); rr.textContent=q; row.appendChild(rr); }
+      row.title=(s.quote||s.reason||"").slice(0,180);
+      f.appendChild(row);
+    }
+    if(f.children.length) cell.appendChild(f);
+  }
+  wrap.appendChild(ava); wrap.appendChild(cell);
   $("msgs").appendChild(wrap);
   scrollBottom();
   return {wrap:wrap, bubble:b, cell:cell};
@@ -415,6 +441,8 @@ function send(){ var t=inp.value.trim(); if(!t||S.streaming) return;
 $("msgs").addEventListener("click", function(e){
   var c=e.target.closest(".cite");
   if(c&&!c.classList.contains("dead")) post({type:"cite", id:c.getAttribute("data-src")});
+  var f=e.target.closest(".frow");
+  if(f) post({type:"cite", id:f.getAttribute("data-src")});
 });
 $("setOvl").addEventListener("mousedown", function(e){
   if(e.target===$("setOvl")) $("setOvl").style.display="none"; });

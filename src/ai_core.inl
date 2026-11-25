@@ -934,20 +934,35 @@ static std::string AiExtractStreamingAnswer(const std::string& raw) {
 // .../v1beta/openai/embeddings, NIM takes .../v1/embeddings - appending
 // /embeddings to the base URL seats both. The reader parses the OpenAI
 // shape (data[].embedding) first, the flat embeddings array second.
+// NIM's retrieval models (Avalanche's VectorIndex dialect) also name their
+// side of the search - a "query" or a "passage" - and the endpoint 422s a
+// request that arrives without it; the field rides only on the NIM door,
+// the OpenAI-compatible doors never asked for it and the strict ones would
+// reject it.
 static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
-                         std::vector<std::vector<float>>& out, AiError& err,
-                         std::atomic<bool>* cancel) {
+                         bool query, std::vector<std::vector<float>>& out,
+                         AiError& err, std::atomic<bool>* cancel) {
     out.clear();
     std::wstring model = c.embeddingModel.empty() ? L"nvidia/nemotron-3-embed-1b" : c.embeddingModel;
+    std::wstring root = c.baseUrl;
+    while (!root.empty() && root.back() == L'/') root.pop_back();
+    if (root.empty()) root = L"https://integrate.api.nvidia.com/v1";
+    std::string ru = WxU(root), ml = WxU(model);
+    for (auto& ch : ru) ch = (char)tolower((unsigned char)ch);
+    for (auto& ch : ml) ch = (char)tolower((unsigned char)ch);
+    bool nim = ru.find("integrate.api.nvidia.com") != std::string::npos ||
+               ml.rfind("nvidia/", 0) == 0 || ml.find("nemotron") != std::string::npos ||
+               ml.find("nv-embed") != std::string::npos || ml.find("embedqa") != std::string::npos;
     std::string body = "{\"model\":" + WxJsonStr(WxU(model)) + ",\"input\":[";
     for (size_t i = 0; i < inputs.size(); i++) {
         if (i) body += ",";
         body += WxJsonStr(inputs[i]);
     }
-    body += "]}";
-    std::wstring root = c.baseUrl;
-    while (!root.empty() && root.back() == L'/') root.pop_back();
-    if (root.empty()) root = L"https://integrate.api.nvidia.com/v1";
+    body += "]";
+    if (nim)
+        body += std::string(",\"input_type\":\"") + (query ? "query" : "passage") +
+                "\",\"encoding_format\":\"float\",\"truncate\":\"END\"";
+    body += "}";
     std::string resp; int status = 0;
     if (!AiHttpPostRaw(root + L"/embeddings", body, c.apiKey, 60 * 1000, resp, status, cancel)) {
         if (status == 404) { err.cat = AI_ERR_MODEL_NOT_FOUND; err.model = model; }

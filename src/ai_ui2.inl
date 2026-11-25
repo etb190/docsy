@@ -485,6 +485,7 @@ static void AiRangeTick() {
 }
 
 // ---- the document index pump (OCR one page per tick) ----
+static void AiSemanticStart();   // the embedding pass, defined below the pump
 static void AiIndexKickoff(const std::wstring& path) {
     if (g_aiIndexing || path.empty()) return;
     AiLoadSettings();
@@ -495,6 +496,10 @@ static void AiIndexKickoff(const std::wstring& path) {
         g_aiIndex = std::move(ix);
         g_aiIndexReady = true;
         AiPanelSend(WxW(AiStatusJson("status")));
+        // a cached index re-arms the semantic line the same breath - the
+        // up-to-date check makes this a no-op when the vectors already match
+        // the model, and a fresh nemotron build when they do not
+        AiSemanticStart();
         return;
     }
     g_aiIndexing = true;
@@ -537,6 +542,12 @@ static void AiIndexTick() {
         KillTimer(g.main, 4713);
         g_aiIndexReady = !g_aiIndex.chunks.empty();
         AiIndexSave(g_aiIndex);
+        // Avalanche's DocumentIndexer embeds while it indexes: the lexical
+        // chunks are barely down and the semantic pass (nemotron's door) is
+        // already riding its thread - the reader never has to find the beaker
+        // button for the sidechat's answers to carry real retrieval. The
+        // manual toggle stays for a re-run or a cancel.
+        AiSemanticStart();
         std::string key = g_aiIdxKey;
         std::string queued;
         {
@@ -605,9 +616,9 @@ static void AiSemanticStart() {
                 }
                 std::vector<std::vector<float>> vecs;
                 AiError e;
-                bool ok = AiEmbedBatch(cfg, inputs, vecs, e, &g_aiSemCancel);
+                bool ok = AiEmbedBatch(cfg, inputs, false, vecs, e, &g_aiSemCancel);
                 if (!ok && vecs.empty() && !g_aiSemCancel.load())
-                    ok = AiEmbedBatch(cfg, inputs, vecs, e, &g_aiSemCancel);
+                    ok = AiEmbedBatch(cfg, inputs, false, vecs, e, &g_aiSemCancel);
                 if (!ok || vecs.size() != b1 - b0) {
                     g_aiSemActive = false;
                     if (g_aiSemCancel.load()) return;
@@ -1666,10 +1677,13 @@ static void SumPanelMessage(const wchar_t* json) {
                 AiSetSetting("summary.digest." + docId, "");
                 // Reset's whole point: Start must build anew, not replay the
                 // cache the last run left. The digest setting alone never
-                // touched summary_cache.json, so the very next Start answered
-                // "fromCache" with the same text the user just wiped.
-                int last = min(g_sumStart + g_sumRange - 1, D.n);
-                AiCacheDeleteRange(docId, g_sumStart, last);
+                // touched summary_cache.json, and the old range-scoped delete
+                // only killed the stretch on screen - the buffers and every
+                // neighboring range stayed, so the very next Start (or a
+                // back/forth step onto a buffered stretch) answered "fromCache"
+                // with the same text the user just wiped. Reset clicked = the
+                // whole cache dies: every range, every model, every document.
+                AiCacheDeleteAll();
                 AiSetSetting("summary.digest." + docId + ".first", "");
                 AiSetSetting("summary.digest." + docId + ".last", "");
                 AiSetSetting("summary.digest." + docId + ".model", "");

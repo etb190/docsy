@@ -463,7 +463,7 @@ static void AiRunReply(const std::string& key, const std::string& input) {
             std::vector<std::vector<float>> vecs;
             AiError e2;
             if (g_aiIndex.dim > 0 && g_aiIndex.vectors.size() == g_aiIndex.chunks.size() &&
-                AiEmbedBatch(cfg, one, vecs, e2, nullptr) && vecs.size() == 1)
+                AiEmbedBatch(cfg, one, true, vecs, e2, nullptr) && vecs.size() == 1)
                 qvec = vecs[0];
             ev = AiRetrieve(g_aiIndex, q, qvec.empty() ? nullptr : &qvec,
                             cfg.topK, cfg.evidenceBudget);
@@ -592,7 +592,27 @@ static void AiSendSnapshot(AiCtxState& st) {
         auto& m = st.msgs[i];
         if (i) j += ",";
         j += "{\"role\":" + std::string(m.role == 0 ? "\"user\"" : "\"bot\"") +
-             ",\"content\":" + WxJsonStr(WxU(m.content)) + "}";
+             ",\"content\":" + WxJsonStr(WxU(m.content));
+        // the sources ride the snapshot too: the old frame carried only role
+        // and content, so a restored conversation's chips were all dead - the
+        // page's chip map stayed empty, the click gate swallowed every cite,
+        // and the jump-to-page promise died with the reopen
+        if (!m.sources.empty()) {
+            j += ",\"sources\":[";
+            for (size_t s = 0; s < m.sources.size(); s++) {
+                auto& src = m.sources[s];
+                if (s) j += ",";
+                j += "{\"id\":" + WxJsonStr(WxU(src.id)) +
+                     ",\"page\":" + std::to_string(src.page) +
+                     ",\"pageIndex\":" + std::to_string(src.pageIndex) +
+                     ",\"quote\":" + WxJsonStr(WxU(src.quote)) +
+                     ",\"reason\":" + WxJsonStr(WxU(src.reason)) +
+                     ",\"verified\":" + (src.verified ? "true" : "false") +
+                     ",\"location\":" + std::to_string(src.location) + "}";
+            }
+            j += "]";
+        }
+        j += "}";
     }
     j += "]}";
     AiPanelSend(j);

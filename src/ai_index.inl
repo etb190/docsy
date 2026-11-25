@@ -917,6 +917,17 @@ static void AiCacheDeleteRange(const std::string& docId, int first, int last) {
     WxWriteFile(AiRootDir() + L"\\summary_cache.json", (const unsigned char*)out.data(), out.size());
 }
 
+// Reset's full meaning: the button wipes EVERY cached summary - every range,
+// every model, every document - not just the stretch currently on screen. The
+// old range-scoped delete left the neighbors alive: the user hit Reset, hit
+// Start (or stepped a range chip) and the cache still answered "fromCache"
+// with the exact text they just wiped. The cache is a 40-entry replay room,
+// not an archive - wiping the file wholesale is the honest reset.
+static void AiCacheDeleteAll() {
+    WxWriteFile(AiRootDir() + L"\\summary_cache.json",
+                (const unsigned char*)"{}", 2);
+}
+
 // ---- the notes recall logic (NotesRecallLogic) ----
 struct AiNoteCard { int first = 0, last = 0; std::string content; };
 static std::vector<std::pair<int, int>> AiNoteBlocks(int first, int last) {
