@@ -359,7 +359,17 @@ window.addEventListener("message", function(e){
     S.streaming=false; paintBusy(); setEmpty();
     break;
   case "error":
-    if(H) setError(H, m.text); S.streaming=false; paintBusy(); setEmpty(); break;
+    if(H){ setError(H, m.text); H=null; }
+    else {
+      // no thinking box on screen: the error gets its own row, or it dies
+      // unseen - every native drop that speaks BEFORE a think box exists
+      // (no document bound, one flight already in progress, no index) used
+      // to land here and vanish, and a silent drop reads as a broken button
+      var er=document.createElement("div"); er.className="errbox";
+      er.style.maxWidth="94%"; er.textContent=m.text||"Something went wrong.";
+      $("msgs").appendChild(er); scrollBottom();
+    }
+    S.streaming=false; paintBusy(); setEmpty(); break;
   case "stream-on": S.streaming=true; paintBusy(); break;
   case "stop-ok": case "cancel":
     if(H){ H.wrap.remove(); H=null; }

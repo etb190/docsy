@@ -481,7 +481,12 @@ static bool AiIndexSave(const AiDocIndex& ix) {
 // own save just fails its CreateFile - no corruption, the later save wins.
 static void AiIndexSaveAsync(const AiDocIndex& ix) {
     std::shared_ptr<AiDocIndex> copy = std::make_shared<AiDocIndex>(ix);
-    std::thread([copy]() { AiIndexSave(*copy); }).detach();
+    // the guard is the rule for every AI worker: an uncaught exception on a
+    // detached thread is std::terminate, and std::terminate is the whole app
+    // dying with nothing on screen. A failed save is silent by nature.
+    std::thread([copy]() {
+        try { AiIndexSave(*copy); } catch (...) {}
+    }).detach();
 }
 static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
     std::string s;
@@ -697,16 +702,26 @@ static std::vector<AiRetrieved> AiRetrieve(const AiDocIndex& ix, const std::stri
         if (c.index < 5) rr += 0.02;
         r.second = min(1.0, rr);
     }
-    // dedupe overlapping hits (Jaccard > 0.6)
+    // dedupe overlapping hits (Jaccard > 0.6). `words` is indexed by RANK
+    // POSITION - the old dedupe indexed it with d.chunkIdx, the chunk's index
+    // in ix.chunks, and on any real book the top-scoring chunk's index sits
+    // far beyond rank.size(): an out-of-bounds vector read that turned the
+    // first real retrieval into the "send, then the app dies five seconds
+    // later" crash (the tiny CI sample never scattered its indices, so it
+    // never fired there). The kept entries now carry their own rank position.
     std::vector<std::vector<std::string>> words;
     words.resize(rank.size());
     for (size_t i = 0; i < rank.size(); i++) AiWordize(ix.chunks[rank[i].first].text, words[i]);
     std::vector<AiRetrieved> dedup;
+    std::vector<size_t> dedupPos;        // dedup[k] landed at rank position dedupPos[k]
     for (size_t i = 0; i < rank.size(); i++) {
         bool dup = false;
-        for (auto& d : dedup)
-            if (AiJaccard(words[i], words[d.chunkIdx]) > 0.6) { dup = true; break; }
-        if (!dup) dedup.push_back({ &ix.chunks[rank[i].first], rank[i].first, rank[i].second, 2 });
+        for (size_t k = 0; k < dedup.size(); k++)
+            if (AiJaccard(words[i], words[dedupPos[k]]) > 0.6) { dup = true; break; }
+        if (!dup) {
+            dedup.push_back({ &ix.chunks[rank[i].first], rank[i].first, rank[i].second, 2 });
+            dedupPos.push_back(i);
+        }
     }
     // relative floor + topK + evidence budget
     double best = dedup.empty() ? 0 : dedup[0].score;

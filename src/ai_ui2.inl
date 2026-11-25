@@ -435,41 +435,51 @@ static void AiRangeTick() {
                 // would never come. The model call is independent; two HTTP
                 // calls in flight are fine.
                 std::thread([docId, rangeText, first, last, words, lang, genre, hash]() {
-                    AiLoadSettings();
-                    AiCfg cfg = g_aiCfg;
-                    std::string sys = PromptBodyOf(genre.c_str());
-                    if (sys.empty()) sys = PromptBodyOf("nonfiction_classic");
-                    {
-                        std::string ph = std::to_string(words);
-                        size_t pos;
-                        while ((pos = sys.find("{words}")) != std::string::npos) sys.replace(pos, 7, ph);
-                        while ((pos = sys.find("{language}")) != std::string::npos) sys.replace(pos, 10, lang);
+                    // the worker's guard: an uncaught exception here is
+                    // std::terminate - the buffer's "generating" chip would
+                    // hang and the app would die with it
+                    try {
+                        AiLoadSettings();
+                        AiCfg cfg = g_aiCfg;
+                        std::string sys = PromptBodyOf(genre.c_str());
+                        if (sys.empty()) sys = PromptBodyOf("nonfiction_classic");
+                        {
+                            std::string ph = std::to_string(words);
+                            size_t pos;
+                            while ((pos = sys.find("{words}")) != std::string::npos) sys.replace(pos, 7, ph);
+                            while ((pos = sys.find("{language}")) != std::string::npos) sys.replace(pos, 10, lang);
+                        }
+                        int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
+                        if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
+                        std::string user = WxU(rangeText);
+                        std::string content;
+                        AiError err;
+                        std::atomic<bool> cancel{ false };
+                        std::string answer;
+                        if (AiChatBuffered(cfg, sys, {}, user, budget, nullptr, true, content, err, &cancel) && !content.empty()) {
+                            answer = AiExtractStreamingAnswer(content);
+                            if (answer.empty()) answer = AiParseStructured(AiStripThinkSpans(content)).answer;
+                            if (answer.empty()) answer = content;
+                            std::string mdl = WxU(cfg.model);
+                            std::string var = lang + ":" + std::to_string(words) + ":" + genre;
+                            AiCachePut(docId, first, last, mdl, var, hash, answer);
+                        }
+                        // the answer rides the pump, never the thread: the old
+                        // SumPost here called PostWebMessageAsJson off the UI
+                        // thread and the delivery died in the apartment wall - the
+                        // cache filled, the page never heard a word of it, and
+                        // "Buffer: generating" hung forever. Empty = failed; the
+                        // handler turns that into prefetch-fail on the UI thread.
+                        AiEv* pe = AiEvMake(AIEV_SUM_PREFETCH);
+                        pe->key = std::to_string(first);
+                        pe->a = answer;
+                        AiPost(pe);
+                    } catch (...) {
+                        AiEv* pe = AiEvMake(AIEV_SUM_PREFETCH);
+                        pe->key = std::to_string(first);
+                        pe->a = "";
+                        AiPost(pe);
                     }
-                    int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
-                    if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
-                    std::string user = WxU(rangeText);
-                    std::string content;
-                    AiError err;
-                    std::atomic<bool> cancel{ false };
-                    std::string answer;
-                    if (AiChatBuffered(cfg, sys, {}, user, budget, nullptr, true, content, err, &cancel) && !content.empty()) {
-                        answer = AiExtractStreamingAnswer(content);
-                        if (answer.empty()) answer = AiParseStructured(AiStripThinkSpans(content)).answer;
-                        if (answer.empty()) answer = content;
-                        std::string mdl = WxU(cfg.model);
-                        std::string var = lang + ":" + std::to_string(words) + ":" + genre;
-                        AiCachePut(docId, first, last, mdl, var, hash, answer);
-                    }
-                    // the answer rides the pump, never the thread: the old
-                    // SumPost here called PostWebMessageAsJson off the UI
-                    // thread and the delivery died in the apartment wall - the
-                    // cache filled, the page never heard a word of it, and
-                    // "Buffer: generating" hung forever. Empty = failed; the
-                    // handler turns that into prefetch-fail on the UI thread.
-                    AiEv* pe = AiEvMake(AIEV_SUM_PREFETCH);
-                    pe->key = std::to_string(first);
-                    pe->a = answer;
-                    AiPost(pe);
                 }).detach();
             }
             return;
@@ -618,69 +628,96 @@ static void AiSemanticStart() {
     std::string model = WxU(cfg.embeddingModel.empty() ? L"nvidia/nemotron-3-embed-1b"
                                                        : cfg.embeddingModel);
     std::thread([ix, cfg, prefixKey, model]() mutable {
-        bool upToDate = (ix.embModel == model && ix.prefixKey == WxU(prefixKey) &&
-                         !ix.vectors.empty() &&
-                         ix.vectors.size() == ix.chunks.size());
-        if (!upToDate) {
-            size_t total = ix.chunks.size();
-            ix.vectors.assign(total, {});
-            ix.dim = 0;
-            const size_t B = 256;
-            for (size_t b0 = 0; b0 < total; b0 += B) {
-                if (g_aiSemCancel.load()) { g_aiSemActive = false; return; }
-                size_t b1 = min(b0 + B, total);
-                std::vector<std::string> inputs;
-                for (size_t i = b0; i < b1; i++) {
-                    std::string inp = WxU(cfg.embDocPrefix) + ix.chunks[i].text;
-                    if (inp.size() > 1200) inp.resize(1200);
-                    inputs.push_back(inp);
-                }
-                std::vector<std::vector<float>> vecs;
-                AiError e;
-                bool ok = AiEmbedBatch(cfg, inputs, false, vecs, e, &g_aiSemCancel);
-                if (!ok && vecs.empty() && !g_aiSemCancel.load())
-                    ok = AiEmbedBatch(cfg, inputs, false, vecs, e, &g_aiSemCancel);
-                if (!ok || vecs.size() != b1 - b0) {
-                    g_aiSemActive = false;
-                    if (g_aiSemCancel.load()) return;
-                    AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
-                    if (e.cat == AI_ERR_MODEL_NOT_FOUND) {
-                        ev->a = WxU(L"Embedding model " + e.model +
-                                    L" not found — check the Embedding Model field in AI settings."
-                                    L" Using keyword search only.");
-                    } else {
-                        ev->a = WxU(L"Semantic search is unavailable right now — using keyword search only.");
+        // the guard is the rule for every AI worker: an uncaught exception on a
+        // detached thread is std::terminate - the whole app dying with the
+        // beaker line frozen. The catch folds the pass and speaks.
+        try {
+            bool upToDate = (ix.embModel == model && ix.prefixKey == WxU(prefixKey) &&
+                             !ix.vectors.empty() &&
+                             ix.vectors.size() == ix.chunks.size());
+            if (!upToDate) {
+                size_t total = ix.chunks.size();
+                ix.vectors.assign(total, {});
+                ix.dim = 0;
+                // One batch, any size: an endpoint that refuses N inputs (a 400
+                // on its own batch limit, a 429 on the burst) gets the batch
+                // HALVED and retried - the pass lands whether the door takes
+                // 256 inputs, 100 or 16. A single input's failure is the only
+                // real failure, and that one speaks the model's own verdict.
+                auto slice = [&](auto&& self, size_t b0, size_t b1, int depth,
+                                 AiError& eOut) -> bool {
+                    if (g_aiSemCancel.load()) return false;
+                    std::vector<std::string> inputs;
+                    for (size_t i = b0; i < b1; i++) {
+                        std::string inp = WxU(cfg.embDocPrefix) + ix.chunks[i].text;
+                        if (inp.size() > 1200) inp.resize(1200);
+                        inputs.push_back(std::move(inp));
                     }
-                    AiPost(ev);
-                    return;
+                    std::vector<std::vector<float>> vecs;
+                    AiError e;
+                    if (AiEmbedBatch(cfg, inputs, false, vecs, e, &g_aiSemCancel) &&
+                        vecs.size() == b1 - b0) {
+                        if (ix.dim == 0 && !vecs.empty()) ix.dim = (int)vecs[0].size();
+                        for (size_t i = b0; i < b1; i++) ix.vectors[i] = std::move(vecs[i - b0]);
+                        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                        wchar_t b[128];
+                        _snwprintf_s(b, _TRUNCATE, L"Building semantic search… %zu/%zu", b1, total);
+                        ev->a = WxU(b);
+                        AiPost(ev);
+                        return true;
+                    }
+                    eOut = e;
+                    if (g_aiSemCancel.load() || b1 - b0 <= 1 || depth >= 8) return false;
+                    size_t mid = b0 + (b1 - b0) / 2;
+                    return self(self, b0, mid, depth + 1, eOut) &&
+                           self(self, mid, b1, depth + 1, eOut);
+                };
+                for (size_t b0 = 0; b0 < total; ) {
+                    if (g_aiSemCancel.load()) { g_aiSemActive = false; return; }
+                    size_t b1 = min(b0 + (size_t)256, total);
+                    AiError e;
+                    if (!slice(slice, b0, b1, 0, e)) {
+                        g_aiSemActive = false;
+                        if (g_aiSemCancel.load()) return;
+                        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                        if (e.cat == AI_ERR_MODEL_NOT_FOUND) {
+                            ev->a = WxU(L"Embedding model " + e.model +
+                                        L" not found — check the Embedding Model field in AI settings."
+                                        L" Using keyword search only.");
+                        } else {
+                            ev->a = WxU(L"Semantic search is unavailable right now — using keyword search only.");
+                        }
+                        AiPost(ev);
+                        return;
+                    }
+                    b0 = b1;
                 }
-                if (ix.dim == 0) ix.dim = (int)vecs[0].size();
-                for (size_t i = b0; i < b1; i++) ix.vectors[i] = vecs[i - b0];
-                AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
-                wchar_t b[128];
-                _snwprintf_s(b, _TRUNCATE, L"Building semantic search… %zu/%zu", b1, total);
-                ev->a = WxU(b);
-                AiPost(ev);
+                ix.embModel = model;
+                ix.prefixKey = WxU(prefixKey);
+                AiIndexSave(ix);
             }
-            ix.embModel = model;
-            ix.prefixKey = WxU(prefixKey);
-            AiIndexSave(ix);
+            // the vectors ride home: the pass used to end here with its work in a
+            // local copy - the file was saved, the memory dropped, and the live
+            // seat's dim stayed 0, so every answer in this session retrieved by
+            // keyword alone and the freshly built nemotron embeddings never spoke
+            // until the app restarted and the index loaded from disk. The handback
+            // event merges them into the live seat on the UI thread.
+            g_aiSemActive = false;
+            g_aiSemReadyFlag = true;
+            std::shared_ptr<AiDocIndex> done = std::make_shared<AiDocIndex>(std::move(ix));
+            AiEv* ev = AiEvMake(AIEV_SEM_INDEX);
+            ev->heavy = std::move(done);
+            AiPost(ev);
+            AiEv* st = AiEvMake(AIEV_SEM_STATUS);
+            st->a = WxU(L"Semantic search ready.");
+            AiPost(st);
+        } catch (...) {
+            g_aiSemActive = false;
+            AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+            ev->a = WxU(L"Semantic search stopped after an internal error — "
+                        L"keyword search stays available.");
+            AiPost(ev);
         }
-        // the vectors ride home: the pass used to end here with its work in a
-        // local copy - the file was saved, the memory dropped, and the live
-        // seat's dim stayed 0, so every answer in this session retrieved by
-        // keyword alone and the freshly built nemotron embeddings never spoke
-        // until the app restarted and the index loaded from disk. The handback
-        // event merges them into the live seat on the UI thread.
-        g_aiSemActive = false;
-        g_aiSemReadyFlag = true;
-        std::shared_ptr<AiDocIndex> done = std::make_shared<AiDocIndex>(std::move(ix));
-        AiEv* ev = AiEvMake(AIEV_SEM_INDEX);
-        ev->heavy = std::move(done);
-        AiPost(ev);
-        AiEv* st = AiEvMake(AIEV_SEM_STATUS);
-        st->a = WxU(L"Semantic search ready.");
-        AiPost(st);
     }).detach();
 }
 static void AiSemanticToggle() {
@@ -774,38 +811,48 @@ static void AiNotesRunModel(std::wstring rangeText, int first, int last) {
     int maxTok = max(cfg.maxTokens, 2000 + 1200 * (int)blocks.size());
     if (!AiIsLocalHost(WxU(cfg.baseUrl)) && maxTok > 8192) maxTok = 8192;
     std::thread([user, sys, maxTok, first, last]() {
-        AiError err;
-        std::string reply;
-        bool ok = AiChatBuffered(g_aiCfg, sys, {}, user, maxTok, nullptr, true, reply, err,
-                                 &g_aiNotesCancel);
-        g_aiNotesBusy = false;
-        if (g_aiNotesCancel.load()) {
-            AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
-            e->a = ""; e->flag = false;
+        // the worker's guard: an uncaught exception on a detached thread is
+        // std::terminate - the notes would die with the app
+        try {
+            AiError err;
+            std::string reply;
+            bool ok = AiChatBuffered(g_aiCfg, sys, {}, user, maxTok, nullptr, true, reply, err,
+                                     &g_aiNotesCancel);
+            g_aiNotesBusy = false;
+            if (g_aiNotesCancel.load()) {
+                AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
+                e->a = ""; e->flag = false;
+                AiPost(e);
+                return;
+            }
+            if (!ok) {
+                AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
+                std::wstring f = err.Friendly();
+                if (f.size() > 160) f.resize(160);
+                e->a = WxU(L"Notes failed: " + f);
+                e->flag = false;
+                AiPost(e);
+                return;
+            }
+            std::vector<AiNoteCard> cards = AiParseNoteCards(reply, first, last);
+            AiEv* e = AiEvMake(AIEV_NOTES_CARDS);
+            std::string sb = "[";
+            for (size_t i = 0; i < cards.size(); i++) {
+                if (i) sb += ",";
+                sb += "{\"first\":" + std::to_string(cards[i].first) +
+                      ",\"last\":" + std::to_string(cards[i].last) +
+                      ",\"content\":" + WxJsonStr(WxU(cards[i].content)) + "}";
+            }
+            sb += "]";
+            e->b = sb;
             AiPost(e);
-            return;
-        }
-        if (!ok) {
+        } catch (...) {
+            g_aiNotesBusy = false;
             AiEv* e = AiEvMake(AIEV_NOTES_STATUS);
-            std::wstring f = err.Friendly();
-            if (f.size() > 160) f.resize(160);
-            e->a = WxU(L"Notes failed: " + f);
+            e->a = WxU(L"Notes stopped after an internal error.");
             e->flag = false;
             AiPost(e);
-            return;
         }
-        std::vector<AiNoteCard> cards = AiParseNoteCards(reply, first, last);
-        AiEv* e = AiEvMake(AIEV_NOTES_CARDS);
-        std::string sb = "[";
-        for (size_t i = 0; i < cards.size(); i++) {
-            if (i) sb += ",";
-            sb += "{\"first\":" + std::to_string(cards[i].first) +
-                  ",\"last\":" + std::to_string(cards[i].last) +
-                  ",\"content\":" + WxJsonStr(WxU(cards[i].content)) + "}";
-        }
-        sb += "]";
-        e->b = sb;
-        AiPost(e);
     }).detach();
 }
 

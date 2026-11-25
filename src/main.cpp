@@ -1,6 +1,8 @@
 // Docsy - minimal, fast, native Win32 PDF reader.
 // Modularized architecture: components separated into clean modules.
 
+#include <exception>
+#include <cstdarg>
 #include "common.h"
 #include "pdf_render.inl"
 #include "tabs.inl"
@@ -27,7 +29,77 @@
 #include "ai_ui3.inl"
 #include "ext_selftest.inl"
 
+// ---- the crash record (the "whole app crashes" reports' black box) ----
+// Every death the process cannot survive - an access violation, an uncaught
+// exception anywhere, a terminate - lands in %LocalAppData%\docsy\AI\crash.log
+// as one line: what died, where (module + offset), on which thread. The filter
+// keeps the default death (CONTINUE_SEARCH); it only makes the death SPEAK, so
+// a user's "it crashes" report carries the faulting frame instead of a guess.
+// Stack-buffer + WriteFile only: the heap may be the thing that is broken.
+static void CrashLogWrite(const char* kind, void* addr, unsigned long code) {
+    wchar_t root[MAX_PATH];
+    DWORD rl = GetEnvironmentVariableW(L"LOCALAPPDATA", root, MAX_PATH);
+    if (!rl || rl >= MAX_PATH - 40) return;
+    wchar_t dir[MAX_PATH];
+    lstrcpyW(dir, root); lstrcatW(dir, L"\\docsy\\AI");
+    CreateDirectoryW(root, nullptr);
+    CreateDirectoryW((std::wstring(root) + L"\\docsy").c_str(), nullptr);
+    CreateDirectoryW(dir, nullptr);
+    wchar_t path[MAX_PATH];
+    lstrcpyW(path, dir); lstrcatW(path, L"\\crash.log");
+    char lines[4096];
+    int n = 0;
+    auto put = [&](const char* fmt, ...) {
+        va_list ap; va_start(ap, fmt);
+        n += _vsnprintf_s(lines + n, sizeof(lines) - n, _TRUNCATE, fmt, ap);
+        va_end(ap);
+    };
+    put("[crash] %s code=0x%08lx addr=%p thread=%lu tick=%llu\r\n",
+        kind, code, addr, GetCurrentThreadId(), (unsigned long long)GetTickCount64());
+    void* st[24];
+    USHORT frames = RtlCaptureStackBackTrace(1, 24, st, nullptr);
+    put("[crash] stack (%u frames):\r\n", (unsigned)frames);
+    for (USHORT i = 0; i < frames; i++) {
+        HMODULE mod = nullptr;
+        char name[MAX_PATH] = "?";
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                           GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)st[i], &mod);
+        if (mod) {
+            wchar_t mp[MAX_PATH];
+            if (GetModuleFileNameW(mod, mp, MAX_PATH)) {
+                wchar_t* fn = mp;
+                for (wchar_t* c = mp; *c; c++) if (*c == L'\\' || *c == L'/') fn = c + 1;
+                WideCharToMultiByte(CP_UTF8, 0, fn, -1, name, MAX_PATH, nullptr, nullptr);
+            }
+            put("[crash]   %02u %s +0x%Ix\r\n", (unsigned)(i + 1), name,
+                (uintptr_t)st[i] - (uintptr_t)mod);
+        } else {
+            put("[crash]   %02u %p\r\n", (unsigned)(i + 1), st[i]);
+        }
+    }
+    put("\r\n");
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0;
+    WriteFile(h, lines, (DWORD)n, &w, nullptr);
+    CloseHandle(h);
+}
+static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* ep) {
+    if (ep && ep->ExceptionRecord)
+        CrashLogWrite("exception", ep->ExceptionRecord->ExceptionAddress,
+                      ep->ExceptionRecord->ExceptionCode);
+    return EXCEPTION_CONTINUE_SEARCH;   // the default death, now with a record
+}
+static void CrashTerminate() {
+    CrashLogWrite("terminate", nullptr, 0);
+    abort();   // the default terminate's own end
+}
+
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
+    SetUnhandledExceptionFilter(CrashFilter);
+    std::set_terminate(CrashTerminate);
     winrt::init_apartment(winrt::apartment_type::single_threaded);
     Gdiplus::GdiplusStartupInput gi; ULONG_PTR tok;
     Gdiplus::GdiplusStartup(&tok, &gi, nullptr);

@@ -4,6 +4,9 @@
 // ---- the connection test (AiSettingsViewModel.TestConnectionAsync) ----
 static void AiRunTest(std::string settingsJson) {
     std::thread([settingsJson]() {
+        // the worker's guard: an uncaught exception on a detached thread is
+        // std::terminate - the test would take the whole app with it
+        try {
         std::string out;
         auto finish = [&out](const std::string& line) {
             if (!out.empty()) out += "\n";
@@ -52,6 +55,11 @@ static void AiRunTest(std::string settingsJson) {
         AiEv* ev = AiEvMake(AIEV_TEST_OUT);
         ev->a = out;
         AiPost(ev);
+        } catch (...) {
+            AiEv* ev = AiEvMake(AIEV_TEST_OUT);
+            ev->a = "\xe2\x9c\x97 The test stopped after an internal error.";
+            AiPost(ev);
+        }
     }).detach();
 }
 
@@ -484,7 +492,17 @@ static void AiHandleEvent(AiEv* e) {
             unsigned long long run = g_sumRun;          // this thread's owner token
             auto cancel = g_sumCancel;                  // this run's own stop flag
             std::thread([gen, run, cancel, docId, pageText, words, lang, genre]() {
-                AiSumRun(gen, run, cancel, docId, pageText, 1, 1, words, lang, genre, false);
+                // the worker's guard: an uncaught exception on a detached
+                // thread is std::terminate - the run would take the app down
+                try {
+                    AiSumRun(gen, run, cancel, docId, pageText, 1, 1, words, lang, genre, false);
+                } catch (...) {
+                    if (run == g_sumRun) g_sumBusy = false;
+                    AiEv* se = AiEvMake(AIEV_SUM_ERROR);
+                    se->gen = gen;
+                    se->a = WxU(L"The run stopped after an internal error.");
+                    AiPost(se);
+                }
             }).detach();
         }
         break;
@@ -514,32 +532,43 @@ static void AiHandleEvent(AiEv* e) {
             unsigned long long run = g_sumRun;
             std::wstring text = WxW(e->a);
             std::thread([gen, run, text]() {
-                if (AiLetters(text) < 50) {
-                    // the probe's verdict rides the pump like every other
-                    // thread's word: a webview call from this thread died in
-                    // the apartment wall and the beaker never reported
+                // the worker's guard: an uncaught exception on a detached
+                // thread is std::terminate - the probe would take the app down
+                try {
+                    if (AiLetters(text) < 50) {
+                        // the probe's verdict rides the pump like every other
+                        // thread's word: a webview call from this thread died in
+                        // the apartment wall and the beaker never reported
+                        AiEv* te = AiEvMake(AIEV_SUM_TESTOUT);
+                        te->gen = gen;
+                        te->a = "The selected pages have no readable text to verify.";
+                        te->flag = false;
+                        AiPost(te);
+                        if (run == g_sumRun) g_sumBusy = false;
+                        return;
+                    }
+                    AiLoadSettings();
+                    AiCfg cfg = g_aiCfg;
+                    std::string sys = PromptBodyOf("tester_standard");
+                    std::string content;
+                    AiError err;
+                    bool ok = AiChatBuffered(cfg, sys, {}, WxU(text), 2048,
+                                             nullptr, true, content, err, nullptr);
+                    std::string out = ok ? content : WxU(err.Friendly());
                     AiEv* te = AiEvMake(AIEV_SUM_TESTOUT);
                     te->gen = gen;
-                    te->a = "The selected pages have no readable text to verify.";
+                    te->a = out;
+                    te->flag = ok;
+                    AiPost(te);
+                    if (run == g_sumRun) g_sumBusy = false;
+                } catch (...) {
+                    AiEv* te = AiEvMake(AIEV_SUM_TESTOUT);
+                    te->gen = gen;
+                    te->a = "The probe stopped after an internal error.";
                     te->flag = false;
                     AiPost(te);
                     if (run == g_sumRun) g_sumBusy = false;
-                    return;
                 }
-                AiLoadSettings();
-                AiCfg cfg = g_aiCfg;
-                std::string sys = PromptBodyOf("tester_standard");
-                std::string content;
-                AiError err;
-                bool ok = AiChatBuffered(cfg, sys, {}, WxU(text), 2048,
-                                         nullptr, true, content, err, nullptr);
-                std::string out = ok ? content : WxU(err.Friendly());
-                AiEv* te = AiEvMake(AIEV_SUM_TESTOUT);
-                te->gen = gen;
-                te->a = out;
-                te->flag = ok;
-                AiPost(te);
-                if (run == g_sumRun) g_sumBusy = false;
             }).detach();
         } else if (what == 0) {
             // summary: the thread takes the text. The doc's cache key rides
@@ -556,7 +585,18 @@ static void AiHandleEvent(AiEv* e) {
             unsigned long long run = g_sumRun;          // this thread's owner token
             auto cancel = g_sumCancel;                  // this run's own stop flag
             std::thread([gen, run, cancel, docId, text, first, last, words, lang, genre, bypass]() {
-                AiSumRun(gen, run, cancel, docId, text, first, last, words, lang, genre, bypass);
+                // the worker's guard: an uncaught exception on a detached
+                // thread is std::terminate - the run would take the app down;
+                // the page hears a plain error instead
+                try {
+                    AiSumRun(gen, run, cancel, docId, text, first, last, words, lang, genre, bypass);
+                } catch (...) {
+                    if (run == g_sumRun) g_sumBusy = false;
+                    AiEv* se = AiEvMake(AIEV_SUM_ERROR);
+                    se->gen = gen;
+                    se->a = WxU(L"The run stopped after an internal error.");
+                    AiPost(se);
+                }
             }).detach();
         }
         break;

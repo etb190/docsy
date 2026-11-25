@@ -575,8 +575,30 @@ static void AiRunReply(const std::string& key, const std::string& input) {
 static void AiStartReplyThread(const std::string& key, const std::string& input) {
     // detached: a background conversation's late finish must never hold the UI
     // thread hostage (the reply's state lives in the context map, the events
-    // find their own way through the pump)
-    std::thread([key, input]() { AiRunReply(key, input); }).detach();
+    // find their own way through the pump). The guard is the rule for every AI
+    // worker: an uncaught exception on a detached thread is std::terminate -
+    // the whole app dying five seconds after the user pressed send, with the
+    // thinking box still spinning. The catch clears the flight's flags and
+    // speaks through the pump, so the panel shows the failure instead of dying.
+    std::thread([key, input]() {
+        try {
+            AiRunReply(key, input);
+        } catch (...) {
+            {
+                std::lock_guard<std::mutex> lk(g_aiMtx);
+                auto it = g_aiCtx.find(key);
+                if (it != g_aiCtx.end()) {
+                    it->second.inflight = false;
+                    it->second.loadingBubble = false;
+                }
+            }
+            AiEv* e = AiEvMake(AIEV_ERROR);
+            e->key = key;
+            e->a = WxU(L"The reply hit an internal error and was stopped. "
+                       L"Nothing was harmed - ask again.");
+            AiPost(e);
+        }
+    }).detach();
 }
 
 // ---- the AI panel HTML (resources 401) ----
