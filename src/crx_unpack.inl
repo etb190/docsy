@@ -443,13 +443,21 @@ struct JP {
         size_t st = i;
         while (i < x.size() && (isdigit((unsigned char)x[i]) || x[i] == '-' || x[i] == '+' || x[i] == '.' || x[i] == 'e' || x[i] == 'E')) i++;
         if (st == i) return false;
-        v.t = 'd'; v.d = atof(x.substr(st, i - st).c_str()); return true;
+        // strtod on the buffer in place, not atof(substr): an embedding reply
+        // carries hundreds of thousands of floats and one small-string heap
+        // allocation per number made every big parse pay for nothing
+        char* endp = nullptr;
+        v.t = 'd'; v.d = strtod(x.c_str() + st, &endp);
+        if (endp && endp > x.c_str() + st) i = (size_t)(endp - x.c_str());
+        return true;
     }
 };
 static bool JParse(const std::string& in, J& out) {
-    size_t o = in.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
-    std::string s = in.substr(o);
-    JP p(s); out = J();
+    // the parser walks the caller's buffer: a BOM only skips an offset, so a
+    // multi-megabyte body is never copied just to drop three bytes
+    JP p(in);
+    if (in.compare(0, 3, "\xEF\xBB\xBF") == 0) p.i = 3;
+    out = J();
     return p.Val(out, 0);
 }
 } // namespace crxk

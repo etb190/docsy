@@ -39,7 +39,7 @@ static void AiRunTest(std::string settingsJson) {
             AiError e;
             std::string content;
             bool ok = AiChatBuffered(c, "Reply with just 'OK'", {}, "test", 64, nullptr, false,
-                                     content, e, nullptr) && !content.empty();
+                                     content, e, nullptr, false) && !content.empty();
             finish(ok ? "\xe2\x9c\x93 Chat answered" :
                         ("\xe2\x9c\x97 Chat failed: " + WxU(e.Friendly())));
         }

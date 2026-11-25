@@ -639,16 +639,24 @@ static void AiSemanticStart() {
         // detached thread is std::terminate - the whole app dying with the
         // beaker line frozen. The catch folds the pass and speaks.
         try {
-            int skipped = 0;                     // chunks the door refused at width 1
-            bool anyLanded = false;              // the door proved alive at least once
-            std::wstring refusal;                // the last refusal's own words
-            bool upToDate = (ix.embModel == model && ix.prefixKey == WxU(prefixKey) &&
-                             !ix.vectors.empty() &&
-                             ix.vectors.size() == ix.chunks.size());
+            // the working index rides a shared seat: the lanes below fly batches
+            // concurrently and write disjoint vector ranges into one index
+            auto pix = std::make_shared<AiDocIndex>(std::move(ix));
+            // lane-shared counters: batches interleave, so single-thread ints
+            // would race - the counters go atomic, the refusal rides a mutex
+            std::atomic<int> skipped{0};             // chunks the door refused at width 1
+            std::atomic<bool> anyLanded{false};      // the door proved alive at least once
+            std::atomic<size_t> doneEmb{0};          // chunks whose batch fully landed
+            std::atomic<int> dimA{0};                // the first real vector's width
+            std::mutex refusalM;
+            std::wstring refusal;                    // the last refusal's own words
+            bool upToDate = (pix->embModel == model && pix->prefixKey == WxU(prefixKey) &&
+                             !pix->vectors.empty() &&
+                             pix->vectors.size() == pix->chunks.size());
             if (!upToDate) {
-                size_t total = ix.chunks.size();
-                ix.vectors.assign(total, {});
-                ix.dim = 0;
+                size_t total = pix->chunks.size();
+                pix->vectors.assign(total, {});
+                pix->dim = 0;
                 // One batch, any size: a door that refuses N inputs on its own
                 // limit (400 / 413 / 422) gets the batch HALVED - those are
                 // deterministic refusals, so no same-width retry rides first
@@ -672,7 +680,7 @@ static void AiSemanticStart() {
                         // the clamp, not a raw resize: a cut inside a multibyte
                         // sequence ships invalid UTF-8 and the door's 400 rides
                         // every halved retry - one curly quote killed the pass
-                        std::string inp = WxU(docPrefix) + ix.chunks[i].text;
+                        std::string inp = WxU(docPrefix) + pix->chunks[i].text;
                         inputs.push_back(AiClipUtf8(inp, 1200));
                     }
                     std::vector<std::vector<float>> vecs;
@@ -681,14 +689,16 @@ static void AiSemanticStart() {
                         vecs.size() == b1 - b0) {
                         // the dim rides the first real vector - blank chunks
                         // come home with empty vectors and must not pin the
-                        // seat's dim to 0
-                        if (ix.dim == 0)
-                            for (auto& v : vecs) if (!v.empty()) { ix.dim = (int)v.size(); break; }
-                        for (size_t i = b0; i < b1; i++) ix.vectors[i] = std::move(vecs[i - b0]);
-                        anyLanded = true;
+                        // seat's dim to 0 (scanned before the move below)
+                        if (dimA.load() == 0)
+                            for (auto& v : vecs) if (!v.empty()) { dimA.store((int)v.size()); break; }
+                        for (size_t i = b0; i < b1; i++) pix->vectors[i] = std::move(vecs[i - b0]);
+                        anyLanded.store(true);
+                        doneEmb.fetch_add(b1 - b0);
                         AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
                         wchar_t b[128];
-                        _snwprintf_s(b, _TRUNCATE, L"Building semantic search… %zu/%zu", b1, total);
+                        _snwprintf_s(b, _TRUNCATE, L"Building semantic search… %zu/%zu",
+                                     doneEmb.load(), total);
                         ev->a = WxU(b);
                         AiPost(ev);
                         return true;
@@ -707,14 +717,17 @@ static void AiSemanticStart() {
                     if (refused) {
                         // width 1 with the door proven alive: one poison chunk
                         // stays home, keyword-only, its siblings still land
-                        if (b1 - b0 <= 1 && anyLanded) {
-                            ix.vectors[b0].clear();
-                            skipped++;
+                        if (b1 - b0 <= 1 && anyLanded.load()) {
+                            pix->vectors[b0].clear();
+                            skipped.fetch_add(1);
                             std::wstring why = e.Friendly();
                             if (why.size() > 240) why.resize(240);
-                            refusal = (e.status > 0 && why.find(L"HTTP ") == std::wstring::npos)
-                                        ? (L"HTTP " + std::to_wstring(e.status) + L" — " + why)
-                                        : why;
+                            {
+                                std::lock_guard<std::mutex> lk(refusalM);
+                                refusal = (e.status > 0 && why.find(L"HTTP ") == std::wstring::npos)
+                                            ? (L"HTTP " + std::to_wstring(e.status) + L" — " + why)
+                                            : why;
+                            }
                             return true;
                         }
                         if (b1 - b0 <= 4) return false;  // the wall speaks, the pass ends
@@ -732,47 +745,80 @@ static void AiSemanticStart() {
                            self(self, mid, b1, depth + 1, 0, eOut);
                 };
                 // Batch size rides the door: NIM's own table takes 512+ texts
-                // a call and settles 128 real 1200-byte chunks in ~5s against
-                // integrate.api.nvidia.com (measured; extra concurrency just
-                // queues behind the shared key, so one wide sequential stream
-                // wins) - the user asked for 100++ at a time. Google's OpenAI
-                // door caps a batch at 100 texts / 20000 tokens and keeps 64;
-                // a local engine still takes the widest batch.
+                // a call; 256 real 1200-byte chunks ride one wide request and
+                // the halving ladder above still cures a width refusal.
+                // Google's OpenAI door caps a batch at 100 texts / 20000 tokens
+                // and keeps 64; a local engine still takes the widest batch.
                 bool nimEmb = AiEmbIsNimModel(cfg.embeddingModel);
-                size_t batchN = AiIsLocalHost(WxU(cfg.baseUrl)) ? 256 : (nimEmb ? 128 : 64);
-                for (size_t b0 = 0; b0 < total; ) {
-                    if (g_aiSemCancel.load()) { g_aiSemActive = false; return; }
-                    size_t b1 = min(b0 + batchN, total);
-                    AiError e;
-                    if (!slice(slice, b0, b1, 0, 0, e)) {
-                        g_aiSemActive = false;
-                        if (g_aiSemCancel.load()) return;
-                        AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
-                        if (e.cat == AI_ERR_MODEL_NOT_FOUND) {
-                            ev->a = WxU(L"Embedding model " + e.model +
-                                        L" not found — check the Embedding Model field in AI settings."
-                                        L" Using keyword search only.");
-                        } else {
-                            // the verdict now names itself: the old line buried
-                            // every 401 / 429 / 400 under one phrase, and a user
-                            // staring at "semantic search unavailable" had no
-                            // way to tell WHICH failure held the pass down
-                            std::wstring why = e.Friendly();
-                            // the cap grew from 220: the door's own words now
-                            // ride at the detail's tail and the user's status
-                            // line IS the diagnosis - never cut them off
-                            if (why.size() > 480) why.resize(480);
-                            if (e.status > 0 && why.find(L"HTTP ") == std::wstring::npos)
-                                why += L" (HTTP " + std::to_wstring(e.status) + L")";
-                            ev->a = WxU(L"Semantic search failed: " + why +
-                                        L" — keyword search stays available.");
+                bool local = AiIsLocalHost(WxU(cfg.baseUrl));
+                size_t batchN = local ? 256 : (nimEmb ? 256 : 64);
+                // lanes: the batches used to walk strictly one after another,
+                // so a 3,000-chunk book paid the door's per-batch latency once
+                // per batch on the clock - the wall time WAS the batch count.
+                // The lanes interleave the batches round-robin (lane L flies
+                // batches L, L+lanes, ...), each on its own request over the
+                // session's pooled connections: the door's compute overlaps
+                // instead of queueing behind one call, and a lane stuck in the
+                // halving ladder no longer parks the whole pass. Writes stay
+                // disjoint by construction, so no lock guards the vectors.
+                size_t nb = (total + batchN - 1) / batchN;
+                size_t nl = nb < (size_t)4 ? nb : (size_t)4;
+                unsigned lanes = local ? 1u : (unsigned)(nl ? nl : 1);
+                std::atomic<bool> abortPass{false};
+                std::mutex failM;
+                AiError failErr;
+                bool failed = false;
+                auto lane = [&](unsigned laneId) {
+                    for (size_t k = laneId; k < nb; k += lanes) {
+                        if (abortPass.load() || g_aiSemCancel.load()) return;
+                        size_t b0 = k * batchN;
+                        size_t b1 = min(b0 + batchN, total);
+                        AiError e;
+                        if (!slice(slice, b0, b1, 0, 0, e)) {
+                            if (g_aiSemCancel.load()) return;
+                            {
+                                std::lock_guard<std::mutex> lk(failM);
+                                if (!failed) { failed = true; failErr = e; }
+                            }
+                            abortPass.store(true);   // the other lanes drain, first verdict wins
+                            return;
                         }
-                        AiPost(ev);
-                        return;
                     }
-                    b0 = b1;
+                };
+                if (lanes <= 1) {
+                    lane(0);
+                } else {
+                    std::vector<std::thread> ts;
+                    for (unsigned L = 0; L < lanes; L++) ts.emplace_back(lane, L);
+                    for (auto& t : ts) t.join();
                 }
-                if (skipped > 0 && skipped >= (int)total) {
+                if (g_aiSemCancel.load()) { g_aiSemActive = false; return; }
+                if (failed) {
+                    g_aiSemActive = false;
+                    AiEv* ev = AiEvMake(AIEV_SEM_STATUS);
+                    if (failErr.cat == AI_ERR_MODEL_NOT_FOUND) {
+                        ev->a = WxU(L"Embedding model " + failErr.model +
+                                    L" not found — check the Embedding Model field in AI settings."
+                                    L" Using keyword search only.");
+                    } else {
+                        // the verdict now names itself: the old line buried
+                        // every 401 / 429 / 400 under one phrase, and a user
+                        // staring at "semantic search unavailable" had no
+                        // way to tell WHICH failure held the pass down
+                        std::wstring why = failErr.Friendly();
+                        // the cap grew from 220: the door's own words now
+                        // ride at the detail's tail and the user's status
+                        // line IS the diagnosis - never cut them off
+                        if (why.size() > 480) why.resize(480);
+                        if (failErr.status > 0 && why.find(L"HTTP ") == std::wstring::npos)
+                            why += L" (HTTP " + std::to_wstring(failErr.status) + L")";
+                        ev->a = WxU(L"Semantic search failed: " + why +
+                                    L" — keyword search stays available.");
+                    }
+                    AiPost(ev);
+                    return;
+                }
+                if (skipped.load() > 0 && skipped.load() >= (int)total) {
                     // every single chunk the door refused: not a ready seat -
                     // speak the wall and stop, the vectors stay unsaved
                     g_aiSemActive = false;
@@ -783,9 +829,10 @@ static void AiSemanticStart() {
                     AiPost(ev);
                     return;
                 }
-                ix.embModel = model;
-                ix.prefixKey = WxU(prefixKey);
-                AiIndexSave(ix);
+                pix->embModel = model;
+                pix->prefixKey = WxU(prefixKey);
+                pix->dim = dimA.load();
+                AiIndexSave(*pix);
             }
             // the vectors ride home: the pass used to end here with its work in a
             // local copy - the file was saved, the memory dropped, and the live
@@ -795,15 +842,14 @@ static void AiSemanticStart() {
             // event merges them into the live seat on the UI thread.
             g_aiSemActive = false;
             g_aiSemReadyFlag = true;
-            std::shared_ptr<AiDocIndex> done = std::make_shared<AiDocIndex>(std::move(ix));
             AiEv* ev = AiEvMake(AIEV_SEM_INDEX);
-            ev->heavy = std::move(done);
+            ev->heavy = pix;                     // the lanes' index flies home whole
             AiPost(ev);
             AiEv* st = AiEvMake(AIEV_SEM_STATUS);
-            if (skipped > 0)
-                st->a = WxU(L"Semantic search ready — " + std::to_wstring(skipped) +
+            if (skipped.load() > 0)
+                st->a = WxU(L"Semantic search ready — " + std::to_wstring(skipped.load()) +
                             L" chunk(s) the embedding door refused stay keyword-only" +
-                            (refusal.empty() ? std::wstring()
+                            (refusal.empty() ? std::wstring()          // lanes joined above
                                              : (L" (last refusal: " + refusal + L")")) +
                             L".");
             else

@@ -508,6 +508,9 @@ static void AiRunReply(const std::string& key, const std::string& input) {
     if (!ok && !system.empty()) {
         AiPushHistoryWindow(hist, msgsSnapshot, (size_t)max(2, cfg.maxHistory));
         std::string full;
+        // wantJson=false: the sidechat prompt asks for prose with [SOURCE_n]
+        // markers - a json grammar here fights the prompt and, on a
+        // thinking-default template, chokes the reply to a reasoning stub
         ok = AiChatStream(cfg, system, hist, input, 0, nullptr, false,
                           [&](const std::string& piece) {
                               raw += piece;
@@ -515,7 +518,7 @@ static void AiRunReply(const std::string& key, const std::string& input) {
                               e->key = key; e->gen = gen;
                               e->a = WxU(AiExtractStreamingAnswer(raw));
                               AiPost(e);
-                          }, full, err, &st->cancel);
+                          }, full, err, &st->cancel, false);
         raw = full;
         if (ok) msources = AiParseStructured(AiStripThinkSpans(raw)).sources;
     }

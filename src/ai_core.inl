@@ -685,7 +685,7 @@ static std::wstring AiBodyHead(const std::string& resp) {
     return clean.empty() ? std::wstring(L"(empty body)") : WxW(clean);
 }
 // The learned field drops (per endpoint key: 400 naming the field drops it).
-struct AiDrops { bool jsonDropped = false, effortDropped = false; };
+struct AiDrops { bool jsonDropped = false, effortDropped = false, kwDropped = false; };
 static std::unordered_map<std::string, AiDrops> g_aiDrops;
 static std::mutex g_aiDropsM;
 static std::string AiDropKey(const AiCfg& c) {
@@ -699,7 +699,8 @@ static std::string AiMsgJson(const char* role, const std::string& content) {
 static std::string AiChatBody(const AiCfg& c, const std::string& system,
                               const std::vector<std::pair<std::string, std::string>>& hist,
                               const std::string& user, bool stream, int maxTokensOverride = 0,
-                              double* temperatureOverride = nullptr, bool summary = false) {
+                              double* temperatureOverride = nullptr, bool summary = false,
+                              bool wantJson = true) {
     bool nemotron = [&, m = WxU(c.model)] {
         std::string mm = m;
         for (auto& ch : mm) ch = (char)tolower((unsigned char)ch);
@@ -720,15 +721,28 @@ static std::string AiChatBody(const AiCfg& c, const std::string& system,
     {
         std::lock_guard<std::mutex> lk(g_aiDropsM);
         AiDrops& d = g_aiDrops[AiDropKey(c)];
-        if (!d.jsonDropped && !summary) o += ",\"response_format\":{\"type\":\"json_object\"}";
+        // json_object is a GRAMMAR, not a preference: it constrains the reply
+        // from token zero. The sidechat prompts ask for prose with [SOURCE_n]
+        // markers, so a json grammar there fights the prompt - and on a
+        // thinking-default template the two choke each other: one reasoning
+        // stub, then finish_reason, no answer (the "no readable text" wall).
+        // The chat surfaces that read prose ride wantJson=false.
+        if (wantJson && !d.jsonDropped && !summary)
+            o += ",\"response_format\":{\"type\":\"json_object\"}";
         bool effortEligible = !c.reasoningEffort.empty();
         if (summary) effortEligible = effortEligible && !nemotron &&
             AiIsLocalHost(WxU(c.baseUrl)) == false;
         if (effortEligible && !d.effortDropped)
             o += ",\"reasoning_effort\":" + WxJsonStr(WxU(c.reasoningEffort));
-        if (nemotron && !c.reasoningEffort.empty() && !summary)
-            o += ",\"chat_template_kwargs\":{\"enable_thinking\":true}";
-        if (nemotron && summary)
+        // the thinking switch is pinned, never left to the template's mood:
+        // an effort dial set thinks on purpose; an empty dial (the default)
+        // wants a direct answer, stated explicitly - a template that thinks
+        // by default burns seconds and, under a json grammar, answers nothing
+        if (nemotron && !summary && !d.kwDropped)
+            o += !c.reasoningEffort.empty()
+                ? ",\"chat_template_kwargs\":{\"enable_thinking\":true}"
+                : ",\"chat_template_kwargs\":{\"enable_thinking\":false}";
+        if (nemotron && summary && !d.kwDropped)
             o += ",\"chat_template_kwargs\":{\"enable_thinking\":false}";
     }
     o += "}";
@@ -753,11 +767,13 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
         if (status == 400) {
             bool dropJson = resp.find("response_format") != std::string::npos;
             bool dropEff = resp.find("reasoning_effort") != std::string::npos;
-            if (dropJson || dropEff) {
+            bool dropKw = resp.find("chat_template_kwargs") != std::string::npos;
+            if (dropJson || dropEff || dropKw) {
                 std::lock_guard<std::mutex> lk(g_aiDropsM);
                 AiDrops& d = g_aiDrops[AiDropKey(c)];
                 if (dropJson) d.jsonDropped = true;
                 if (dropEff) d.effortDropped = true;
+                if (dropKw) d.kwDropped = true;
                 // rebuild without the dropped fields and retry in place
                 crxk::J j;
                 if (crxk::JParse(send, j) && j.t == 'o') {
@@ -765,7 +781,8 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
                     bool first = true;
                     for (auto& kv : j.o) {
                         if ((dropJson && kv.first == "response_format") ||
-                            (dropEff && kv.first == "reasoning_effort")) continue;
+                            (dropEff && kv.first == "reasoning_effort") ||
+                            (dropKw && kv.first == "chat_template_kwargs")) continue;
                         if (!first) rebuilt += ",";
                         first = false;
                         rebuilt += WxJsonStr(WxW(kv.first)) + ":" + WxJsonRaw(kv.second);
@@ -784,8 +801,11 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
 
 // ---- SSE stream: yield content deltas, swallow reasoning, [DONE] ends ----
 // One frame parser shared by the incremental sink and the trailing drain.
+// The reasoning channel is not dropped on the floor anymore: it lands here,
+// so a stream that ends with thinking and no answer can say so, and the
+// quiet-answer retry can tell "the door refused" from "the model only thought".
 struct AiSse {
-    std::string full;
+    std::string full, reasoning;
     bool cutOff = false, done = false;
     std::function<void(const std::string&)> onDelta;
     void Frame(const std::string& payload) {
@@ -795,17 +815,26 @@ struct AiSse {
         const crxk::J* ch = f.get("choices");
         if (!ch || ch->t != 'a' || ch->a.empty()) return;
         const crxk::J* d = ch->a[0].get("delta");
-        std::string piece;
+        std::string piece, think;
         if (d && d->t == 'o') {
             const crxk::J* ct = d->get("content");
             if (ct && ct->t == 's') piece = ct->s;
+            for (const char* k : { "reasoning_content", "reasoning" }) {
+                const crxk::J* rt = d->get(k);
+                if (rt && rt->t == 's') { think = rt->s; break; }
+            }
         } else {
             const crxk::J* msg = ch->a[0].get("message");
             if (msg && msg->t == 'o') {
                 const crxk::J* ct = msg->get("content");
                 if (ct && ct->t == 's') piece = ct->s;
+                for (const char* k : { "reasoning_content", "reasoning" }) {
+                    const crxk::J* rt = msg->get(k);
+                    if (rt && rt->t == 's') { think = rt->s; break; }
+                }
             }
         }
+        if (!think.empty()) reasoning += think;
         if (!piece.empty()) { full += piece; if (onDelta) onDelta(piece); }
         const crxk::J* fr = ch->a[0].get("finish_reason");
         if (fr && fr->t == 's' && fr->s == "length") cutOff = true;
@@ -832,15 +861,55 @@ struct AiSse {
     }
     std::string buf;
 };
+// the quiet-answer retry's body: the same request minus the json grammar.
+// A grammar the model cannot start under finishes before any answer lands
+// (measured: one reasoning stub, then finish_reason). Prose costs nothing -
+// ParseStructuredContent reads its JSON out of plain text all the same.
+static std::string AiStripResponseFormat(const std::string& body) {
+    crxk::J j;
+    if (!crxk::JParse(body, j) || j.t != 'o') return std::string();
+    bool had = false;
+    for (auto it = j.o.begin(); it != j.o.end(); ) {
+        if (it->first == "response_format") { had = true; it = j.o.erase(it); }
+        else ++it;
+    }
+    return had ? WxJsonRaw(j) : std::string();
+}
 static bool AiChatStream(const AiCfg& c, const std::string& system,
                          const std::vector<std::pair<std::string, std::string>>& hist,
                          const std::string& user, int maxTokensOverride,
                          double* temperatureOverride, bool summary,
                          const std::function<void(const std::string&)>& onDelta,
-                         std::string& full, AiError& err, std::atomic<bool>* cancel) {
+                         std::string& full, AiError& err, std::atomic<bool>* cancel,
+                         bool wantJson = true) {
     full.clear();
     std::string body = AiChatBody(c, system, hist, user, true, maxTokensOverride,
-                                  temperatureOverride, summary);
+                                  temperatureOverride, summary, wantJson);
+    // the shared tail: a non-stream body is one JSON answer, a stream gets its
+    // trailing partial line parsed
+    auto drain = [](const std::string& resp, const std::wstring& ct, AiSse& sse) {
+        if (ct.find(L"event-stream") == std::wstring::npos) {
+            // the endpoint ignored stream:true: the whole body is one JSON answer
+            sse.full.clear();
+            crxk::J j;
+            if (crxk::JParse(resp, j) && j.t == 'o') {
+                const crxk::J* ch = j.get("choices");
+                if (ch && ch->t == 'a' && !ch->a.empty()) {
+                    const crxk::J* msg = ch->a[0].get("message");
+                    if (msg && msg->t == 'o') {
+                        const crxk::J* ctn = msg->get("content");
+                        if (ctn && ctn->t == 's') sse.full = ctn->s;
+                    }
+                }
+            }
+            if (sse.onDelta && !sse.full.empty()) sse.onDelta(sse.full);
+        } else if (!sse.buf.empty() && sse.buf.rfind("data:", 0) == 0) {
+            std::string payload = sse.buf.substr(5);
+            while (!payload.empty() && (payload.front() == ' ' || payload.front() == '\r'))
+                payload.erase(0, 1);
+            sse.Frame(payload);
+        }
+    };
     AiSse sse;
     sse.onDelta = onDelta;
     std::wstring ct;
@@ -853,43 +922,51 @@ static bool AiChatStream(const AiCfg& c, const std::string& system,
     std::string resp;
     if (!AiSendChat(c, body, resp, status, err, cancel, 8 * 60 * 1000, summary, &sink, &ct))
         return false;
-    if (ct.find(L"event-stream") == std::wstring::npos) {
-        // the endpoint ignored stream:true: the whole body is one JSON answer
-        sse.full.clear();
-        crxk::J j;
-        if (crxk::JParse(resp, j) && j.t == 'o') {
-            const crxk::J* ch = j.get("choices");
-            if (ch && ch->t == 'a' && !ch->a.empty()) {
-                const crxk::J* msg = ch->a[0].get("message");
-                if (msg && msg->t == 'o') {
-                    const crxk::J* ctn = msg->get("content");
-                    if (ctn && ctn->t == 's') sse.full = ctn->s;
-                }
-            }
-        }
-        if (sse.onDelta && !sse.full.empty()) sse.onDelta(sse.full);
-    } else {
-        sse.Feed("", 0);   // nothing; the trailing partial line is parsed below
-        if (!sse.buf.empty() && sse.buf.rfind("data:", 0) == 0) {
-            std::string payload = sse.buf.substr(5);
-            while (!payload.empty() && (payload.front() == ' ' || payload.front() == '\r'))
-                payload.erase(0, 1);
-            sse.Frame(payload);
-        }
-    }
+    drain(resp, ct, sse);
     full = sse.full;
     if (sse.cutOff) { err.cat = AI_ERR_CUTOFF; return false; }
     if (full.empty()) {
+        // a stream that only thought (or only choked on the json grammar) gets
+        // ONE quiet retry without response_format, deltas riding the same sink
+        // - the first attempt streamed nothing, so the panel never sees a
+        // doubled word
+        std::string body2 = (wantJson && !summary) ? AiStripResponseFormat(body) : std::string();
+        if (!body2.empty()) {
+            AiSse sse2;
+            sse2.onDelta = onDelta;
+            std::function<void(const char*, DWORD)> sink2 = [&](const char* d, DWORD n) {
+                sse2.Feed(d, n);
+            };
+            std::string resp2; std::wstring ct2; int status2 = 0;
+            AiError err2;
+            if (AiSendChat(c, body2, resp2, status2, err2, cancel,
+                           8 * 60 * 1000, summary, &sink2, &ct2)) {
+                drain(resp2, ct2, sse2);
+                full = sse2.full;
+                if (sse2.cutOff) { err.cat = AI_ERR_CUTOFF; return false; }
+                if (!full.empty()) return true;
+                sse.reasoning += sse2.reasoning;
+                status = status2; ct = ct2; resp = resp2;
+            } else if (err2.cat != AI_OK && err2.cat != AI_ERR_BAD_RESPONSE) {
+                err = err2;                    // the retry's verdict is the better one
+                return false;
+            }
+        }
         // a 200 whose stream carried no readable text used to end here with
         // the error UNSET - the caller's Friendly() then fell to its bare
         // default and the user saw "Error communicating with AI service."
         // with nothing to act on. Speak: the status, the content type, the
-        // body's own head - every dialect the door might have used.
+        // body's own head - and, when the stream carried thinking, THAT.
         err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
-        err.detail = L"The reply streamed no readable text (HTTP " +
-                     std::to_wstring(status) +
-                     (ct.empty() ? std::wstring() : (L", content-type " + ct)) +
-                     L") - body head: " + AiBodyHead(resp);
+        if (!sse.reasoning.empty())
+            err.detail = L"The model streamed its thinking and no answer (HTTP " +
+                         std::to_wstring(status) +
+                         L"). Retry the question or lower the reasoning effort in AI settings.";
+        else
+            err.detail = L"The reply streamed no readable text (HTTP " +
+                         std::to_wstring(status) +
+                         (ct.empty() ? std::wstring() : (L", content-type " + ct)) +
+                         L") - body head: " + AiBodyHead(resp);
         return false;
     }
     return true;
@@ -899,9 +976,10 @@ static bool AiChatBuffered(const AiCfg& c, const std::string& system,
                            const std::vector<std::pair<std::string, std::string>>& hist,
                            const std::string& user, int maxTokensOverride,
                            double* temperatureOverride, bool summary,
-                           std::string& content, AiError& err, std::atomic<bool>* cancel) {
+                           std::string& content, AiError& err, std::atomic<bool>* cancel,
+                           bool wantJson = true) {
     std::string body = AiChatBody(c, system, hist, user, false, maxTokensOverride,
-                                  temperatureOverride, summary);
+                                  temperatureOverride, summary, wantJson);
     std::string resp; int status = 0;
     if (!AiSendChat(c, body, resp, status, err, cancel, 8 * 60 * 1000, summary))
         return false;
@@ -1130,6 +1208,82 @@ static bool AiTextBlank(const std::string& s) {
     }
     return true;
 }
+// ---- the embeddings reply's fast reader ----
+// A 256-wide nemotron batch answers ~6MB of JSON - half a million floats - and
+// a J tree node per number made every batch build a forest it walked once and
+// dropped. These scanners read the arrays straight off the buffer with strtod:
+// no tree, no per-number allocation. Anything unexpected (a foreign dialect, a
+// truncated tail) returns false and AiEmbedBatch falls back to the tree reader.
+static bool AiEmbScanArray(const std::string& r, size_t& i, std::vector<float>& out) {
+    while (i < r.size() && r[i] != '[') {
+        if (r[i] != ' ' && r[i] != '\t' && r[i] != '\r' && r[i] != '\n' && r[i] != ':') return false;
+        i++;
+    }
+    if (i >= r.size()) return false;
+    i++;                                                 // past '['
+    out.reserve(4096);
+    for (;;) {
+        while (i < r.size() && (r[i] == ' ' || r[i] == '\t' || r[i] == '\r' || r[i] == '\n' || r[i] == ',')) i++;
+        if (i >= r.size()) return false;
+        if (r[i] == ']') { i++; return !out.empty(); }
+        char* end = nullptr;
+        double v = strtod(r.c_str() + i, &end);
+        if (end == r.c_str() + i) return false;
+        i = (size_t)(end - r.c_str());
+        out.push_back((float)v);
+    }
+}
+static bool AiEmbScanData(const std::string& r, size_t expect,
+                          std::vector<std::vector<float>>& landed) {
+    landed.assign(expect, std::vector<float>());
+    size_t i = 0, found = 0;
+    for (;;) {
+        size_t e = r.find("\"embedding\"", i);
+        if (e == std::string::npos) break;
+        i = e + 11;
+        std::vector<float> v;
+        if (!AiEmbScanArray(r, i, v)) return false;
+        // the item's own seat: "index" before the embedding key inside the same
+        // object; the wire order speaks when the key is absent
+        size_t seat = found;
+        size_t b = r.rfind("\"index\"", e);
+        if (b != std::string::npos) {
+            size_t brace = r.find('{', b + 7);
+            if (brace == std::string::npos || brace > e) {
+                size_t k = b + 7;
+                while (k < r.size() && (r[k] == ' ' || r[k] == ':')) k++;
+                char* end = nullptr;
+                long idx = strtol(r.c_str() + k, &end, 10);
+                if (end && end > r.c_str() + k && idx >= 0 && idx < (long)expect)
+                    seat = (size_t)idx;
+            }
+        }
+        landed[seat] = std::move(v);
+        found++;
+    }
+    return found > 0;
+}
+static bool AiEmbScanFlat(const std::string& r, size_t expect,
+                          std::vector<std::vector<float>>& landed) {
+    size_t p = r.find("\"embeddings\"");
+    if (p == std::string::npos) return false;
+    p += 12;
+    while (p < r.size() && r[p] != '[') {
+        if (r[p] != ' ' && r[p] != ':') return false;
+        p++;
+    }
+    if (p >= r.size()) return false;
+    p++;                                                 // past the outer '['
+    landed.assign(expect, std::vector<float>());
+    for (size_t k = 0; k < expect; k++) {
+        std::vector<float> v;
+        if (!AiEmbScanArray(r, p, v)) return false;
+        landed[k] = std::move(v);
+        while (p < r.size() && (r[p] == ',' || r[p] == ' ' || r[p] == '\r' || r[p] == '\n')) p++;
+        if (p < r.size() && r[p] == ']') return true;
+    }
+    return false;
+}
 static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
                          bool query, std::vector<std::vector<float>>& out,
                          AiError& err, std::atomic<bool>* cancel) {
@@ -1183,41 +1337,54 @@ static bool AiEmbedBatch(const AiCfg& c, const std::vector<std::string>& inputs,
         AiClassifyHttp(status, resp, model, err);
         return false;
     }
-    crxk::J j;
-    if (!crxk::JParse(resp, j) || j.t != 'o') {
-        err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
-        err.detail = L"HTTP " + std::to_wstring(status) +
-                     L" came back with a body the reader could not parse: " + AiBodyHead(resp);
-        return false;
-    }
     // the vectors land in their own seats: the door names each one's place in
     // "index" and the wire order speaks when it doesn't - blanks that stayed
-    // home keep their empty vectors and the count always matches the ask
+    // home keep their empty vectors and the count always matches the ask.
+    // The fast scanner goes first: no J tree for half a million floats - and
+    // the batch no longer parses a 6MB reply twice (once to the tree, once to
+    // floats). The tree reader stays for every dialect the scanner misses.
     std::vector<std::vector<float>> landed(fly.size());
-    auto seatVec = [&](size_t seat, const crxk::J* e) -> bool {
-        if (!e || e->t != 'a' || e->a.empty()) return false;
-        std::vector<float> vec; vec.reserve(e->a.size());
-        for (auto& x : e->a) if (x.t == 'd') vec.push_back((float)x.d);
-        if (vec.empty()) return false;
-        landed[seat] = std::move(vec);
-        return true;
-    };
-    const crxk::J* data = j.get("data");
-    if (data && data->t == 'a') {
-        for (size_t k = 0; k < data->a.size() && k < fly.size(); k++) {
-            const crxk::J& d = data->a[k];
-            if (d.t != 'o') continue;
-            size_t seat = k;
-            const crxk::J* ixp = d.get("index");
-            if (ixp && ixp->t == 'd' && ixp->d >= 0 && ixp->d < (double)fly.size())
-                seat = (size_t)ixp->d;
-            seatVec(seat, d.get("embedding"));
+    {
+        std::vector<std::vector<float>> fast;
+        if (AiEmbScanData(resp, fly.size(), fast) || AiEmbScanFlat(resp, fly.size(), fast))
+            for (size_t k = 0; k < fly.size(); k++)
+                if (!fast[k].empty()) landed[k] = std::move(fast[k]);
+    }
+    bool anyVec = false;
+    for (auto& v : landed) if (!v.empty()) { anyVec = true; break; }
+    if (!anyVec) {
+        crxk::J j;
+        if (!crxk::JParse(resp, j) || j.t != 'o') {
+            err.cat = AI_ERR_BAD_RESPONSE; err.status = status;
+            err.detail = L"HTTP " + std::to_wstring(status) +
+                         L" came back with a body the reader could not parse: " + AiBodyHead(resp);
+            return false;
         }
-    } else {
-        const crxk::J* em = j.get("embeddings");         // the flat dialect
-        if (em && em->t == 'a')
-            for (size_t k = 0; k < em->a.size() && k < fly.size(); k++)
-                seatVec(k, &em->a[k]);
+        auto seatVec = [&](size_t seat, const crxk::J* e) -> bool {
+            if (!e || e->t != 'a' || e->a.empty()) return false;
+            std::vector<float> vec; vec.reserve(e->a.size());
+            for (auto& x : e->a) if (x.t == 'd') vec.push_back((float)x.d);
+            if (vec.empty()) return false;
+            landed[seat] = std::move(vec);
+            return true;
+        };
+        const crxk::J* data = j.get("data");
+        if (data && data->t == 'a') {
+            for (size_t k = 0; k < data->a.size() && k < fly.size(); k++) {
+                const crxk::J& d = data->a[k];
+                if (d.t != 'o') continue;
+                size_t seat = k;
+                const crxk::J* ixp = d.get("index");
+                if (ixp && ixp->t == 'd' && ixp->d >= 0 && ixp->d < (double)fly.size())
+                    seat = (size_t)ixp->d;
+                seatVec(seat, d.get("embedding"));
+            }
+        } else {
+            const crxk::J* em = j.get("embeddings");         // the flat dialect
+            if (em && em->t == 'a')
+                for (size_t k = 0; k < em->a.size() && k < fly.size(); k++)
+                    seatVec(k, &em->a[k]);
+        }
     }
     size_t got = 0;
     for (auto& v : landed) if (!v.empty()) got++;
