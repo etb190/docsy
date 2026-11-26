@@ -498,7 +498,14 @@ static bool AiHttpPostRaw(const std::wstring& url, const std::string& body,
                                      secure ? WINHTTP_FLAG_SECURE : 0);
     if (!r) { WinHttpCloseHandle(c); status = -1; return false; }
     int to = max(1000, recvTimeoutMs);
-    WinHttpSetTimeouts(r, 15000, 15000, 30000, to);
+    // the receive budget doubles as the FIRST-HEADER wait - on a door that
+    // takes the socket and queues forever (the sidechat's 1-of-7) that made
+    // the panel spin through the whole budget, three times over with the
+    // re-dials, before the first honest word. Headers get their own short
+    // leash; once they land the leash lengthens and the body's chunks keep
+    // the full quiet budget (a reasoning model may think for minutes between
+    // SSE frames - THAT wait deserved eight minutes, the header wait never).
+    WinHttpSetTimeouts(r, 15000, 15000, 30000, min(to, 75000));
     std::wstring key = AiBearerKeyFor(url, apiKey);
     std::wstring headers = L"Content-Type: application/json\r\nAuthorization: Bearer " + key + L"\r\n";
     bool ok = false;
@@ -517,6 +524,9 @@ static bool AiHttpPostRaw(const std::wstring& url, const std::string& body,
                                         ct, &sz, &ix) && sz)
                     *ctOut = std::wstring(ct, sz / sizeof(wchar_t) - 1);
             }
+            // headers landed - the body's chunk reads get the full budget
+            // from here on
+            WinHttpSetTimeouts(r, 15000, 15000, 30000, to);
             char buf[16384];
             for (;;) {
                 if (cancel && cancel->load()) break;
