@@ -117,17 +117,6 @@
         <span>History</span></div>
       <div class="obody" id="histBody"><div id="histEmpty">No conversations yet.</div></div>
     </div>
-
-    <div class="ovl" id="semOvl" style="max-width:340px;">
-      <div class="ohead"><span style="flex:1; font-weight:600;" id="semOvlTitle">Semantic search</span></div>
-      <div class="obody">
-        <div id="semOvlText" style="font-size:12.5px; color:var(--text); line-height:1.5;"></div>
-        <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
-          <button class="abtn" id="semNo">Cancel</button>
-          <button class="abtn primary" id="semYes">Confirm</button>
-        </div>
-      </div>
-    </div>
   </div>
 </div>
 <script>
@@ -137,6 +126,49 @@ var $=function(id){ return document.getElementById(id); };
 
 var S={ mode:"", streaming:false, msgs:[], displayN:{}, semReady:false, semActive:false,
         archive:false };
+
+/* ---------------- the sheet: the app's own grain ---------------- */
+/* The body must stay OPAQUE (the transparency attempt ghosted stale book
+   pixels through), but flat #1c1c1c read as a black hole beside the chrome.
+   This bakes the chrome's own tile in JS - a 1:1 port of GrainBrush's slot 1
+   (pdf_render.inl): splitmix64 seed 1337, a gaussian speckle around 128
+   (spread 150), a 10% four-neighbor soften, 1.35 contrast, the purple lean
+   on 40% of specks at 0.80 mix, all at alpha 70/255*0.24 over #1c1c1c. Same
+   seed, same order - the same pixels the frame's other panes lay down. */
+(function(){
+  var S2=256, st=1337n, M64=0xFFFFFFFFFFFFFFFFn;
+  function rnd(){ st=(st+0x9E3779B97F4A7C15n)&M64; var z=st;
+    z=((z^(z>>30n))*0xBF58476D1CE4E5B9n)&M64;
+    z=((z^(z>>27n))*0x94D049BB133111EBn)&M64;
+    return Number((z^(z>>31n))>>11n)/9007199254740992; }
+  var N=S2*S2, raw=new Float64Array(N), lean=new Uint8Array(N), SP=150.0, PI2=Math.PI*2;
+  for(var i=0;i<N;i++){ var u1=1-rnd(), u2=rnd();
+    var v=128+SP*Math.sqrt(-2*Math.log(u1))*Math.cos(PI2*u2);
+    raw[i]=v<0?0:(v>255?255:v); lean[i]=rnd()<0.40?1:0; }
+  var back=[28,28,28], leanC=[217,98,187];          // B,G,R - the C++ layout
+  var Alpha=70/255*0.24, Soften=0.10, Contrast=1.35, LeanMix=0.80;
+  var cv=document.createElement("canvas"); cv.width=S2; cv.height=S2;
+  var cx=cv.getContext("2d"), im=cx.createImageData(S2,S2), d=im.data;
+  for(var y=0;y<S2;y++) for(var x=0;x<S2;x++){
+    var idx=y*S2+x;
+    var around=(raw[((y+S2-1)%S2)*S2+x]+raw[((y+1)%S2)*S2+x]
+               +raw[y*S2+(x+S2-1)%S2]+raw[y*S2+(x+1)%S2])/4;
+    var soft=raw[idx]*(1-Soften)+around*Soften;
+    var shade=128+(soft-128)*Contrast; shade=shade<0?0:(shade>255?255:shade);
+    var speck=[shade,shade,shade];                   // B,G,R
+    if(lean[idx]){ var k=0.35+1.1*shade/255;
+      for(var c=0;c<3;c++){ var lv=leanC[c]*k; lv=lv<0?0:(lv>255?255:lv);
+        speck[c]=shade*(1-LeanMix)+lv*LeanMix; } }
+    var o=idx*4;
+    for(var c=0;c<3;c++){                            // canvas is RGBA: BGR rides reversed
+      var val=Math.round(back[c]*(1-Alpha)+speck[c]*Alpha);
+      d[o+(2-c)]=val;
+    }
+    d[o+3]=255;
+  }
+  cx.putImageData(im,0,0);
+  document.body.style.backgroundImage="url("+cv.toDataURL()+")";
+})();
 
 /* ---------------- markdown (AiMarkdown.cs's grammar) ---------------- */
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -233,6 +265,18 @@ var ROBOT='<svg width="14" height="14" viewBox="0 0 24 24" fill="#e0e0e0" fill-r
  '<ellipse cx="15.2" cy="12.3" rx="1.6" ry="1.6" fill="#1c1c1c"/><rect x="9.2" y="15.7" width="5.6" height="1.3" rx="0.65" fill="#1c1c1c"/></svg>';
 var PERSON='<svg width="14" height="14" viewBox="0 0 24 24" fill="#e0e0e0">'+
  '<circle cx="12" cy="8" r="4"/><path d="M4 20c0-4.4 3.6-7 8-7s8 2.6 8 7v1H4z"/></svg>';
+/* the retry: one quiet circle-arrow under the bubble - the host re-runs the
+   last user input through the mode's own door (no new user bubble, the
+   thinking box rides in like any send) */
+var RES_SVG='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.49 15a9 9 0 1 1-2.12-9.36L21 8"/><path d="M21 3v5h-5"/></svg>';
+function resRow(title){
+  var row=document.createElement("div"); row.className="resrow";
+  var rb=document.createElement("button"); rb.className="resend";
+  rb.title=title; rb.innerHTML=RES_SVG;
+  rb.onclick=function(){ if(S.streaming) return; post({type:"resend"}); };
+  row.appendChild(rb);
+  return row;
+}
 
 function addMsg(role, content, sources){
   // the transcript's own sources ride back into the chip map: a restored
@@ -253,6 +297,7 @@ function addMsg(role, content, sources){
   // the trailing footnote plate is gone (2026-11: the reader asked for the
   // inline rounded chips only) - the .cite chips in the text still carry the
   // click-to-page jump and the hover tooltip with page and quote
+  if(role!=="user") cell.appendChild(resRow("Ask this again"));
   wrap.appendChild(ava); wrap.appendChild(cell);
   $("msgs").appendChild(wrap);
   scrollBottom();
@@ -287,6 +332,9 @@ function setError(h,text){   // the error box: the single surface of a failure
   if(h.bubble){ h.bubble.remove(); h.bubble=null; }
   var e=document.createElement("div"); e.className="errbox"; e.textContent=text;
   h.cell.appendChild(e);
+  // the errored question is still the transcript's last user input - the
+  // arrow retries it through the host's resend door
+  h.cell.appendChild(resRow("Try again"));
 }
 function clearMsgs(){ $("msgs").innerHTML=""; S.displayN={}; S.sources={}; }
 function setEmpty(){ var any=S.msgs.length>0 || $("msgs").children.length>0;
@@ -304,7 +352,6 @@ function paintStatus(st){
   $("durText").textContent=st.duration||"";
   $("durModel").textContent=st.model||"";
   $("durLine").style.display=(st.duration||st.model)?"flex":"none";
-  S.semActive=!!st.semActive; S.semBuilt=!!st.semBuilt;
   $("bSem").className="ibtn"+(st.semActive?" on":(st.semReady?" ready":""));
 }
 function paintBusy(){
@@ -397,22 +444,10 @@ var H=null;
 /* ---------------- panel -> C++ ---------------- */
 $("bClose").onclick=function(){ post({type:"close"}); };
 $("bNew").onclick=function(){ if(S.streaming) return; post({type:"newchat"}); };
-/* the beaker asks before it destroys: an ongoing pass stops only on
-   confirmation, an already-built index rebuilds only on confirmation - the
-   one case that needs no question is the fresh build (the click IS the ask) */
-$("bSem").onclick=function(){
-  if(S.semActive){ $("semOvlTitle").textContent="Stop embedding?";
-    $("semOvlText").textContent="The embedding pass is still running. Stop it now? You can resume later from where it stopped.";
-    S.semAsk="stop"; $("semOvl").style.display="flex"; return; }
-  if(S.semBuilt){ $("semOvlTitle").textContent="Rebuild semantic search?";
-    $("semOvlText").textContent="This PDF is already embedded. Rebuilding discards the saved index and embeds every page again.";
-    S.semAsk="rebuild"; $("semOvl").style.display="flex"; return; }
-  post({type:"semantic"});
-};
-$("semYes").onclick=function(){ var a=S.semAsk||"";
-  $("semOvl").style.display="none";
-  if(a==="rebuild") post({type:"semantic", rebuild:true}); else post({type:"semantic"}); };
-$("semNo").onclick=function(){ $("semOvl").style.display="none"; };
+/* the beaker asks through the APP's own dialog now: the host opens
+   AskPrompt3 - grain body, green accent, centered on the frame - so the page
+   just posts and the question happens where the window is */
+$("bSem").onclick=function(){ post({type:"semantic"}); };
 $("bSet").onclick=function(){ post({type:"settings-get"}); $("setOvl").style.display="flex"; };
 $("bSetClose").onclick=function(){ $("setOvl").style.display="none"; };
 $("bSave").onclick=function(){ post({type:"settings-save", settings:readSettings()});

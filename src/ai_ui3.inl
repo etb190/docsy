@@ -152,8 +152,12 @@ static void AiPanelMessage(const wchar_t* json) {
             if (g_edWeb) g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"aitext\"}");
             else g_edAiTextPending = false;
         } else if (st->mode == 1) {
-            // the live page: one fresh extraction per question
+            // the live page: one fresh extraction per question - the pending
+            // flag MUST ride here: the extraction's answer routes on it, and
+            // an unarmed flag ate the question whole (the web sidechat's
+            // "send and nothing happens" report)
             g_webAiPendingInput = input;
+            g_webAiTextPending = true;
             AiWebExtract(++g_sumGen);
         } else {
             AiStartReplyThread(g_aiCurKey, input);
@@ -163,12 +167,52 @@ static void AiPanelMessage(const wchar_t* json) {
         auto it = g_aiCtx.find(g_aiCurKey);
         if (it != g_aiCtx.end()) it->second.cancel = true;
     } else if (t == "semantic") {
-        // rebuild:true only arrives through the page's confirm dialog - the
-        // wipe of a finished deck is never an accident
-        bool rb = false;
-        const crxk::J* rbv = m.get("rebuild");
-        if (rbv && rbv->t == 'b') rb = rbv->b;
-        AiSemanticToggle(rb);
+        AiSemanticToggle();
+    } else if (t == "resend") {
+        // the bubble's circle-arrow: answer the same question again. The last
+        // user input of THIS conversation re-runs through the mode's own door
+        // - no new user bubble (the question is already on the transcript),
+        // the thinking box rides in like any send.
+        std::string input;
+        bool inflight = true, mode1 = false, mode2 = false;
+        {
+            std::lock_guard<std::mutex> lk(g_aiMtx);
+            auto it = g_aiCtx.find(g_aiCurKey);
+            if (it != g_aiCtx.end()) {
+                AiCtxState* st = &it->second;
+                inflight = st->inflight;
+                mode1 = st->mode == 1;
+                mode2 = st->mode == 2;
+                for (auto ri = st->msgs.rbegin(); ri != st->msgs.rend(); ++ri)
+                    if (ri->role == 0) { input = ri->content; break; }
+            }
+        }
+        if (input.empty()) {
+            AiPanelSend("{\"cmd\":\"error\",\"text\":\"Nothing to ask again yet - say something first.\"}");
+            return;
+        }
+        if (inflight) {
+            AiPanelSend("{\"cmd\":\"error\",\"text\":\"One answer is already on its way - let it finish or press the stop button.\"}");
+            return;
+        }
+        AiPanelSend("{\"cmd\":\"loading\",\"text\":\"Thinking…\"}");
+        {
+            std::lock_guard<std::mutex> lk(g_aiMtx);
+            auto it = g_aiCtx.find(g_aiCurKey);
+            if (it != g_aiCtx.end()) it->second.loadingBubble = true;
+        }
+        if (mode2) {
+            g_edAiPendingInput = input;
+            g_edAiTextPending = true;
+            if (g_edWeb) g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"aitext\"}");
+            else g_edAiTextPending = false;
+        } else if (mode1) {
+            g_webAiPendingInput = input;
+            g_webAiTextPending = true;
+            AiWebExtract(++g_sumGen);
+        } else {
+            AiStartReplyThread(g_aiCurKey, input);
+        }
     } else if (t == "settings-get") {
         AiPanelSend("{\"cmd\":\"settings\",\"settings\":" + AiSettingsJson() + "}");
     } else if (t == "settings-save") {

@@ -1064,14 +1064,22 @@ static void AiSemanticStart() {
         }
     }).detach();
 }
-static void AiSemanticToggle(bool rebuild) {
+static void AiSemanticToggle() {
     // every press speaks: the old toggle was silent in all four states - a
     // press during the build, a press while the pass flew, a press with the
     // index not ready, a press with nothing open - and the beaker button read
-    // dead no matter which one held it
+    // dead no matter which one held it. The destructive asks ride the app's
+    // OWN dialog (AskPrompt3): the grain body, the green accent, smack middle
+    // of the frame - not a sheet inside the panel. The toggle only ever runs
+    // on the UI thread's command path, so the modal pump is safe here.
     if (g_aiSemActive) {
-        // the first press stops; the second press pre-books the rebuild. The
-        // old toggle re-posted "stopped" on EVERY press while the drain
+        int r = AskPrompt3(L" - Semantic search",
+                           L"The embedding pass is still running. Stop it now? "
+                           L"You can resume later from where it stopped.",
+                           L"Keep going", L"", L"Stop");
+        if (r != 2) return;   // keep going, Esc, the X, a click away: it rides
+        // the confirmed stop; a press during the drain pre-books the rebuild.
+        // The old toggle re-posted "stopped" on EVERY press while the drain
         // settled - with a stalled door that drain held the seat for minutes,
         // so no press ever rebuilt anything and the line never changed.
         if (!g_aiSemCancel.exchange(true)) {
@@ -1109,10 +1117,22 @@ static void AiSemanticToggle(bool rebuild) {
         AiPost(ev);
         return;
     }
-    if (rebuild) {
-        // the reader confirmed the wipe: the vectors die in memory and the
-        // pass starts from zero (the disk copy dies with the completion save -
-        // a crash mid-rebuild leaves the old cache on disk, the honest middle)
+    // already built? the rebuild is destructive - the saved vectors die, the
+    // door flies every page again - so it only happens over a confirmation
+    bool built = false;
+    {
+        std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+        built = g_aiIndex.semComplete && !g_aiIndex.vectors.empty();
+    }
+    if (built) {
+        int r = AskPrompt3(L" - Semantic search",
+                           L"This document is already embedded. Rebuilding discards "
+                           L"the saved index and embeds every page again.",
+                           L"Cancel", L"", L"Rebuild");
+        if (r != 2) return;   // cancel, Esc, the X, a click away: nothing dies
+        // the confirmed wipe: the vectors die in memory and the pass starts
+        // from zero (the disk copy dies with the completion save - a crash
+        // mid-rebuild leaves the old cache on disk, the honest middle)
         {
             std::lock_guard<std::mutex> lk(g_aiIdxMtx);
             g_aiIndex.vectors.assign(g_aiIndex.chunks.size(), {});

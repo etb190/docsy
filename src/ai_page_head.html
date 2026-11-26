@@ -109,6 +109,16 @@ body{
 /* the trailing footnote plate (.foot/.frow) is gone - 2026-11: the reader
    asked for the inline rounded chips only; the .cite chips keep the jump */
 
+/* ---- the retry: one quiet circle-arrow under each answer (and beside an
+     error) - muted at rest, the green at hover, never louder than the bubble */
+.resrow{display:flex; margin:3px 0 2px 2px;}
+.resend{display:inline-flex; align-items:center; justify-content:center;
+  width:22px; height:22px; padding:0; border-radius:11px;
+  background:rgba(136,136,136,.10); border:1px solid var(--line);
+  color:var(--muted); cursor:pointer;}
+.resend:hover{color:var(--primary); border-color:var(--primary);
+  background:rgba(30,165,76,.12);}
+
 /* ---- empty state: the invitation shows the moment the panel opens - the
      first user message sweeps it away (setEmpty) ---- */
 #empty{position:absolute; inset:0; display:flex; flex-direction:column;

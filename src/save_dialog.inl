@@ -45,12 +45,14 @@ static int AskH() {
 }
 
 // Button i's rect: the row walks in from the right edge, 8px between buttons.
+// An empty label rides no button at all (bw 0) - two-button asks leave no gap.
 static RECT AskBtnRect(int i, int w, int h) {
     int bh = (int)(28 * g.dpi), gap = (int)(8 * g.dpi);
     int x = w - (int)(24 * g.dpi), bottom = h - (int)(20 * g.dpi);
     for (int k = 2; k >= 0; k--) {
-        if (k == i) return { x - g_ask.bw[k], bottom - bh, x, bottom };
-        x -= g_ask.bw[k] + gap;
+        if (k == i) return g_ask.btn[k].empty() ? RECT{ 0, 0, 0, 0 }
+                                                : RECT{ x - g_ask.bw[k], bottom - bh, x, bottom };
+        if (!g_ask.btn[k].empty()) x -= g_ask.bw[k] + gap;
     }
     return { 0, 0, 0, 0 };
 }
@@ -65,6 +67,7 @@ static void AskMeasure() {
     g_ask.msgH = mr.bottom - mr.top;
     SelectObject(dc, AskBtnFont());
     for (int k = 0; k < 3; k++) {
+        if (g_ask.btn[k].empty()) { g_ask.bw[k] = 0; continue; }
         SIZE ts{};
         GetTextExtentPoint32W(dc, g_ask.btn[k].c_str(), (int)g_ask.btn[k].size(), &ts);
         g_ask.bw[k] = max((int)(80 * g.dpi), (int)ts.cx + (int)(24 * g.dpi));
@@ -144,6 +147,7 @@ static void AskDialogDraw(HDC dc, int w, int h) {
         return pth;
     };
     for (int k = 0; k < 3; k++) {
+        if (g_ask.btn[k].empty()) continue;   // two-button asks ride no ghost box
         RECT br = AskBtnRect(k, w, h);
         bool accent = k == g_ask.def, hot = g_ask.hot == k;
         Gdiplus::GraphicsPath* pth = boxPath(br);
