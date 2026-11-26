@@ -1113,6 +1113,10 @@ static void WebBarClick(int id);
 static void WebStripPaint(HDC dc, int w, int h);   // the nav row, on top
 static int  WebNavHit(POINT p);           // the nav row's buttons, strip coords
 static void WebSideLayout();              // the sidebar's web-tab thumbs
+static RECT WebSideCardRect(int i, int h);   // one card's band in rail coords (the
+                                             // per-card repaints; defined in browser.inl)
+static std::string WxU(const std::wstring& w);   // extensions.inl's overload - tabs.inl
+                                             // saves the session doc before that include
 
 // ---- the session (settings.json's app.* keys; defined in ai_core.inl) ----
 static std::string AiGetSetting(const std::string& key, const std::string& defVal);
