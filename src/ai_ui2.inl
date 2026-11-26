@@ -676,6 +676,9 @@ static void AiSemanticStart() {
                              pix->semComplete &&
                              !pix->vectors.empty() &&
                              pix->vectors.size() == pix->chunks.size());
+            bool saved = true;   // the completion save's verdict, reported on
+                                 // the ready line (a silent disk failure here
+                                 // is a re-embed nobody ordered)
             if (!upToDate) {
                 size_t total = pix->chunks.size();
                 // the warm-up call: one short text at a 10-second cap, twice at
@@ -1027,7 +1030,7 @@ static void AiSemanticStart() {
                 pix->prefixKey = WxU(prefixKey);
                 pix->dim = dimA.load();
                 pix->semComplete = true;
-                bool saved = AiIndexSave(*pix);
+                saved = AiIndexSave(*pix);
             }
             // the vectors ride home: the pass used to end here with its work in a
             // local copy - the file was saved, the memory dropped, and the live
