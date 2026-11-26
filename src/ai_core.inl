@@ -746,8 +746,8 @@ static void AiClassifyTransport(DWORD err, const std::wstring& baseUrl, AiError&
             (pc.fAutoDetect || pc.lpszProxy || pc.lpszAutoConfigUrl)) {
             e.detail += L" (a system proxy is configured and may be the one hanging)";
             if (pc.lpszProxy) GlobalFree(pc.lpszProxy);
+            if (pc.lpszProxyBypass) GlobalFree(pc.lpszProxyBypass);
             if (pc.lpszAutoConfigUrl) GlobalFree(pc.lpszAutoConfigUrl);
-            if (pc.lpszPacUrl) GlobalFree(pc.lpszPacUrl);
         }
     }
 }
