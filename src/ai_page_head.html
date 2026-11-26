@@ -110,8 +110,11 @@ body{
    asked for the inline rounded chips only; the .cite chips keep the jump */
 
 /* ---- the retry: one quiet circle-arrow under each answer (and beside an
-     error) - muted at rest, the green at hover, never louder than the bubble */
-.resrow{display:flex; margin:3px 0 2px 2px;}
+     error) - muted at rest, the green at hover, never louder than the bubble.
+     The generation time rides the same line (.durl), vertically centered
+     against the arrow, both left-aligned under the bubble */
+.resrow{display:flex; align-items:center; gap:6px; margin:3px 0 2px 2px;}
+.durl{font-size:10.5px; color:var(--muted); user-select:none;}
 .resend{display:inline-flex; align-items:center; justify-content:center;
   width:22px; height:22px; padding:0; border-radius:11px;
   background:rgba(136,136,136,.10); border:1px solid var(--line);
@@ -162,6 +165,24 @@ body{
 #cloudNote{display:none; margin-top:8px; font-size:11px; color:var(--danger);
   border:1px solid var(--danger); border-radius:3px; padding:6px 8px;}
 #testOut{font-size:11px; color:var(--muted); margin-top:6px; white-space:pre-wrap;}
+
+/* ---- the prompt editor: one collapsible row per deck prompt ---- */
+.prow{border:1px solid var(--line); border-radius:3px; background:var(--pane);}
+.prow>summary{display:flex; align-items:center; gap:6px; padding:5px 7px;
+  font-size:11px; color:var(--text); outline:none; cursor:pointer; list-style:none;}
+.prow>summary::-webkit-details-marker{display:none;}
+.pid{font-weight:600; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis;}
+.pcat{font-size:10px; color:var(--muted); flex:1 1 auto; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap;}
+.pmod{color:var(--primary); font-size:9px; flex:0 0 auto;}
+.preset{background:none; border:none; color:var(--muted); cursor:pointer;
+  font-size:12px; padding:0 2px; flex:0 0 auto;}
+.preset:hover{color:var(--primary);}
+.pbody{width:100%; box-sizing:border-box; background:var(--bg, #1c1c1c);
+  border:none; border-top:1px solid var(--line); border-radius:0 0 3px 3px;
+  color:var(--text); font-size:10.5px; line-height:14px; padding:6px 7px;
+  outline:none; resize:vertical; font-family:inherit; user-select:text;
+  min-height:70px;}
 
 /* ---- history rows ---- */
 .hsec{font-size:11px; color:var(--dim); margin:10px 0 4px; font-weight:600;

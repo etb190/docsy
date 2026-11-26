@@ -1486,7 +1486,10 @@ static void WebToggle(bool on) {
     if (on && g_sync) return;                      // the CI shots never browse
     if (on && g_editOn) EditorToggle(false);
     g_webOn = on;
-    AiModeChanged();                               // the panel rebinds: browser <-> reader
+    // (the panel rebind fires BELOW, after the web side actually exists: the
+    // old call ran before the first tab was created, AiBindContext found no
+    // g_wt[g_wtCur] and bailed - the flip to the browser left the PDF's
+    // sidechat on screen and the reader had to close the panel by hand)
     if (g.side)                                    // the rail is the browser's own, closed until asked
         ShowWindow(g.side, on ? (g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE) : (g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE));
     if (on) {
@@ -1510,6 +1513,9 @@ static void WebToggle(bool on) {
         BmPopDestroy();                            // the star's bubble has no business over the reader
         g_bmHot = g_bmPress = -1;
     }
+    AiModeChanged();                               // the panel rebinds: browser <-> reader -
+                                                   // after the tab setup above, so the first
+                                                   // flip into web (no tabs yet) finds a tab
     LayoutMain();                                  // the strip band appears or collapses
     WebBarLayout();
     WebRepaintChrome();

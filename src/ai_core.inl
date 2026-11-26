@@ -357,21 +357,8 @@ struct AiPromptDef { std::string id, category, body; };
 static std::vector<AiPromptDef> g_prompts;
 static bool g_promptsLoaded = false;
 
-static void AiLoadPrompts() {
-    if (g_promptsLoaded) return;
-    g_promptsLoaded = true;
-    auto parse = [](const std::string& s) {
-        crxk::J j;
-        if (crxk::JParse(s, j) && j.t == 'a')
-            for (auto& r : j.a) {
-                if (r.t != 'o') continue;
-                const crxk::J* id = r.get("Id"), * cat = r.get("Category"), * body = r.get("Body");
-                if (!id || id->t != 's' || !cat || cat->t != 's' || !body || body->t != 's') continue;
-                AiPromptDef p;
-                p.id = id->s; p.category = cat->s; p.body = body->s;
-                g_prompts.push_back(std::move(p));
-            }
-    };
+// the embedded deck (resource 403) parsed into g_prompts
+static void AiParseDeckResource() {
     std::string deckData;
     HRSRC hs = FindResourceW(g.hinst, MAKEINTRESOURCEW(403), (LPCWSTR)RT_RCDATA);
     if (hs) {
@@ -382,7 +369,27 @@ static void AiLoadPrompts() {
             if (d && n) deckData.assign(d, d + n);
         }
     }
-    // the reader's overrides ride first: the store is the one source of truth
+    if (deckData.empty()) return;
+    crxk::J j;
+    if (!crxk::JParse(deckData, j) || j.t != 'a') return;
+    for (auto& r : j.a) {
+        if (r.t != 'o') continue;
+        const crxk::J* id = r.get("Id"), * cat = r.get("Category"), * body = r.get("Body");
+        if (!id || id->t != 's' || !cat || cat->t != 's' || !body || body->t != 's') continue;
+        g_prompts.push_back({ id->s, cat->s, body->s });
+    }
+}
+
+static void AiLoadPrompts() {
+    if (g_promptsLoaded) return;
+    g_promptsLoaded = true;
+    // the built-in deck loads FIRST, always: the store overrides rows by id
+    // on top of it. The old early-return worked only because the first-run
+    // seed wrote every row - the prompt editor trims the store to the rows
+    // that actually drifted, and a trimmed store must never starve the deck.
+    AiParseDeckResource();
+    // the reader's overrides ride last: the store is the one source of truth
+    // for the rows it carries
     std::string user;
     if (WxReadFile(AiRootDir() + L"\\prompts.json", user)) {
         crxk::J u;
@@ -398,9 +405,8 @@ static void AiLoadPrompts() {
             }
         return;
     }
-    if (!deckData.empty()) parse(deckData);
     // first run: extract the deck so the reader can edit it (PromptStore's seed)
-    if (!g_prompts.empty() && !WxFileExists((AiRootDir() + L"\\prompts.json").c_str())) {
+    if (!g_prompts.empty()) {
         std::string out = "[";
         for (size_t i = 0; i < g_prompts.size(); i++) {
             auto& p = g_prompts[i];
@@ -421,6 +427,88 @@ static std::string PromptFirstBody(const char* category) {   // FirstBody(catego
     AiLoadPrompts();
     for (auto& p : g_prompts) if (p.category == category && !p.body.empty()) return p.body;
     return "";
+}
+// ---- the settings panel's prompt editor (the deck, read and written) ----
+// The store (%LocalAppData%\docsy\AI\prompts.json) overrides rows by Id on
+// top of the embedded deck; the editor round-trips the EFFECTIVE text and
+// writes back only rows whose body drifted from the deck default - saving an
+// untouched row IS the revert. AiPromptsDefaults reads the deck fresh every
+// call (the store may exist by now; g_prompts no longer carries defaults).
+static void AiPromptsDefaults(std::map<std::string, std::string>& def) {
+    std::vector<AiPromptDef> deck;
+    g_prompts.swap(deck);                    // AiParseDeckResource pushes into g_prompts
+    AiParseDeckResource();
+    for (auto& p : g_prompts) def[p.id] = p.body;
+    g_prompts.swap(deck);                    // the live deck (store merged) rides back
+}
+static std::string AiPromptsGetJson() {
+    AiLoadPrompts();
+    std::map<std::string, std::string> def;
+    AiPromptsDefaults(def);
+    std::string j = "[";
+    for (size_t i = 0; i < g_prompts.size(); i++) {
+        auto& p = g_prompts[i];
+        if (i) j += ",";
+        auto d = def.find(p.id);
+        const std::string& dbody = d != def.end() ? d->second : p.body;
+        j += std::string("{\"id\":") + WxJsonStr(WxU(p.id)) +
+             ",\"category\":" + WxJsonStr(WxU(p.category)) +
+             ",\"body\":" + WxJsonStr(WxU(p.body)) +
+             ",\"def\":" + WxJsonStr(WxU(dbody)) +
+             ",\"custom\":" + (dbody != p.body ? "true" : "false") + "}";
+    }
+    j += "]";
+    return j;
+}
+static void AiPromptsApply(const crxk::J* arr) {
+    if (!arr || arr->t != 'a') return;
+    std::map<std::string, std::string> def;
+    AiPromptsDefaults(def);
+    // rows the store carries that the editor didn't send ride across untouched
+    std::map<std::string, AiPromptDef> keep;
+    std::string old;
+    if (WxReadFile(AiRootDir() + L"\\prompts.json", old)) {
+        crxk::J u;
+        if (crxk::JParse(old, u) && u.t == 'a')
+            for (auto& r : u.a) {
+                if (r.t != 'o') continue;
+                const crxk::J* id = r.get("Id"), * cat = r.get("Category"), * body = r.get("Body");
+                if (!id || id->t != 's' || !cat || cat->t != 's' || !body || body->t != 's') continue;
+                keep[id->s] = { id->s, cat->s, body->s };
+            }
+    }
+    for (auto& r : arr->a) {
+        if (r.t != 'o') continue;
+        const crxk::J* id = r.get("id"), * body = r.get("body"), * cat = r.get("category");
+        if (!id || id->t != 's' || !body || body->t != 's') continue;
+        auto d = def.find(id->s);
+        if (d != def.end() && d->second == body->s) {
+            keep.erase(id->s);               // saved with its default text = revert
+            continue;
+        }
+        AiPromptDef p;
+        p.id = id->s; p.body = body->s;
+        p.category = cat && cat->t == 's' ? cat->s : (d != def.end() ? "" : "custom");
+        // the category rides the row it overrides, else the deck's, else "custom"
+        if (p.category.empty()) {
+            for (auto& q : g_prompts) if (q.id == p.id) { p.category = q.category; break; }
+        }
+        if (p.category.empty()) p.category = "custom";
+        keep[p.id] = std::move(p);
+    }
+    std::string out = "[";
+    bool first = true;
+    for (auto& kv : keep) {
+        if (!first) out += ",\n";
+        first = false;
+        out += "{\"Id\":" + WxJsonStr(WxU(kv.second.id)) +
+               ",\"Title\":\"\",\"TitleKey\":\"\",\"Category\":" + WxJsonStr(WxU(kv.second.category)) +
+               ",\"Body\":" + WxJsonStr(WxU(kv.second.body)) + "}";
+    }
+    out += "]";
+    WxWriteFile(AiRootDir() + L"\\prompts.json", (const unsigned char*)out.data(), out.size());
+    g_promptsLoaded = false;                 // the next PromptFirstBody re-merges
+    AiLoadPrompts();
 }
 
 // ---- the provider's error world (AiProviderException + MapError) ----

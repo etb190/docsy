@@ -44,9 +44,9 @@
     </div>
     <div id="idxStrip" class="strip"></div>
     <div id="semStrip" class="strip"></div>
-    <div id="durLine" class="strip"><span id="durText"></span><span id="durModel"></span></div>
+    <div id="durLine" class="strip"><span id="durModel"></span></div>
     <div id="composer">
-      <textarea id="input" rows="1" placeholder="Ask about this PDF... (Enter to send, Ctrl+Enter for a new line)"></textarea>
+      <textarea id="input" rows="1" placeholder="Ask about this PDF..."></textarea>
       <button class="sbtn" id="bStop" title="Stop the current reply">&#xE71A;</button>
       <button class="sbtn" id="bSend" title="Send (Enter)">&#xE724;</button>
     </div>
@@ -100,6 +100,18 @@
             <input type="hidden" id="sTopK" value="24">
             <input type="hidden" id="sBudget" value="40000">
             <input type="hidden" id="sHist" value="6">
+          </div>
+        </details>
+
+        <details id="promptsSec" style="margin-top:14px; font-size:11.5px; color:var(--muted); cursor:pointer;">
+          <summary style="font-weight:600; color:var(--text); padding:4px 0; outline:none;">AI Prompts
+            <span id="promptDirty" style="display:none; color:var(--primary);">&#9679;</span></summary>
+          <div style="padding-top:8px;">
+            <div id="promptList" style="display:flex; flex-direction:column; gap:6px;"></div>
+            <div id="promptNote" style="font-size:10.5px; color:var(--muted); margin-top:8px; line-height:15px;"></div>
+            <div style="display:flex; gap:8px; margin-top:8px;">
+              <button class="abtn primary" id="bPromptSave" style="min-width:90px;">Save Prompts</button>
+            </div>
           </div>
         </details>
 
@@ -269,16 +281,25 @@ var PERSON='<svg width="14" height="14" viewBox="0 0 24 24" fill="#e0e0e0">'+
    last user input through the mode's own door (no new user bubble, the
    thinking box rides in like any send) */
 var RES_SVG='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.49 15a9 9 0 1 1-2.12-9.36L21 8"/><path d="M21 3v5h-5"/></svg>';
-function resRow(title){
+function fmtDur(ms){        // the answer footer's "took Xs" - AiFormatDuration's style
+  if(!ms||ms<=0) return "";
+  var s=Math.round(ms/1000);
+  if(s<1) return "0s";
+  if(s<60) return s+"s";
+  return (s%60===0)?(s/60)+"m":Math.floor(s/60)+"m "+(s%60)+"s";
+}
+function resRow(title, dur){
   var row=document.createElement("div"); row.className="resrow";
   var rb=document.createElement("button"); rb.className="resend";
   rb.title=title; rb.innerHTML=RES_SVG;
   rb.onclick=function(){ if(S.streaming) return; post({type:"resend"}); };
   row.appendChild(rb);
+  if(dur){ var dl=document.createElement("span"); dl.className="durl";
+    dl.textContent=fmtDur(dur); row.appendChild(dl); }
   return row;
 }
 
-function addMsg(role, content, sources){
+function addMsg(role, content, sources, durMs){
   // the transcript's own sources ride back into the chip map: a restored
   // conversation's inline citations were dead chips - the msgs frame never
   // refilled S.sources, and the click gate swallowed every one of them
@@ -297,7 +318,9 @@ function addMsg(role, content, sources){
   // the trailing footnote plate is gone (2026-11: the reader asked for the
   // inline rounded chips only) - the .cite chips in the text still carry the
   // click-to-page jump and the hover tooltip with page and quote
-  if(role!=="user") cell.appendChild(resRow("Ask this again"));
+  // the footer rides every answer: the redo arrow with the generation time
+  // beside it, both on one vertically-centered line under the bubble
+  if(role!=="user") cell.appendChild(resRow("Ask this again", durMs||0));
   wrap.appendChild(ava); wrap.appendChild(cell);
   $("msgs").appendChild(wrap);
   scrollBottom();
@@ -349,9 +372,10 @@ function paintStatus(st){
     $("idxStrip").textContent=ix.status+"  "+Math.round(ix.progress*100)+"%"; }
   $("semStrip").style.display=st.semantic?"block":"none";
   $("semStrip").textContent=st.semantic||"";
-  $("durText").textContent=st.duration||"";
+  // the generation time moved under each answer (the .durl footer); the top
+  // strip keeps only the model line
   $("durModel").textContent=st.model||"";
-  $("durLine").style.display=(st.duration||st.model)?"flex":"none";
+  $("durLine").style.display=st.model?"flex":"none";
   $("bSem").className="ibtn"+(st.semActive?" on":(st.semReady?" ready":""));
 }
 function paintBusy(){
@@ -388,7 +412,7 @@ __wv.addEventListener("message", function(e){
     $("ctxTitle").textContent=m.title||""; break;
   case "msgs":
     clearMsgs(); S.msgs=m.msgs||[];
-    for(var mm of S.msgs) addMsg(mm.role, mm.content, mm.sources);
+    for(var mm of S.msgs) addMsg(mm.role, mm.content, mm.sources, mm.durMs);
     setEmpty(); break;
   case "user": S.msgs.push({role:"user", content:m.text}); addMsg("user", m.text); setEmpty(); break;
   case "loading":
@@ -407,11 +431,10 @@ __wv.addEventListener("message", function(e){
       for(var s of src) if(!S.sources[s.id]) S.sources[s.id]=s;
       if(H.think){ H.think.remove(); H.think=null; }
       if(H.bubble) H.bubble.remove();
-      var el=addMsg("bot", m.text||"", src);
+      var el=addMsg("bot", m.text||"", src, m.durMs);
       H.wrap.remove(); H=el;
     }
-    S.msgs.push({role:"assistant", content:m.text||"", sources:m.sources||[]});
-    if(m.duration!==undefined) $("durText").textContent=m.duration;
+    S.msgs.push({role:"assistant", content:m.text||"", sources:m.sources||[], durMs:m.durMs||0});
     if(m.model) $("durModel").textContent=m.model;
     S.streaming=false; paintBusy(); setEmpty();
     break;
@@ -432,7 +455,7 @@ __wv.addEventListener("message", function(e){
     if(H){ H.wrap.remove(); H=null; }
     S.streaming=false; paintBusy(); setEmpty(); break;
   case "cleared":
-    clearMsgs(); S.msgs=[]; $("durText").textContent=""; $("durModel").textContent="";
+    clearMsgs(); S.msgs=[]; $("durModel").textContent="";
     $("archive").style.display="none"; S.archive=false; setEmpty(); break;
   case "status": paintStatus(m); break;
   case "archive":
@@ -441,6 +464,10 @@ __wv.addEventListener("message", function(e){
     $("bReopen").style.display=m.reopen?"flex":"none"; break;
   case "history": showHistory(m); break;
   case "settings": fillSettings(m.settings||{}); break;
+  case "prompts": renderPrompts(m); break;
+  case "prompts-saved":
+    $("promptNote").textContent="Saved - the new prompts ride the very next question.";
+    post({type:"prompts-get"}); break;
   case "test": $("testOut").textContent=m.text||""; break;
   }
 });
@@ -488,6 +515,64 @@ if(dialEl){
 }
 $("bTest").onclick=function(){ $("testOut").textContent="Testing connection…"; $("testOut").style.color="var(--muted)";
   post({type:"settings-test", settings:readSettings()}); };
+
+/* ---------------- the prompt editor (the whole deck, editable) ----------------
+   Every row the app ships - sidechats, summaries, notes, rewrites, the lot -
+   rides here with its effective text (a stored override where one exists)
+   beside the built-in default. Saving writes only the drifted rows into the
+   store (%LocalAppData%\docsy\AI\prompts.json), so saving an untouched row IS
+   the revert, and the host re-merges the deck the moment the save lands. */
+var PROMPTS=[];
+var promptsLoaded=false;
+$("promptsSec").addEventListener("toggle", function(){
+  if(this.open&&!promptsLoaded){ promptsLoaded=true; post({type:"prompts-get"}); }
+});
+function renderPrompts(m){
+  PROMPTS=m.prompts||[];
+  var box=$("promptList"); box.innerHTML="";
+  for(var i=0;i<PROMPTS.length;i++){
+    var p=PROMPTS[i];
+    var row=document.createElement("details"); row.className="prow";
+    var sum=document.createElement("summary");
+    sum.innerHTML='<span class="pid">'+esc(p.id)+'</span>'+
+      '<span class="pcat">'+esc(p.category||"")+'</span>'+
+      (p.custom?'<span class="pmod" title="edited - differs from the built-in">&#9679;</span>':"")+
+      (p.custom?'<button class="preset" data-ix="'+i+'" title="Revert this prompt to the built-in text">&#8634;</button>':"");
+    var ta=document.createElement("textarea"); ta.className="pbody";
+    ta.value=p.body; ta.rows=4; ta.dataset.ix=i;
+    ta.addEventListener("input", markPromptDirty);
+    row.appendChild(sum); row.appendChild(ta);
+    box.appendChild(row);
+  }
+  $("promptNote").textContent="Saving writes only edited rows to the store; a row saved with the built-in text reverts. Store: "+(m.path||"");
+  markPromptDirty();
+}
+function markPromptDirty(){
+  var dirty=false;
+  var tas=$("promptList").querySelectorAll("textarea.pbody");
+  for(var i=0;i<tas.length;i++){
+    var p=PROMPTS[parseInt(tas[i].dataset.ix,10)];
+    if(p&&tas[i].value!==p.body){ dirty=true; break; }
+  }
+  $("promptDirty").style.display=dirty?"inline":"none";
+}
+$("promptList").addEventListener("click", function(e){
+  var rb=e.target.closest(".preset"); if(!rb) return;
+  var p=PROMPTS[parseInt(rb.dataset.ix,10)]; if(!p) return;
+  var ta=$("promptList").querySelector('textarea[data-ix="'+rb.dataset.ix+'"]');
+  if(ta){ ta.value=p.def; markPromptDirty(); }
+});
+$("bPromptSave").onclick=function(){
+  var out=[];
+  var tas=$("promptList").querySelectorAll("textarea.pbody");
+  for(var i=0;i<tas.length;i++){
+    var p=PROMPTS[parseInt(tas[i].dataset.ix,10)]; if(!p) continue;
+    out.push({id:p.id, category:p.category, body:tas[i].value});
+  }
+  $("promptNote").textContent="Saving…";
+  post({type:"prompts-save", prompts:out});
+};
+
 $("bHist").onclick=function(){ post({type:"history-open"}); };
 $("bHistBack").onclick=function(){ $("histOvl").style.display="none"; post({type:"history-back"}); };
 $("bReopen").onclick=function(){ post({type:"reopen"}); };

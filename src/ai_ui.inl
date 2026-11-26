@@ -694,7 +694,8 @@ static void AiSendSnapshot(AiCtxState& st) {
         auto& m = st.msgs[i];
         if (i) j += ",";
         j += "{\"role\":" + std::string(m.role == 0 ? "\"user\"" : "\"bot\"") +
-             ",\"content\":" + WxJsonStr(WxU(m.content));
+             ",\"content\":" + WxJsonStr(WxU(m.content)) +
+             ",\"durMs\":" + std::to_string(m.durMs);
         // the sources ride the snapshot too: the old frame carried only role
         // and content, so a restored conversation's chips were all dead - the
         // page's chip map stayed empty, the click gate swallowed every cite,

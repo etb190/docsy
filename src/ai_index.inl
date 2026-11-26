@@ -47,6 +47,7 @@ struct AiChatMsg {
     int role = 0;                // 0 user, 1 assistant
     std::string content;
     long long ts = 0;
+    int durMs = 0;               // the answer's generation time (the footer's label)
     std::vector<AiSource> sources;
 };
 
@@ -820,6 +821,7 @@ static void AiHistLoad() {
                 if ((p = m.get("role")) && p->t == 'd') msg.role = (int)p->d;
                 if ((p = m.get("content")) && p->t == 's') msg.content = p->s;
                 if ((p = m.get("ts")) && p->t == 'd') msg.ts = (long long)p->d;
+                if ((p = m.get("dur")) && p->t == 'd') msg.durMs = (int)p->d;
                 const crxk::J* ss = m.get("sources");
                 if (ss && ss->t == 'a')
                     for (auto& e : ss->a) {
@@ -854,7 +856,8 @@ static void AiHistSave() {
             if (k) j += ",";
             j += "{\"role\":" + std::to_string(m.role) +
                  ",\"content\":" + WxJsonStr(WxU(m.content)) +
-                 ",\"ts\":" + std::to_string(m.ts) + ",\"sources\":[";
+                 ",\"ts\":" + std::to_string(m.ts) +
+                 ",\"dur\":" + std::to_string(m.durMs) + ",\"sources\":[";
             for (size_t s = 0; s < m.sources.size(); s++) {
                 auto& src = m.sources[s];
                 if (s) j += ",";

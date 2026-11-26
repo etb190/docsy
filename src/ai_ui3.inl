@@ -280,6 +280,18 @@ static void AiPanelMessage(const wchar_t* json) {
             WxJsonEmit(*s, sj);
             AiRunTest(sj);
         }
+    } else if (t == "prompts-get") {
+        // the settings panel's prompt editor: every deck row, effective text
+        // (store override where one exists) beside the built-in default
+        AiPanelSend(std::string("{\"cmd\":\"prompts\",\"path\":") +
+                    WxJsonStr(AiRootDir() + L"\\prompts.json") +
+                    ",\"prompts\":" + AiPromptsGetJson() + "}");
+    } else if (t == "prompts-save") {
+        const crxk::J* ps = m.get("prompts");
+        if (ps && ps->t == 'a') {
+            AiPromptsApply(ps);
+            AiPanelSend("{\"cmd\":\"prompts-saved\"}");
+        }
     } else if (t == "history-open") {
         AiHistLoad();
         std::string curConv;
@@ -419,6 +431,7 @@ static void AiHandleEvent(AiEv* e) {
             m.role = 1;
             m.content = e->a;
             m.ts = (long long)GetTickCount64();
+            m.durMs = (int)e->d;             // the footer's "took Xs" label
             // sources back into the transcript for the citation clicks
             crxk::J sb;
             if (crxk::JParse(e->b, sb) && sb.t == 'a')
@@ -448,6 +461,7 @@ static void AiHandleEvent(AiEv* e) {
         if (e->key == g_aiCurKey) {
             std::string j = "{\"cmd\":\"answer\",\"text\":" + WxJsonStr(e->a) +
                             ",\"sources\":" + e->b +
+                            ",\"durMs\":" + std::to_string((int)e->d) +
                             ",\"duration\":\"" + AiFormatDuration((DWORD)e->d) + "\"" +
                             ",\"model\":" + WxJsonStr(g_aiCfg.model) + "}";
             AiPanelSend(j);
