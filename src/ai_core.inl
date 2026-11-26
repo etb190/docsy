@@ -484,35 +484,53 @@ static bool AiHttpPostRaw(const std::wstring& url, const std::string& body,
                           const std::wstring& apiKey, int recvTimeoutMs,
                           std::string& resp, int& status, std::atomic<bool>* cancel,
                           const std::function<void(const char*, DWORD)>* sink = nullptr,
-                          std::wstring* ctOut = nullptr) {
+                          std::wstring* ctOut = nullptr, int* dialsOut = nullptr) {
     resp.clear(); status = 0;
     if (ctOut) ctOut->clear();
-    HINTERNET s = AiSession();
-    if (!s) { status = -1; return false; }
     std::wstring host, path; INTERNET_PORT port; bool secure;
     if (!AiUrlSplit(url, host, port, path, secure)) { status = -1; return false; }
-    HINTERNET c = WinHttpConnect(s, host.c_str(), port, 0);
-    if (!c) { status = -1; return false; }
-    HINTERNET r = WinHttpOpenRequest(c, L"POST", path.c_str(), nullptr,
-                                     WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                     secure ? WINHTTP_FLAG_SECURE : 0);
-    if (!r) { WinHttpCloseHandle(c); status = -1; return false; }
     int to = max(1000, recvTimeoutMs);
-    // the receive budget doubles as the FIRST-HEADER wait - on a door that
-    // takes the socket and queues forever (the sidechat's 1-of-7) that made
-    // the panel spin through the whole budget, three times over with the
-    // re-dials, before the first honest word. Headers get their own short
-    // leash; once they land the leash lengthens and the body's chunks keep
-    // the full quiet budget (a reasoning model may think for minutes between
-    // SSE frames - THAT wait deserved eight minutes, the header wait never).
-    WinHttpSetTimeouts(r, 15000, 15000, 30000, min(to, 75000));
+    // the long leash belongs to the body's SSE frames, never to a door that
+    // cannot say hello: on a remote door the header wait gets 75s, on
+    // localhost the full budget (local compute-then-respond backends
+    // legitimately think before their first header byte). Once headers land
+    // the leash lengthens - a reasoning model may think for minutes between
+    // SSE frames; THAT wait deserved eight minutes, the header wait never.
+    int hdrTo = AiIsLocalHost(WxU(url)) ? to : min(to, 75000);
     std::wstring key = AiBearerKeyFor(url, apiKey);
     std::wstring headers = L"Content-Type: application/json\r\nAuthorization: Bearer " + key + L"\r\n";
     bool ok = false;
-    if (WinHttpSendRequest(r, headers.c_str(), (DWORD)-1,
-                           (LPVOID)body.data(), (DWORD)body.size(),
-                           (DWORD)body.size(), 0)) {
-        if (WinHttpReceiveResponse(r, nullptr)) {
+    DWORD err = 0;
+    int dials = 0;
+    // each dial opens a FRESH session. The old code kept one process-wide
+    // session whose connection pool handed the SAME half-dead socket to
+    // every re-dial - the retries changed nothing, which is why the panel
+    // spun through budget after budget anyway. A fresh session is a fresh
+    // socket, a fresh TLS handshake, a fresh route through whatever queue
+    // the door runs; the corpse socket dies with the old session.
+    for (;;) {
+        if (cancel && cancel->load()) { SetLastError(ERROR_CANCELLED); break; }
+        dials++;
+        if (dialsOut) *dialsOut = dials;
+        HINTERNET s = WinHttpOpen(L"docsy/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!s) { status = -1; break; }
+        HINTERNET c = WinHttpConnect(s, host.c_str(), port, 0);
+        HINTERNET r = c ? WinHttpOpenRequest(c, L"POST", path.c_str(), nullptr,
+                                             WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                             secure ? WINHTTP_FLAG_SECURE : 0) : nullptr;
+        if (!c || !r) {
+            if (r) WinHttpCloseHandle(r);
+            if (c) WinHttpCloseHandle(c);
+            WinHttpCloseHandle(s);
+            status = -1;
+            break;
+        }
+        WinHttpSetTimeouts(r, 15000, 15000, 30000, hdrTo);
+        if (WinHttpSendRequest(r, headers.c_str(), (DWORD)-1,
+                               (LPVOID)body.data(), (DWORD)body.size(),
+                               (DWORD)body.size(), 0) &&
+            WinHttpReceiveResponse(r, nullptr)) {
             DWORD st = 0, sz = sizeof st;
             WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                 WINHTTP_HEADER_NAME_BY_INDEX, &st, &sz, WINHTTP_NO_HEADER_INDEX);
@@ -525,7 +543,6 @@ static bool AiHttpPostRaw(const std::wstring& url, const std::string& body,
                     *ctOut = std::wstring(ct, sz / sizeof(wchar_t) - 1);
             }
             // headers landed - the body's chunk reads get the full budget
-            // from here on
             WinHttpSetTimeouts(r, 15000, 15000, 30000, to);
             char buf[16384];
             for (;;) {
@@ -540,10 +557,22 @@ static bool AiHttpPostRaw(const std::wstring& url, const std::string& body,
                 if (sink) (*sink)(buf, rd);
             }
         }
+        err = GetLastError();
+        WinHttpCloseHandle(r);
+        WinHttpCloseHandle(c);
+        WinHttpCloseHandle(s);
+        if (ok) break;
+        // a dead-quiet door (no headers ever, no bytes landed) gets re-dialed
+        // on the fresh session above. Anything with a status, bytes on the
+        // wire, a cancel flag or an error other than the quiet hangup is
+        // final - the caller's verdict speaks for those.
+        if (status == 0 && resp.empty() && err == ERROR_WINHTTP_TIMEOUT && dials < 3 &&
+            !(cancel && cancel->load())) {
+            Sleep(dials == 1 ? 1000 : 3000);
+            continue;
+        }
+        break;
     }
-    DWORD err = GetLastError();
-    WinHttpCloseHandle(r);
-    WinHttpCloseHandle(c);
     if (!ok) {
         SetLastError(err);
         status = status ? status : -1;
@@ -709,6 +738,18 @@ static void AiClassifyTransport(DWORD err, const std::wstring& baseUrl, AiError&
         swprintf_s(buf, L"Could not connect to AI service (WinHTTP error %lu). Check your internet connection.", err);
         e.detail = buf;
     }
+    // a hanging proxy reads exactly like a hanging door, and the user can
+    // only fix what gets named - say it once, on the pre-reply failures
+    if (!gotBody) {
+        WINHTTP_CURRENT_USER_IE_PROXY_CONFIG pc{};
+        if (WinHttpGetIEProxyConfigForCurrentUser(&pc) &&
+            (pc.fAutoDetect || pc.lpszProxy || pc.lpszAutoConfigUrl)) {
+            e.detail += L" (a system proxy is configured and may be the one hanging)";
+            if (pc.lpszProxy) GlobalFree(pc.lpszProxy);
+            if (pc.lpszAutoConfigUrl) GlobalFree(pc.lpszAutoConfigUrl);
+            if (pc.lpszPacUrl) GlobalFree(pc.lpszPacUrl);
+        }
+    }
 }
 // The reply body's own head, printable - a bare "could not read" tells the
 // reader nothing, while its first words (a proxy page, a captive portal, a
@@ -794,26 +835,19 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
                        const std::function<void(const char*, DWORD)>* sink = nullptr,
                        std::wstring* ctOut = nullptr) {
     std::string send = body;
-    int redials = 0, rebuilds = 0;
+    int rebuilds = 0, dials = 0;
     for (;;) {
         if (cancel && cancel->load()) { err.cat = AI_ERR_TIMEOUT; return false; }
         if (!AiHttpPostRaw(c.baseUrl + L"/chat/completions", send, c.apiKey,
-                           recvTimeoutMs, resp, status, cancel, sink, ctOut)) {
+                           recvTimeoutMs, resp, status, cancel, sink, ctOut, &dials)) {
             if (status > 0) { AiClassifyHttp(status, resp, c.model, err); return false; }
-            DWORD terr = GetLastError();
-            // the door took the socket and then said nothing at all - the
-            // request sat in its queue and the queue never drained (the
-            // sidechat's 1-of-7: every dead ask died here, the panel on
-            // Thinking for the whole receive budget). Nothing streamed, so
-            // a quiet re-dial repaints nothing; two extra dials, a second
-            // and then three seconds apart.
-            if (resp.empty() && terr == ERROR_WINHTTP_TIMEOUT && redials < 2) {
-                redials++;
-                Sleep(redials == 1 ? 1000 : 3000);
-                continue;
-            }
-            AiClassifyTransport(terr, c.baseUrl, err, !resp.empty());
-            if (redials > 0) err.detail += L" (re-dialed 3 times)";
+            // the dead-quiet re-dials live in AiHttpPostRaw now - one policy
+            // for every door call, each dial on a fresh session so the
+            // corpse socket dies with the old one. The verdict just reports
+            // what the dials found.
+            AiClassifyTransport(GetLastError(), c.baseUrl, err, !resp.empty());
+            if (dials > 1)
+                err.detail += L" (" + std::to_wstring(dials) + L" dials)";
             return false;
         }
         if (status >= 200 && status < 300) return true;
