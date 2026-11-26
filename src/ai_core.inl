@@ -82,6 +82,13 @@ static std::wstring AiRootDir() {
             root = std::wstring(la) + L"\\docsy\\AI";
             CoTaskMemFree(la);
         }
+        // CreateDirectoryW makes ONE level: on a machine without
+        // %LocalAppData%\docsy yet, the one-shot create of docsy\AI failed,
+        // every save failed silently with it, and every session re-embedded.
+        // Walk the chain; "already exists" is success too.
+        size_t ds = root.rfind(L"\\docsy");
+        if (ds != std::wstring::npos)
+            CreateDirectoryW(root.substr(0, ds + 6).c_str(), nullptr);
         CreateDirectoryW(root.c_str(), nullptr);
         CreateDirectoryW((root + L"\\index").c_str(), nullptr);
     }

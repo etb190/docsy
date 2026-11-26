@@ -189,11 +189,17 @@ static void WxLogPolicies() {
         WxLogPolicyKey(HKEY_CURRENT_USER, L"HKCU", s);
     }
 }
-static bool WxReadFile(const std::wstring& p, std::string& out) {
+static bool WxReadFile(const std::wstring& p, std::string& out,
+                       long long maxBytes = 64ll << 20) {
     HANDLE h = CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER sz{};
-    bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart < (64ll << 20);
+    // the cap is a guard against reading garbage, not a law of nature: the
+    // AI index's vector file alone is dim x chunks x 4 bytes - a real book at
+    // 4096 dims crosses 64MB around 4,000 chunks, and a cache that writes
+    // fine but can never read back IS the re-embed-every-session report. The
+    // AI index reads pass a 1GB cap; small files keep the default.
+    bool ok = GetFileSizeEx(h, &sz) && sz.QuadPart < maxBytes;
     if (ok) {
         out.resize((size_t)sz.QuadPart);
         DWORD got = 0;

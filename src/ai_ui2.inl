@@ -937,6 +937,19 @@ static void AiSemanticStart() {
                 std::mutex failM;
                 AiError failErr;
                 bool failed = false;
+                // the partial save: the handback below keeps the landed work in
+                // the LIVE seat, but a pass that ends early (the stop press, the
+                // watchdog, a lane failure) used to leave NOTHING on disk -
+                // "resume where it stopped" lived only inside the session, and a
+                // book that outgrew the 30-minute wall re-embedded from zero
+                // every restart. The landed rows and refusal marks ride to disk;
+                // the loader restores them (all-zero rows come back as empty)
+                // and the resume branch flies only the gaps.
+                auto savePartial = [&]() {
+                    pix->dim = dimA.load();
+                    pix->semComplete = false;
+                    AiIndexSave(*pix);
+                };
                 auto lane = [&](unsigned laneId) {
                     for (size_t k = laneId; k < nb; k += lanes) {
                         if (abortPass.load() || g_aiSemCancel.load()) return;
@@ -971,6 +984,7 @@ static void AiSemanticStart() {
                     // rides this status home to the pump, which starts it here.
                     // A stopped pass also hands its landed work home: the next
                     // press resumes instead of rebuilding from zero.
+                    savePartial();
                     pix->dim = dimA.load();
                     AiEv* hb = AiEvMake(AIEV_SEM_INDEX);
                     hb->heavy = pix;
@@ -986,7 +1000,9 @@ static void AiSemanticStart() {
                     // seat keeps every vector that landed plus the refusal marks,
                     // so the next press RESUMES the book instead of rebuilding it
                     // from zero - ten minutes of embeddings used to die with this
-                    // thread's local copy
+                    // thread's local copy. The disk save makes the resume true
+                    // across restarts, not just across presses.
+                    savePartial();
                     pix->dim = dimA.load();
                     AiEv* hb = AiEvMake(AIEV_SEM_INDEX);
                     hb->heavy = pix;

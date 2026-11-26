@@ -516,7 +516,10 @@ static void AiIndexSaveAsync(const AiDocIndex& ix) {
 }
 static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
     std::string s;
-    if (!WxReadFile(AiIndexPath(docId), s)) return false;
+    // the index rides a 1GB read cap: a big book's chunk deck crosses the
+    // default 64MB guard, and a cache that exists but can never load back is
+    // the re-embed-every-session report wearing a disguise
+    if (!WxReadFile(AiIndexPath(docId), s, 1024ll << 20)) return false;
     crxk::J j;
     if (!crxk::JParse(s, j) || j.t != 'o') return false;
     ix.docId = docId;
@@ -557,10 +560,13 @@ static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
                 }
             ix.chunks.push_back(std::move(ch));
         }
-    // vectors
+    // vectors: their own float32 file (dim + count header). The read rides the
+    // 1GB cap too - the bin is dim x chunks x 4 bytes and a real book at 4096
+    // dims crosses 64MB near 4,000 chunks, where the default guard made the
+    // cache write-any-read-never: loaded chunks, empty vectors, full re-embed.
     std::string binS;
     std::vector<unsigned char> bin;
-    if (ix.dim > 0 && WxReadFile(AiVecPath(docId), binS)) {
+    if (ix.dim > 0 && WxReadFile(AiVecPath(docId), binS, 1024ll << 20)) {
         bin.assign(binS.begin(), binS.end());
     }
     if (ix.dim > 0 && bin.size() > 8) {
@@ -573,6 +579,13 @@ static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
                 ix.vectors[i].resize(hdr[0]);
                 memcpy(ix.vectors[i].data(), bin.data() + 8 + i * hdr[0] * sizeof(float),
                        hdr[0] * sizeof(float));
+                // an all-zero row is the save's own "never landed" mark, not an
+                // embedding: restore it as empty so the resume check sees the
+                // gap it must fly (a real embedder never answers all zeros)
+                bool zero = true;
+                for (int f = 0; f < hdr[0]; f++)
+                    if (ix.vectors[i][f] != 0.0f) { zero = false; break; }
+                if (zero) ix.vectors[i].clear();
             }
         }
     }
