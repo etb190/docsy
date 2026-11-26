@@ -903,4 +903,5 @@ static void AiChatToggle() {
     // the dock: the view gives the strip its width back and takes it again
     // here - LayoutMain reserves g_aiDockW and lays the panel out last
     LayoutMain();
+    AiSetSetting("app.aion", g_aiOn ? "1" : "0");   // the session remembers the panel
 }

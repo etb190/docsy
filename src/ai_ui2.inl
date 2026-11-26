@@ -1478,6 +1478,7 @@ static void NotesSideShow(bool on) {
     }
     InvalidateRect(g.side, nullptr, FALSE);
     NotesSideLayout();
+    AiSetSetting("app.notes", on ? "1" : "0"); // the session reopens the notes face
 }
 // ---- the notes panel's messages (the chat panel's handlers, moved seat) ----
 static void NotesRefresh() {
@@ -2456,4 +2457,53 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     return DefWindowProcW(h, m, wp, lp);
+}
+
+// ---- the session: the view, the document, the open panels ride settings.json ----
+// Every mode switch saves where the reader is (app.* keys), and a launch with
+// no file on the command line puts it all back: same view, same document, the
+// AI panel / notes face / thumbnail rails that were open, and the text
+// editor's scroller at its saved position (editor.inl owns the edscroll keys).
+// The definitions live here, late in the TU, because restore drives every
+// surface - the toggles, the rail layout - that only exist by this point.
+static void SessionSaveAll() {
+    const wchar_t* v = g_editOn ? L"editor" : (g_webOn ? L"web" : L"pdf");
+    AiSetSetting("app.view", WxU(v));
+    if (!DVF().path.empty()) AiSetSetting("app.doc", WxU(DVF().path));
+    if (!g_edPath.empty()) {
+        AiSetSetting("app.edoc", WxU(g_edPath));
+        EditorSave();                          // the typing rides out with the window
+        if (g_edWeb) g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"scroll-get\"}");
+    }
+    AiSetSetting("app.aion", g_aiOn ? "1" : "0");
+    AiSetSetting("app.notes", g_sideNotes ? "1" : "0");
+    AiSetSetting("app.sideon", g.sideOn ? "1" : "0");
+    AiSetSetting("app.webside", g_webSide ? "1" : "0");
+}
+static void SessionRestore() {
+    std::string view = AiGetSetting("app.view", "pdf");
+    std::string doc = AiGetSetting("app.doc", "");
+    if (!doc.empty() && WxFileExists(WxW(doc).c_str()))
+        TabOpenInto(false, WxW(doc));          // the document rides beneath every view
+    if (view == "web") {
+        std::string rail = AiGetSetting("app.webside", "0");
+        g_webSide = rail == "1";
+        WebToggle(true);
+    } else if (view == "editor") {
+        EditorToggle(true);
+        std::string edoc = AiGetSetting("app.edoc", "");
+        if (!edoc.empty() && WxFileExists(WxW(edoc).c_str())) EditorOpenFile(WxW(edoc));
+        EditorRefocus();                       // the caret, not the first click
+    } else {
+        std::string notes = AiGetSetting("app.notes", "0");
+        if (notes == "1") NotesSideShow(true);
+        std::string side = AiGetSetting("app.sideon", "1");
+        if (side == "0" && g.sideOn) {
+            g.sideOn = false;
+            ShowWindow(g.side, SW_HIDE);
+            RailRepaint();
+            LayoutMain();
+        }
+    }
+    if (AiGetSetting("app.aion", "0") == "1") AiChatToggle();
 }

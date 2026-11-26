@@ -213,6 +213,7 @@ static void ToggleSide() {
         if (g.side) ShowWindow(g.side, g_webSide ? SW_SHOWNOACTIVATE : SW_HIDE);
         RailRepaint();
         LayoutMain();
+        AiSetSetting("app.webside", g_webSide ? "1" : "0");
         return;
     }
     if (!DVF().n) return;
@@ -221,6 +222,7 @@ static void ToggleSide() {
     ShowWindow(g.side, g.sideOn ? SW_SHOWNOACTIVATE : SW_HIDE);
     RailRepaint();                        // the Pages button lights and dims with the sidebar
     LayoutMain();
+    AiSetSetting("app.sideon", g.sideOn ? "1" : "0");
 }
 
 static void ZoomBy(double f) { SetZoom(DVF().zoom * f, g.cw / 2, g.ch / 2); }
@@ -724,6 +726,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
+        SessionSaveAll();                    // the view, the doc, the panels ride out
+                                             // first - before any controller closes
         RqShutdown();                        // the render worker ends before the queues die
         WebShutdown();                       // the WebView2 controllers close with the window
         PostQuitMessage(0); return 0;

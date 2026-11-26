@@ -1,5 +1,6 @@
 <body>
 <div id="app">
+  <div id="edgeShadow"></div>
   <div id="hdr">
     <div class="row">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="#1ea54c" fill-rule="evenodd">
@@ -480,7 +481,11 @@ $("bNew").onclick=function(){ if(S.streaming) return; post({type:"newchat"}); };
    AskPrompt3 - grain body, green accent, centered on the frame - so the page
    just posts and the question happens where the window is */
 $("bSem").onclick=function(){ post({type:"semantic"}); };
-$("bSet").onclick=function(){ post({type:"settings-get"}); $("setOvl").style.display="flex"; };
+/* the gear toggles: open when the sheet is down, close it again on a second
+   click - the reader never has to hunt for the X */
+$("bSet").onclick=function(){ var ov=$("setOvl");
+  if(ov.style.display==="flex"){ ov.style.display="none"; return; }
+  post({type:"settings-get"}); ov.style.display="flex"; };
 $("bSetClose").onclick=function(){ $("setOvl").style.display="none"; };
 $("bSave").onclick=function(){ post({type:"settings-save", settings:readSettings()});
   $("setOvl").style.display="none"; };

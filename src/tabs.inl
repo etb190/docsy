@@ -279,6 +279,7 @@ static bool TabOpenInto(bool b, const std::wstring& p) {
         }
         return false;
     }
+    AiSetSetting("app.doc", WxU(p));             // the session reopens this document
     return true;
 }
 

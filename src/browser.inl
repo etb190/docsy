@@ -484,7 +484,8 @@ static void WebBarLayout() {
     int navH = (int)(44 * g.dpi);              // the nav row centers in its own 44-band - the
                                                // bookmarks bar's ground rides below it, and centering
                                                // in the whole strip slid the pill under the bar
-    int d = TABF(30), cy = (navH - 1 - d) / 2, pitch = TABF(32);
+    int d = TABF(30), cy = (navH - 1 - d) / 2, pitch = TABF(30);   // the reader toolbar's own
+               // spacing: buttons touch (each face's padding makes the gap), not 2dp apart
     int ph = TABF(30), py = (navH - 1 - ph) / 2;
     int x = TABF(10);
     g_wbR[WB_SIDE] = { x, cy, x + d, cy + d };
@@ -948,7 +949,15 @@ static void WebThumbDecode(int id, IStream* st) {
     if (t->thumb) DeleteObject(t->thumb);
     t->thumb = scaled; t->thumbW = TW2; t->thumbH = TH2;
     t->ar = (double)bh / max(1, bw);
-    if (g_webOn) { WebSideLayout(); InvalidateRect(g.side, nullptr, FALSE); }
+    if (g_webOn && g.side) {
+        WebSideLayout();                           // the card heights are width-fixed, so the
+        int ix = -1;                               // rows never move: just the card that
+        for (int i2 = 0; i2 < (int)g_wt.size(); i2++)   // arrived repaints - a burst of
+            if (g_wt[i2].id == id) { ix = i2; break; }   // captures no longer strobes the rail
+        RECT sr; GetClientRect(g.side, &sr);
+        RECT cr = WebSideCardRect(ix, sr.bottom);
+        if (cr.right > cr.left) InvalidateRect(g.side, &cr, FALSE);
+    }
 }
 
 static void WebShowCurrent() {
@@ -1522,6 +1531,8 @@ static void WebToggle(bool on) {
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
     RailRepaint();
     UpdateTitle();
+    // the session remembers the view: a launch with no file restores this exact face
+    AiSetSetting("app.view", on ? "web" : (g_editOn ? "editor" : "pdf"));
 }
 
 static void WebShutdown() {
@@ -1559,10 +1570,21 @@ static void WebSideLayout() {
     ws.top[n] = y;
     ws.docH = y + (int)(8 * g.dpi);
     ws.scroll = std::clamp(ws.scroll, 0, max(0, ws.docH - ws.ch));
-    if (g.side && (GetWindowLongW(g.side, GWL_STYLE) & WS_VISIBLE)) {
-        InvalidateRect(g.side, nullptr, FALSE);
-        SetTimer(g.side, 2, 25, nullptr);
-    }
+    // (no whole-rail invalidate here: this runs on every layout pass and on
+    // every thumb arrival, and a full repaint each time is what strobed the
+    // rail while captures landed - the callers that change geometry repaint,
+    // and WebThumbDecode below repaints just the card that arrived)
+}
+
+static RECT WebSideCardRect(int i, int h) {        // a card's band in rail client coords:
+    if (i < 0 || i >= (int)g_wt.size()) return RECT{ 0, 0, 0, 0 };   // thumb + label + pads, the
+    int padT = (int)(8 * g.dpi), labH = (int)(20 * g.dpi),          // same band the hover paints
+        padB = (int)(6 * g.dpi), gap = (int)(2 * g.dpi);
+    int th = WebSideTH(i);
+    int btop = ws.top[i] - padT - ws.scroll, bbot = ws.top[i] + th + gap + labH + padB - ws.scroll;
+    if (bbot <= 0 || btop >= h) return RECT{ 0, 0, 0, 0 };
+    int avail = ws.cw - SBar();
+    return RECT{ 0, max(0, btop), max(1, avail), min(h, bbot) };
 }
 
 static void WebSideSync() {                        // the highlight follows the visible tab
@@ -1679,9 +1701,18 @@ static void WebSideMove(HWND h, const POINT& p) {
     int hov = (!ws.barDrag && ws.docH > 0 && p.x < ws.cw - SBar() && p.y + ws.scroll < ws.docH)
               ? WebSideAt(p.y + ws.scroll) : -1;
     if (hov != ws.hover || hot != ws.barHot) {
-        ws.hover = hov; ws.barHot = hot;
-        if (hov >= 0 || hot) TrackLeave(h);
-        InvalidateRect(h, nullptr, FALSE);
+        RECT sr; GetClientRect(h, &sr);
+        RECT ro = WebSideCardRect(ws.hover, sr.bottom);   // the old band sheds its hover
+        int barPrev = ws.barHot;                          // row and the new one gains it:
+        ws.hover = hov; ws.barHot = hot;                  // both repaint, never the whole
+        if (hov >= 0 || hot) TrackLeave(h);               // rail on every cursor crossing
+        RECT rn = WebSideCardRect(hov, sr.bottom);
+        if (ro.right > ro.left) InvalidateRect(h, &ro, FALSE);
+        if (rn.right > rn.left && !EqualRect(&ro, &rn)) InvalidateRect(h, &rn, FALSE);
+        if (hot != barPrev) {
+            RECT br{ sr.right - SBar(), 0, sr.right, sr.bottom };
+            InvalidateRect(h, &br, FALSE);
+        }
     }
     if (GetCapture() == h) {
         int dy = p.y - ws.dp.y; ws.dp = p;

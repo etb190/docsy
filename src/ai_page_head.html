@@ -139,9 +139,17 @@ body{
 /* ---- composer ---- */
 #composer{flex:0 0 auto; display:flex; gap:8px; padding:8px; border-top:1px solid var(--line);}
 #input{flex:1 1 auto; background:var(--pane); border:1px solid var(--line); border-radius:4px;
-  color:var(--text); font-family:inherit; font-size:12px; padding:6px 10px;
+  color:var(--text); font-family:inherit; font-size:12px; padding:11px 10px; line-height:16px;
   resize:none; min-height:38px; max-height:120px; outline:none; user-select:text;}
 #input::placeholder{color:var(--dim);}
+
+/* ---- the panel's left edge: the browser rail's own halo - a black gaussian
+     fading over 20px against a 1px #484848 divider, drawn inside the page so
+     the webview's opaque sheet carries it without any host painting ---- */
+#edgeShadow{position:fixed; left:0; top:0; bottom:0; width:21px; pointer-events:none;
+  z-index:5; background:linear-gradient(to right, rgba(0,0,0,.6), rgba(0,0,0,0) 20px);}
+#edgeShadow::after{content:""; position:absolute; left:0; top:0; bottom:0; width:1px;
+  background:#484848;}
 .sbtn{width:36px; height:36px; flex:0 0 auto; border:1px solid var(--line); border-radius:4px;
   background:var(--pane); color:var(--text); font-family:"Segoe MDL2 Assets"; font-size:14px;
   display:none; align-items:center; justify-content:center; cursor:pointer;}

@@ -479,6 +479,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
                                              // its hidden seat builds itself before
                                              // the first click needs it
     if (argc > 1) TabOpenInto(false, argv[1]);
+    else SessionRestore();                   // no file on the line: the last session's
+                                             // view, document and panels ride back in
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     return 0;

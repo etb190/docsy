@@ -36,8 +36,13 @@ static const wchar_t* const EbLabel[EB_COUNT] = {
     L"Close", L"Open", L"Save", L"Web", L"PDF", L"AI"
 };
 static const wchar_t* const EbGlyph[EB_COUNT] = {
-    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE8A5", L"\uE8BD"
-};
+    L"\uE711", L"\uE8DA", L"\uE74E", L"\uE774", L"\uE8F1", L"\uE8BD"
+};   // EB_PDF rides the browser's own PDF glyph (E8F1): one icon means
+     // "back to the reader" everywhere the app draws it
+
+// the session store and the AI settings ride ai_core.inl, later in the TU
+static std::string AiGetSetting(const std::string& key, const std::string& defVal);
+static void AiSetSetting(const std::string& key, const std::string& val);
 
 static int g_edHot = -1, g_edDown = -1;
 
@@ -224,6 +229,7 @@ static void EditorOpenFile(const std::wstring& path) {
         g_edTitle = (slash != std::wstring::npos) ? path.substr(slash + 1) : path;
         std::wstring whtml = WxW(s);
         EditorLoadContent(whtml);
+        AiSetSetting("app.edoc", WxU(path));       // the session reopens this editor file
         UpdateTitle();
     }
 }
@@ -428,6 +434,10 @@ static void EditorHandleMessage(const wchar_t* json) {
             WxWriteFile(g_edPath, (const unsigned char*)fullDoc.data(), fullDoc.size());
         }
         UpdateTitle();
+    } else if (t == "scroll") {                      // the page's scroller, saved for the
+        int y = m.get("y") ? (int)m.get("y")->d : 0; // session: the switch back resumes it
+        if (!g_edPath.empty())
+            AiSetSetting("app.edscroll." + WxU(g_edPath), std::to_string(y));
     } else if (t == "dirty") {                       // any change: ask the page for its own
         if (g_edWeb && g_edSide && !g.full)          // render, but only while the rail can
             g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"thumb\"}");   // show it - a hidden
@@ -554,9 +564,22 @@ static void EditorToggle(bool on) {
             g_edCtr->put_Bounds(r);
             EditorRefocus();                           // the page's own thumbs ride the
             EditorRailSync();                          // load and every change after it
+            if (!g_edPath.empty()) {                   // the scroller resumes where the
+                int y = atoi(AiGetSetting("app.edscroll." + WxU(g_edPath), "").c_str());
+                if (y > 0 && g_edWeb)                  // session left it
+                    g_edWeb->PostWebMessageAsJson((L"{\"cmd\":\"scroll-set\",\"y\":" +
+                                                   std::to_wstring(y) + L"}").c_str());
+            }
         }
     } else {
         g.sideOn = g_edSide;
+        // the switch IS the save point: the page's content rides to its file
+        // and the scroller's position rides to the session store, so nothing
+        // typed is held hostage by the mode
+        if (!g_edPath.empty()) {
+            EditorSave();
+            if (g_edWeb) g_edWeb->PostWebMessageAsJson(L"{\"cmd\":\"scroll-get\"}");
+        }
         if (g_edCtr) g_edCtr->put_IsVisible(FALSE);
         if (g_etool) ShowWindow(g_etool, SW_HIDE);
         if (!g_webOn) {
@@ -566,10 +589,19 @@ static void EditorToggle(bool on) {
             if (g.rail && !g.full) ShowWindow(g.rail, SW_SHOWNOACTIVATE);
         }
     }
+    // the strip's face swaps with the mode: without this the reader's page
+    // thumbs (or the editor's card) kept their old paint until the first
+    // click or page turn - the stale surface read as "thumbnails don't switch"
+    if (g.side) {
+        InvalidateRect(g.side, nullptr, FALSE);
+        SetTimer(g.side, 2, 25, nullptr);          // any pending thumbs pump in at once
+    }
     LayoutMain();
     RailRepaint();
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();
+    // the session remembers the view (the flag already flipped at the top)
+    AiSetSetting("app.view", g_editOn ? "editor" : (g_webOn ? "web" : "pdf"));
 }
 
 static RECT EditorBtnRect(int id, int w, int h) {
@@ -641,8 +673,8 @@ static void EditorToolDraw(HDC dc, int w, int h) {
             p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
             p.CloseFigure();
 
-            Gdiplus::SolidBrush fbr(pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
-                                       : Gdiplus::Color(255, 0x40, 0x40, 0x40));
+            Gdiplus::SolidBrush fbr(pr ? Gdiplus::Color(208, 0x33, 0x33, 0x33)
+                                       : Gdiplus::Color(196, 0x40, 0x40, 0x40));
             gs.FillPath(&fbr, &p);
         }
 

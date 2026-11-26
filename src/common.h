@@ -1113,6 +1113,14 @@ static void WebBarClick(int id);
 static void WebStripPaint(HDC dc, int w, int h);   // the nav row, on top
 static int  WebNavHit(POINT p);           // the nav row's buttons, strip coords
 static void WebSideLayout();              // the sidebar's web-tab thumbs
+
+// ---- the session (settings.json's app.* keys; defined in ai_core.inl) ----
+static std::string AiGetSetting(const std::string& key, const std::string& defVal);
+static void AiSetSetting(const std::string& key, const std::string& val);
+static void AiChatToggle();               // the AI panel's on/off
+static void NotesSideShow(bool on);       // the side band's Pages|Notes face
+static void SessionSaveAll();             // view + doc + panels ride out at the switches
+static void SessionRestore();             // ...and back in at startup (no CLI file)
 static void WebSideSync();
 static void WebSideDraw(HDC dc, int w, int h);
 static void EditorSideDraw(HDC dc, int w, int h);
@@ -1365,9 +1373,11 @@ static void BarDraw(HDC dc, int w, int h) {
                 gs.FillPath(&gb, &p);
             } else {     // RowHoverBrush #404040, pressed SurfaceBrush #333333; disabled
                          // bakes the style's Opacity 0.4 over #1c1c1c: 0.4*#404040 +
-                         // 0.6*#1c1c1c = #2a2a2a
-                Gdiplus::Color c = pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
-                                      : Gdiplus::Color(255, 0x40, 0x40, 0x40);
+                         // 0.6*#1c1c1c = #2a2a2a. The face is SEMI-TRANSPARENT: an opaque
+                         // tile erased the grain under the button, and sweeping the row
+                         // read as the noise jumping - the texture now continues beneath
+                Gdiplus::Color c = pr ? Gdiplus::Color(208, 0x33, 0x33, 0x33)
+                                      : Gdiplus::Color(196, 0x40, 0x40, 0x40);
                 if (!en) c = Gdiplus::Color(255, 0x2a, 0x2a, 0x2a);
                 Gdiplus::SolidBrush f(c);
                 gs.FillPath(&f, &p);
@@ -1631,10 +1641,10 @@ static void WebToolDraw(HDC dc, int w, int h) {
             p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
             p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
             p.CloseFigure();
-            Gdiplus::SolidBrush f(pr ? Gdiplus::Color(255, 0x33, 0x33, 0x33)
-                                     : Gdiplus::Color(255, 0x40, 0x40, 0x40));
-            gs.FillPath(&f, &p);
-        }
+            Gdiplus::SolidBrush f(pr ? Gdiplus::Color(208, 0x33, 0x33, 0x33)
+                                     : Gdiplus::Color(196, 0x40, 0x40, 0x40));   // see-through:
+            gs.FillPath(&f, &p);         // the grain holds beneath the face, so hovering
+        }                                // never reads as the noise moving
         int capH = 0;
         {
             RECT mc{ 0, 0, 0, 0 };
