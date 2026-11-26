@@ -681,11 +681,19 @@ static void AiClassifyHttp(int status, const std::string& body, const std::wstri
     default: e.cat = AI_ERR_OTHER; break;
     }
 }
-static void AiClassifyTransport(DWORD err, const std::wstring& baseUrl, AiError& e) {
+static void AiClassifyTransport(DWORD err, const std::wstring& baseUrl, AiError& e,
+                                bool gotBody = false) {
     e.cat = AI_ERR_UNREACHABLE;
     if (err == ERROR_WINHTTP_TIMEOUT) {
         e.cat = AI_ERR_TIMEOUT;
-        e.detail = L"Request timed out while connecting to AI service.";
+        // the phase matters: the same 12002 covers "the door never accepted
+        // the connection" and "the door took the request and went quiet for
+        // the whole receive budget" - the old text blamed connecting for
+        // both, while the panel sat on Thinking for eight minutes
+        if (gotBody)
+            e.detail = L"The AI service stopped talking mid-reply (timed out).";
+        else
+            e.detail = L"The AI service never answered - the request timed out waiting for a reply. The door may be overloaded; try again.";
     } else if (err != 0) {
         wchar_t buf[256];
         swprintf_s(buf, L"Could not connect to AI service (WinHTTP error %lu). Check your internet connection.", err);
@@ -776,16 +784,30 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
                        const std::function<void(const char*, DWORD)>* sink = nullptr,
                        std::wstring* ctOut = nullptr) {
     std::string send = body;
-    for (int attempt = 0; attempt < 3; attempt++) {
+    int redials = 0, rebuilds = 0;
+    for (;;) {
         if (cancel && cancel->load()) { err.cat = AI_ERR_TIMEOUT; return false; }
         if (!AiHttpPostRaw(c.baseUrl + L"/chat/completions", send, c.apiKey,
                            recvTimeoutMs, resp, status, cancel, sink, ctOut)) {
-            if (status > 0) AiClassifyHttp(status, resp, c.model, err);
-            else AiClassifyTransport(GetLastError(), c.baseUrl, err);
+            if (status > 0) { AiClassifyHttp(status, resp, c.model, err); return false; }
+            DWORD terr = GetLastError();
+            // the door took the socket and then said nothing at all - the
+            // request sat in its queue and the queue never drained (the
+            // sidechat's 1-of-7: every dead ask died here, the panel on
+            // Thinking for the whole receive budget). Nothing streamed, so
+            // a quiet re-dial repaints nothing; two extra dials, a second
+            // and then three seconds apart.
+            if (resp.empty() && terr == ERROR_WINHTTP_TIMEOUT && redials < 2) {
+                redials++;
+                Sleep(redials == 1 ? 1000 : 3000);
+                continue;
+            }
+            AiClassifyTransport(terr, c.baseUrl, err, !resp.empty());
+            if (redials > 0) err.detail += L" (re-dialed 3 times)";
             return false;
         }
         if (status >= 200 && status < 300) return true;
-        if (status == 400) {
+        if (status == 400 && rebuilds < 3) {
             bool dropJson = resp.find("response_format") != std::string::npos;
             bool dropEff = resp.find("reasoning_effort") != std::string::npos;
             bool dropKw = resp.find("chat_template_kwargs") != std::string::npos;
@@ -809,6 +831,7 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
                         rebuilt += WxJsonStr(WxW(kv.first)) + ":" + WxJsonRaw(kv.second);
                     }
                     send = rebuilt + "}";
+                    rebuilds++;
                     continue;
                 }
             }
@@ -816,8 +839,6 @@ static bool AiSendChat(const AiCfg& c, const std::string& body,
         AiClassifyHttp(status, resp, c.model, err);
         return false;
     }
-    err.cat = AI_ERR_BAD_RESPONSE;
-    return false;
 }
 
 // ---- SSE stream: yield content deltas, swallow reasoning, [DONE] ends ----
