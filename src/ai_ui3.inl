@@ -195,6 +195,29 @@ static void AiPanelMessage(const wchar_t* json) {
             AiPanelSend("{\"cmd\":\"error\",\"text\":\"One answer is already on its way - let it finish or press the stop button.\"}");
             return;
         }
+        // the redo REPLACES: the old answer row dies with the press and the
+        // new answer takes its seat, instead of stacking a second answer
+        // under it. Everything after the last user bubble goes (the answer,
+        // or every answer that followed it), the trimmed transcript
+        // re-renders through the msgs frame, and persistence writes the
+        // trimmed deck the moment the new answer lands (AiHistUpsert rides
+        // AIEV_DONE). AiPanelSend never takes g_aiMtx, so the snapshot may
+        // ride under the lock.
+        {
+            std::lock_guard<std::mutex> lk(g_aiMtx);
+            auto it = g_aiCtx.find(g_aiCurKey);
+            if (it != g_aiCtx.end()) {
+                AiCtxState* st = &it->second;
+                size_t lastUser = st->msgs.size();
+                for (size_t i = st->msgs.size(); i-- > 0; ) {
+                    if (st->msgs[i].role == 0) { lastUser = i; break; }
+                }
+                if (lastUser < st->msgs.size()) {
+                    st->msgs.resize(lastUser + 1);
+                    AiSendSnapshot(*st);
+                }
+            }
+        }
         AiPanelSend("{\"cmd\":\"loading\",\"text\":\"Thinking…\"}");
         {
             std::lock_guard<std::mutex> lk(g_aiMtx);

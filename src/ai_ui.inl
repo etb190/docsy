@@ -185,16 +185,21 @@ static std::string AiSidechatSystem(const std::vector<AiRetrieved>& ev) {
     s += "INSTRUCTIONS:\n"
          "1. Answer based ONLY on the provided sources above.\n"
          "2. If sources don't contain the answer, say: 'The document does not contain information about this.'\n"
-         "3. Return JSON with 'answer' and 'sources' fields.\n"
-         "4. Each source must include: 'sourceId' (use the SOURCE_n ID above), 'quote' (exact text from source), 'reason' (why it supports the answer).\n"
-         "5. Use the EXACT sourceId from the evidence (e.g., 'SOURCE_1', 'SOURCE_2').\n"
-         "6. Do NOT invent page numbers or source IDs.\n"
-         "7. Cite multiple sources when appropriate.\n"
-         "8. Distinguish the document's claims from your explanation.\n"
-         "9. CRITICAL CITATION MANDATE - IMMEDIATE INLINE PLACEMENT: every factual claim, date, name, statistic, or finding carries its [SOURCE_n] marker IMMEDIATELY after that clause or sentence; NEVER cluster citations at the end of a sentence, paragraph, or answer.\n"
+         // the sidechat rides the prose door (wantJson=false): demanding JSON
+         // here while no grammar enforces it made literal-minded models
+         // (nemotron) either wrap a broken JSON shell the parser must salvage
+         // or drift into prose with NO structured sources at all - and doc
+         // mode's resolver had no marker backfill then, so every inline chip
+         // rendered dead. The contract is prose-first now: markers ARE the
+         // citation record; a model that still wraps JSON parses as before
+         // (AiParseStructured keeps unwrapping it, backward compatible).
+         "3. Write the answer as plain prose (markdown allowed). Do NOT wrap it in JSON.\n"
+         "4. Every claim needs its citation marker: right after that claim, append the supporting source's marker in the exact form [SOURCE_n] using the SOURCE_n IDs above. An answer without [SOURCE_n] markers is an incomplete answer.\n"
+         "5. Use the EXACT SOURCE_n IDs from the evidence (e.g., 'SOURCE_1', 'SOURCE_2'); never invent IDs or page numbers.\n"
+         "6. Distinguish the document's claims from your explanation.\n"
+         "7. CRITICAL CITATION MANDATE - IMMEDIATE INLINE PLACEMENT: every factual claim, date, name, statistic, or finding carries its [SOURCE_n] marker IMMEDIATELY after that clause or sentence; NEVER cluster citations at the end of a sentence, paragraph, or answer.\n"
          "   If citing multiple sources for one statement, write separate markers like [SOURCE_1] [SOURCE_2]; NEVER write combined brackets like [SOURCE_1, SOURCE_2] or [ , ].\n"
-         "Output ONLY a JSON object:\n"
-         "{\"answer\": \"The fee doubles after the first year. [SOURCE_1]\", \"sources\": [{\"sourceId\": \"SOURCE_1\", \"quote\": \"<exact text from that source>\", \"reason\": \"<why it supports the answer>\"}]}";
+         "Example: 'The trial lasted twelve weeks. [SOURCE_2] The double-blind arm ran eight weeks. [SOURCE_1]'.";
     return s;
 }
 static std::string AiWebSystem(const std::string& pageText, const std::string& title,
@@ -239,6 +244,7 @@ static int AiParseSourceId(const std::string& s) {
     return -1;
 }
 static std::vector<AiSource> AiResolveDocSources(const std::vector<AiModelSource>& in,
+                                                 const std::string& answer,
                                                  const std::vector<AiRetrieved>& ev) {
     std::vector<AiSource> out;
     if (ev.empty()) return out;
@@ -279,6 +285,34 @@ static std::vector<AiSource> AiResolveDocSources(const std::vector<AiModelSource
                 }
             }
         }
+        src.pageIndex = pageIdx;
+        src.page = pageIdx + 1;
+        out.push_back(std::move(src));
+    }
+    // marker backfill: the sidechat rides prose (no json grammar), and a
+    // model that answers in prose with inline [SOURCE_n] markers but skips
+    // the structured sources array resolved to NOTHING - every chip in the
+    // answer rendered dead and unclickable (the nemotron report). Web mode
+    // has carried this backfill since its own dead-chip report; doc mode
+    // gets the same door: every SOURCE_n (or bare [n]) marker the answer
+    // text carries resolves against the retrieved evidence, quote filled
+    // from the chunk head, verified by construction (the text IS the chunk's).
+    std::regex rx("SOURCE[\\s_\\-]*(\\d{1,3})|\\[(\\d{1,3})\\](?!\\s*\\()",
+                  std::regex_constants::icase);
+    auto begin = std::sregex_iterator(answer.begin(), answer.end(), rx);
+    for (auto it = begin; it != std::sregex_iterator(); ++it) {
+        std::string digits = (*it)[1].matched ? (*it)[1].str() : (*it)[2].str();
+        int n = atoi(digits.c_str()) + offset;
+        if (n < 1 || n > (int)ev.size()) continue;
+        if (seen.count(n)) continue;
+        seen.insert(n);
+        const AiChunk& ch = *ev[n - 1].chunk;
+        AiSource src;
+        src.id = "SOURCE_" + digits;
+        src.quote = AiSegmentHead(ch.text);
+        src.location = AQL_EXACT;
+        src.verified = true;
+        int pageIdx = ch.pages.empty() ? -1 : ch.pages.front().page;
         src.pageIndex = pageIdx;
         src.page = pageIdx + 1;
         out.push_back(std::move(src));
@@ -553,7 +587,7 @@ static void AiRunReply(const std::string& key, const std::string& input) {
             webSegs = AiSplitPageSegments(webPageText);
             sources = AiResolveWebSources(parsed.sources, parsed.answer, webSegs, webPageText);
         } else if (mode == 0 && !ev.empty()) {
-            sources = AiResolveDocSources(parsed.sources, ev);
+            sources = AiResolveDocSources(parsed.sources, parsed.answer.empty() ? clean : parsed.answer, ev);
         }
         AiEv* e = AiEvMake(AIEV_DONE);
         e->key = key; e->gen = gen;

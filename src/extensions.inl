@@ -1508,8 +1508,12 @@ static bool WebBtnEnabled(int id) {
     switch (id) {
     case WB_BACK: return t && t->canBack;
     case WB_FWD: return t && t->canFwd;
+    // WB_AI rode the fall-through after the toolbar grew its robot: laid out,
+    // drawn greyed, hit-tested - and the click gate (WebBtnEnabled(hit)) ate
+    // every press, so the browser sidechat's own toggle read as a dead button.
+    // It toggles the panel like the reader toolbar's, always armed.
     case WB_RELOAD: case WB_READER: case WB_NEWTAB: case WB_MENU: case WB_SIDE: case WB_EXT:
-    case WB_STAR: case WB_HIST:                      // the star arms with the pill: its own click
+    case WB_STAR: case WB_HIST: case WB_AI:          // the star arms with the pill: its own click
         return true;                                 // answers in WebBarClick, not here
     }
     return false;

@@ -398,8 +398,13 @@ __wv.addEventListener("message", function(e){
       if(nearBottom()) scrollBottom(); }
     break;
   case "answer":
-    if(H){ S.sources={}; var src=m.sources||[];
-      for(var s of src) S.sources[s.id]=s;
+    if(H){ var src=m.sources||[];
+      // merge, not reset: the reset made every EARLIER answer's chips die the
+      // moment the next answer landed - S.sources held only the newest msg's
+      // map. The msgs rebuild path merges across all messages (addMsg); the
+      // live landing now matches it, same-id collisions resolving to the
+      // earliest source exactly as the snapshot rebuild does.
+      for(var s of src) if(!S.sources[s.id]) S.sources[s.id]=s;
       if(H.think){ H.think.remove(); H.think=null; }
       if(H.bubble) H.bubble.remove();
       var el=addMsg("bot", m.text||"", src);
