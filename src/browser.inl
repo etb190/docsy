@@ -949,7 +949,11 @@ static void WebThumbDecode(int id, IStream* st) {
     if (t->thumb) DeleteObject(t->thumb);
     t->thumb = scaled; t->thumbW = TW2; t->thumbH = TH2;
     t->ar = (double)bh / max(1, bw);
-    if (g_webOn && g.side) {
+    if (g_webOn && g_webSide && g.side) {      // only a SHOWN rail repaints: hidden, ws.cw is
+                                               // still 0 and ws.top is empty - the card rect
+                                               // below indexed a vector that never laid out,
+                                               // and the first browser flip died the moment
+                                               // the tab's thumb landed
         WebSideLayout();                           // the card heights are width-fixed, so the
         int ix = -1;                               // rows never move: just the card that
         for (int i2 = 0; i2 < (int)g_wt.size(); i2++)   // arrived repaints - a burst of
@@ -1577,8 +1581,14 @@ static void WebSideLayout() {
 }
 
 static RECT WebSideCardRect(int i, int h) {        // a card's band in rail client coords:
-    if (i < 0 || i >= (int)g_wt.size()) return RECT{ 0, 0, 0, 0 };   // thumb + label + pads, the
-    int padT = (int)(8 * g.dpi), labH = (int)(20 * g.dpi),          // same band the hover paints
+    if (i < 0 || i >= (int)g_wt.size() || i >= (int)ws.top.size())
+        return RECT{ 0, 0, 0, 0 };                 // thumb + label + pads, the same band the
+                                                   // hover paints. ws.top exists only once the
+                                                   // rail laid out (WebSideLayout, ws.cw > 0) -
+                                                   // the index guard rides ws.top's own size, or
+                                                   // a card rect for a never-laid-out rail reads
+                                                   // out of bounds and takes the app down
+    int padT = (int)(8 * g.dpi), labH = (int)(20 * g.dpi),
         padB = (int)(6 * g.dpi), gap = (int)(2 * g.dpi);
     int th = WebSideTH(i);
     int btop = ws.top[i] - padT - ws.scroll, bbot = ws.top[i] + th + gap + labH + padB - ws.scroll;
@@ -1609,7 +1619,7 @@ static void WebSideScrollTo(int y) {
 }
 
 static int WebSideAt(int y) {                      // the tab under a rail y, like SidePageAt
-    for (int i = 0; i < (int)g_wt.size(); i++)
+    for (int i = 0; i < (int)g_wt.size() && i < (int)ws.top.size(); i++)
         if (y >= ws.top[i] && y < ws.top[i] + WebSideTH(i) + (int)(30 * g.dpi)) return i;
     return -1;
 }
