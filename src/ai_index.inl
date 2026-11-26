@@ -476,7 +476,10 @@ static bool AiIndexSave(const AiDocIndex& ix) {
     j += "]}";
     if (!WxWriteFile(AiIndexPath(ix.docId), (const unsigned char*)j.data(), j.size()))
         return false;
-    // the vectors ride their own float32 file (dim + count header)
+    // the vectors ride their own float32 file (dim + count header); its
+    // failure must SPEAK - a silent miss here is a re-embed nobody ordered:
+    // the chunks reload fine and the up-to-date check sees no vectors
+    bool binOk = true;
     if (!ix.vectors.empty() && ix.dim > 0) {
         std::vector<unsigned char> bin;
         unsigned hdr[2] = { (unsigned)ix.dim, (unsigned)ix.vectors.size() };
@@ -490,9 +493,9 @@ static bool AiIndexSave(const AiDocIndex& ix) {
                 // full-size or the loader's need-check rejects the whole index
                 bin.insert(bin.end(), (size_t)ix.dim * sizeof(float), 0);
         }
-        WxWriteFile(AiVecPath(ix.docId), bin.data(), bin.size());
+        binOk = WxWriteFile(AiVecPath(ix.docId), bin.data(), bin.size());
     }
-    return true;
+    return binOk;
 }
 // The build's landing save, off the UI thread. AiIndexSave builds the whole
 // chunk deck as one JSON string - for a real book that is tens of megabytes of

@@ -65,6 +65,8 @@ static std::atomic<bool> g_aiSemCancel{ false };
 static std::atomic<bool> g_aiSemRestart{ false };   // the second press during a drain
                                                     // pre-books the rebuild - the pump
                                                     // starts it when the pass lands
+static bool g_aiSemWant = false;         // a beaker press DURING the chunk build
+                                         // pre-books the pass: the landing starts it
 static std::thread g_aiSemThread;
 static std::set<std::string> g_aiSemRequested;
 static std::string g_aiSemProbeKey;      // model|url the warm-up call already woke
@@ -137,6 +139,14 @@ static std::string AiStatusJson(const char* cmd) {
     j += "},\"semantic\":" + WxJsonStr(g_aiSemStatus);
     j += ",\"semActive\":" + std::string(g_aiSemActive ? "true" : "false");
     j += ",\"semReady\":" + std::string(g_aiSemReadyFlag ? "true" : "false");
+    // semBuilt: the live seat actually holds a finished embedding deck - the
+    // page's beaker reads it to ask before a rebuild discards the saved index
+    bool semBuilt = false;
+    {
+        std::lock_guard<std::mutex> lk(g_aiIdxMtx);
+        semBuilt = g_aiIndex.semComplete && !g_aiIndex.vectors.empty();
+    }
+    j += ",\"semBuilt\":" + std::string(semBuilt ? "true" : "false");
     j += "}";
     return j;
 }

@@ -163,7 +163,12 @@ static void AiPanelMessage(const wchar_t* json) {
         auto it = g_aiCtx.find(g_aiCurKey);
         if (it != g_aiCtx.end()) it->second.cancel = true;
     } else if (t == "semantic") {
-        AiSemanticToggle();
+        // rebuild:true only arrives through the page's confirm dialog - the
+        // wipe of a finished deck is never an accident
+        bool rb = false;
+        const crxk::J* rbv = m.get("rebuild");
+        if (rbv && rbv->t == 'b') rb = rbv->b;
+        AiSemanticToggle(rb);
     } else if (t == "settings-get") {
         AiPanelSend("{\"cmd\":\"settings\",\"settings\":" + AiSettingsJson() + "}");
     } else if (t == "settings-save") {
