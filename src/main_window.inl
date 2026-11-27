@@ -651,7 +651,9 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         if (wp == 4721) {                              // the summary seat's idle prewarm:
             KillTimer(h, 4721);                        // one shot, two and a half seconds
             SumPrewarm();                              // in - the navigator is built and
-            return 0;                                  // loaded before anyone clicks it
+                                                       // loaded before anyone clicks it
+            SumRestoreOpen();   // the last session left it standing: it stands again
+            return 0;
         }
         if (wp == 4722) {                              // the summary overlays' env knock:
             SumEnsureRetry();                          // they ride THIS window now; one

@@ -1941,6 +1941,8 @@ static void SumHideSeat(int seat, bool fromOutside) {
                                                     // streaming into it, and the
                                                     // compositor stops burning
                                                     // frames nobody can see
+    if (seat == SUM_DOC)   // the doc card's stand rides out with the fold: the
+        AiSetSetting("summary.open", "0");   // session restarts it folded then
     SumSavePlacementSeat(seat);
     SumUnhookMouse();
     if (fromOutside) g_sumHideTick[seat] = GetTickCount();
@@ -2118,6 +2120,13 @@ static void SumSearchReveal() {
         SumOpenSeat(SUM_WEB);
     }
 }
+// the session's last word: the navigator left standing comes back standing.
+// The open races the prewarm build by design - SumOpenSeat marks the seat
+// shown and SumEnsureSeat arms it, and the controller's completion shows the
+// card the moment the runtime hands the surface over.
+static void SumRestoreOpen() {
+    if (g.main && AiGetSetting("summary.open", "0") == "1") SumOpenSeat(SUM_DOC);
+}
 // the seats' knock on the engine's door, served on the pump: one timer on the
 // frame answers for both overlays, and stands down when nobody is waiting
 static void SumEnsureRetry() {
@@ -2174,6 +2183,8 @@ static void SumPrewarm() {
 }
 static void SumOpenSeat(int seat) {
     if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
+    if (seat == SUM_DOC)   // the session remembers the doc card's stand: the app
+        AiSetSetting("summary.open", "1");   // restarts the navigator standing again
     g_sumShown[seat] = true;
     SumSeatBoundsRead(seat);        // the saved card lands (clamped) before the render
     SumEnsureSeat(seat);            // no-ops while the webview lives; re-arms it after
