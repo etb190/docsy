@@ -79,9 +79,6 @@ static std::map<std::string, bool> g_sumStand[SUM_SEATS];   // each document's o
                                              // seat - switching decks swaps stands
                                              // instead of folding the card (the key
                                              // is the same doc key SumInitStale uses)
-static std::string SumStandKey(int seat) {
-    return (seat == SUM_DOC) ? AiDocSessionKey(DVF().path) : SumWebDocKey();
-}
 
 // ---- the page text builder: [p. N] anchored, running paragraphs ----
 static std::wstring AiPageTextOf(const TxtPage& pt) {
@@ -1681,6 +1678,11 @@ static std::string SumWebDocKey() {
     std::wstring curUrl = (g_webOn && g_wtCur >= 0 && g_wtCur < (int)g_wt.size())
                           ? g_wt[g_wtCur].url : L"";
     return "web_" + AiSha256Hex16(curUrl);
+}
+// the stand map's key: the same doc identity SumInitStale compares, so a
+// card's stand sticks to the document it was opened on
+static std::string SumStandKey(int seat) {
+    return (seat == SUM_DOC) ? AiDocSessionKey(DVF().path) : SumWebDocKey();
 }
 static void SumSendInitSeat(int seat) {
     AiLoadSettings();
