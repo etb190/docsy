@@ -1918,7 +1918,7 @@ static void WebSessionSave() {
     std::string j = "[";
     for (size_t i = 0; i < g_wt.size() && i < 20; i++) {
         if (i) j += ",";
-        j += WxJsonStr(WxU(g_wt[i].url));
+        j += WxJsonStr(g_wt[i].url);
     }
     j += "]";
     AiSetSetting("web.session.urls", j);
