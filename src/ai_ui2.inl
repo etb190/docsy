@@ -1973,8 +1973,10 @@ static void SumDragTick(long sx, long sy) {
                         min((int)r.top, cbB - (int)(40 * dpi)));
             r.right = r.left + w; r.bottom = r.top + hgt;
         } else {
-            w = max((int)(320 * dpi), min(px + g_sumDragOff[s].x - (int)r.left, (int)cr.right - (int)r.left));
-            hgt = max((int)(220 * dpi), min(py + g_sumDragOff[s].y - (int)r.top, (int)cr.bottom - (int)r.top));
+            w = max((int)(320 * dpi), min(px + (int)g_sumDragOff[s].x - (int)r.left,
+                                       (int)cr.right - (int)r.left));
+            hgt = max((int)(220 * dpi), min(py + (int)g_sumDragOff[s].y - (int)r.top,
+                                        (int)cr.bottom - (int)r.top));
             r.right = (int)r.left + w; r.bottom = (int)r.top + hgt;
         }
         g_sumRect[s] = r;

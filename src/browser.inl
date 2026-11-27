@@ -701,6 +701,8 @@ static void WebBarDraw(HDC dc, int w, int h) {
 // the same endgame, the same hand-off and step-back home
 static void WebPdfFetch(const std::wstring& url, const std::wstring& alt, int ix);
 static int WebTabIdx(unsigned long long id);
+static std::wstring g_webNote;             // the note's word and its take-down beat,
+static unsigned long long g_webNoteUntil;  // defined below - the hand road needs them
 static void WebForceReaderOpen() {
     WebTab* t = WebCur();
     if (!t || t->url.empty()) return;
