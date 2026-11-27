@@ -799,7 +799,8 @@ static void WebEnsurePump() {
     if (!g.main) return;
     bool need = false;
     for (auto& t : g_wt)                   // a navigation in flight rides the pump too: the
-        if (t.captureDue || t.capturePending || t.loading) need = true;   // watchdog lives there,
+        if (t.captureDue || t.capturePending || t.loading
+            || t.pdfCaptureBusy || t.pdfFetching.size()) need = true;   // watchdog lives there,
     if (g_webNoteUntil) need = true;       // and a standing word needs its take-down beat
     if (need) SetTimer(g.main, 7, 200, nullptr);   // and a stuck load is the blackscreen's
     else KillTimer(g.main, 7);                     // last standing shape
@@ -880,6 +881,8 @@ static void WebNavWatchdog() {
 }
 
 static void WebCaptureTab(int id);
+static void WebPdfEscalate(WebTab* t, int ix);    // the net under the capture road; the
+                                                  // definition rides behind WebPdfFetch
 static void WebThumbDecode(int id, IStream* st);
 static void WebSideSync();                        // defined below WebSideCardRect; the
                                                   // NavigationCompleted bridge runs ahead of it
@@ -904,6 +907,12 @@ static void WebCaptureTick() {                     // the main window's pump (ti
     }
     unsigned long long now = GetTickCount64();
     for (auto& t : g_wt) {
+        if (t.pdfCaptureBusy && t.pdfCaptureStart
+            && now - t.pdfCaptureStart > 20000) {      // a capture that never lands frees
+            t.pdfCaptureBusy = false;                  // its own slot and escalates: the
+            WxLogf(L"pdf: the capture stalled 20s - the credentialed fetch takes over");
+            WebPdfEscalate(&t, WebTabIdx(t.id));       // fetch gets one clean try instead
+        }
         if (t.captureDue && now >= t.captureDue && t.web) {
             t.captureDue = 0;
             WebCaptureTab(t.id);
@@ -1164,6 +1173,8 @@ static void WebHandPdfToReader(const std::wstring& path) {   // every road's one
         t.pdfCaptureBusy = false;
         t.pdfFetching.clear();
     }
+    WxLogf(L"pdf: the document hands itself to the reader - %s", path.c_str());
+    g_webNote.clear(); g_webNoteUntil = 0;   // the fetching word's job is done
     WebToggle(false);
     TabOpenInto(false, path);
 }
@@ -1211,22 +1222,39 @@ static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceRe
     }
     size_t cut = mime.find(L';');
     if (cut != std::wstring::npos) mime = mime.substr(0, cut);
+    while (!mime.empty() && (mime.front() == L' ' || mime.front() == L'\t')) mime.erase(mime.begin());
+    while (!mime.empty() && (mime.back() == L' ' || mime.back() == L'\t')) mime.pop_back();
+    bool pdfShaped = WebLooksLikePdf(uri);
+    // the mime the road accepts: the honest two, plus the shells publishers wrap
+    // pdfs in (octet-stream, binary, force-download) and the absent header - for
+    // a pdf-shaped address; the worker's %PDF- check keeps every lie harmless
     bool isPdf = _wcsicmp(mime.c_str(), L"application/pdf") == 0
-              || _wcsicmp(mime.c_str(), L"application/x-pdf") == 0;
+              || _wcsicmp(mime.c_str(), L"application/x-pdf") == 0
+              || (pdfShaped && (_wcsicmp(mime.c_str(), L"application/octet-stream") == 0
+                             || _wcsicmp(mime.c_str(), L"application/binary") == 0
+                             || _wcsicmp(mime.c_str(), L"application/force-download") == 0
+                             || _wcsicmp(mime.c_str(), L"application/download") == 0
+                             || mime.empty()));
+    int status = 0;
+    resp->get_StatusCode(&status);
+    if (isPdf || pdfShaped || t->pdfGuard)             // the roads speak in webext.log:
+        WxLogf(L"pdf: response %s (%d) - %s",          // mime, verdict, address - the next
+               mime.empty() ? L"(no type)" : mime.c_str(), status, uri.c_str());   // report has numbers
     if (!isPdf) {
         // a pdf-shaped address that delivered an ordinary page gets the engine
         // straight back - an HTML answer (a Cloudflare challenge included) is
         // a page the reader must see and solve, WHATEVER status code it carries
-        int status = 0;
-        resp->get_StatusCode(&status);
         bool html = mime.rfind(L"text/html", 0) == 0;
-        if (t->pdfGuard && (html || (status >= 200 && status < 300 && WebLooksLikePdf(uri))))
+        if (html && status >= 200 && status < 300 && uri == t->url) t->pdfSpokeHtml = true;
+        if (t->pdfGuard && (html || (status >= 200 && status < 300 && pdfShaped)))
             WebPdfGuardOff(t, ix);
         return;
     }
     if (t->pdfCaptureBusy) return;                     // one capture at a time per tab
     t->pdfCaptureBusy = true;
+    t->pdfCaptureStart = GetTickCount64();             // the pump's stall clock starts here
     WebPdfGuardOn(t, ix);
+    WxLogf(L"pdf: the capture starts - %s", uri.c_str());
     // the view's GetContent hands the stream over at completion - but the Invoke
     // parameter is an [in] lease that dies the moment the handler returns, so the
     // worker holds its own reference: a captured raw pointer is a use-after-free
@@ -1266,9 +1294,10 @@ static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceRe
                 return S_OK;
             }).Get());
     if (FAILED(gcHr)) {                                // a refused capture frees the slot
+        WxLogf(L"pdf: the capture was refused (hr 0x%08X) - the fetch takes over", (unsigned)gcHr);
         t->pdfCaptureBusy = false;
-        WebPdfGuardOff(t, ix);
-    }
+        WebPdfEscalate(t, ix);                         // and the credentialed fetch gets
+    }                                                  // one clean try, no button press
 }
 
 // The helper button's road: the credentialed out-of-process fetch - the
@@ -1397,6 +1426,28 @@ static void WebPdfFetch(const std::wstring& url, const std::wstring& alt, int ix
     if (FAILED(hr)) t->pdfFetching.clear();            // a refused query frees the slot
 }
 
+// The net under the capture road: when the response event's own bytes never
+// arrive - a cache-served answer, a refused capture, a main document the event
+// never spoke for - the credentialed fetch takes the road BY ITSELF. It is the
+// helper button's exact walk (the session's cookies, the engine's own agent,
+// the offering page as referrer), just without waiting for a button press, and
+// the guard holds the view blank until the endgame lands the document in the
+// reader or the honest blocked word comes home. One flight per address, like
+// every other road - the fetch's own dedup keeps a second caller out.
+static void WebPdfEscalate(WebTab* t, int ix) {
+    if (!t || ix < 0 || ix >= (int)g_wt.size()) return;
+    if (!g_webOn || g_sync) { WebPdfGuardOff(t, ix); return; }
+    std::wstring u = t->url;
+    if (u.empty()) { WebPdfGuardOff(t, ix); return; }
+    if (t->pdfFetching == u) return;                   // a flight is already out: its
+                                                       // endgame owns the view from here
+    WxLogf(L"pdf: the capture came up empty - the credentialed fetch takes the road: %s", u.c_str());
+    WebPdfFetch(u, t->pdfReferrer.empty() ? u : t->pdfReferrer, ix);
+    g_webNote = L"Fetching the PDF for the reader..."; // the word rides until the endgame
+    g_webNoteUntil = GetTickCount64() + 150000;        // rewrites it - the fetch's own
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);   // timeouts bound the wait
+}
+
 static void WebEnsureController(int i) {
     if (!g_wvEnv || i < 0 || i >= (int)g_wt.size()) return;
     WebTab* t = &g_wt[i];
@@ -1497,12 +1548,20 @@ static void WebEnsureController(int i) {
                                         if (SUCCEEDED(op->get_MimeType(&dm)) && dm) { mime = dm; CoTaskMemFree(dm); }
                                         LPWSTR rp = nullptr; std::wstring suggested;
                                         if (SUCCEEDED(a->get_ResultFilePath(&rp)) && rp) { suggested = rp; CoTaskMemFree(rp); }
+                                        LPWSTR du = nullptr; std::wstring dlUrl;
+                                        if (SUCCEEDED(op->get_Uri(&du)) && du) { dlUrl = du; CoTaskMemFree(du); }
                                         bool isPdf = _wcsicmp(mime.c_str(), L"application/pdf") == 0
                                                   || _wcsicmp(mime.c_str(), L"application/x-pdf") == 0
-                                                  || (_wcsicmp(mime.c_str(), L"application/octet-stream") == 0
-                                                      && suggested.size() >= 4
-                                                      && _wcsicmp(suggested.c_str() + suggested.size() - 4, L".pdf") == 0);
+                                                  || ((_wcsicmp(mime.c_str(), L"application/octet-stream") == 0
+                                                       || _wcsicmp(mime.c_str(), L"application/binary") == 0
+                                                       || _wcsicmp(mime.c_str(), L"application/force-download") == 0
+                                                       || _wcsicmp(mime.c_str(), L"application/download") == 0)
+                                                      && ((suggested.size() >= 4
+                                                           && _wcsicmp(suggested.c_str() + suggested.size() - 4, L".pdf") == 0)
+                                                          || WebLooksLikePdf(dlUrl)));
                                         if (isPdf) {
+                                            WxLogf(L"pdf: the download road takes it - %s (%s)",
+                                                   dlUrl.empty() ? suggested.c_str() : dlUrl.c_str(), mime.c_str());
                                             std::wstring target = WebPdfTempPath(
                                                 WebPdfSafeName(suggested.empty() ? std::wstring(L"download.pdf") : suggested));
                                             a->put_Handled(TRUE);
@@ -1560,8 +1619,13 @@ static void WebEnsureController(int i) {
                             // beat before the response headers speak, and any other fresh
                             // navigation stands a stale guard down - nothing is cancelled,
                             // the hand-off catches the document wherever it lands
-                            if (WebLooksLikePdf(navUrl)) WebPdfGuardOn(t, WebTabIdx(id));
-                            else if (t->pdfGuard) WebPdfGuardOff(t, WebTabIdx(id));
+                            t->pdfReferrer = t->url;       // the offering page: the fetch's
+                                                           // referrer, before the url turns over
+                            t->pdfSpokeHtml = false;       // a fresh navigation speaks anew
+                            if (WebLooksLikePdf(navUrl)) {
+                                WxLogf(L"pdf: guard up - %s", navUrl.c_str());
+                                WebPdfGuardOn(t, WebTabIdx(id));
+                            } else if (t->pdfGuard) WebPdfGuardOff(t, WebTabIdx(id));
                             t->loading = true;
                             t->navStart = GetTickCount64();   // the watchdog's clock starts here
                             t->navKicked = false; t->navReloaded = false;
@@ -1588,11 +1652,20 @@ static void WebEnsureController(int i) {
                                 if (a) a->get_WebErrorStatus(&es);
                                 WxLogf(L"nav: failed %s (%s)", t->url.c_str(), WebErrName(es));
                             }
-                            // the guard's stand-down: a navigation that landed without a
-                            // capture reading (no pdf response ever spoke) gives the page
-                            // straight back - a completed pdf keeps its capture busy, and
-                            // the worker's endgame owns the view from there
-                            if (t->pdfGuard && !t->pdfCaptureBusy) WebPdfGuardOff(t, WebTabIdx(id));
+                            // the guard's stand-down, then the net's second strand: a
+                            // navigation that landed pdf-shaped without a capture
+                            // reading gets the credentialed fetch BY ITSELF - the
+                            // event never spoke, or its bytes refused - and the
+                            // fetch's endgame owns the view from there. An html
+                            // verdict for the document itself (a challenge, a shell)
+                            // stands the guard down: the page IS the answer.
+                            int pIx = WebTabIdx(id);
+                            if (navOk && !t->pdfCaptureBusy && !t->pdfSpokeHtml
+                                && pIx == g_wtCur && g_webOn && !g_sync
+                                && WebLooksLikePdf(t->url) && t->pdfFetching != t->url)
+                                WebPdfEscalate(t, pIx);
+                            else if (t->pdfGuard && !t->pdfCaptureBusy)
+                                WebPdfGuardOff(t, pIx);
                             WebPlace();                                // a watchdog kick returns to the card
                             WxPushState(t->web.Get());                 // the store button learns what is installed
                             t->captureDue = GetTickCount64() + 1200;   // let the page settle, then

@@ -677,9 +677,11 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         int ix = WebTabIdx((unsigned long long)wp);
         if (t) t->pdfCaptureBusy = false;
         if (p && p->size() && WebHasPdfHeaderFile(*p)) WebHandPdfToReader(*p);
-        else if (t && ix >= 0) WebPdfGuardOff(t, ix);   // a cache-served answer hid its
-        delete p;                             // bytes: the page stands back up, and the
-        return 0;                             // later roads take their turn
+        else if (t && ix >= 0) {              // a cache-served answer hid its bytes, or the
+            WebPdfEscalate(t, ix);            // stream refused - the credentialed fetch
+        }                                     // takes the road by itself, no button press
+        delete p;
+        return 0;
     }
     case WM_APP + 13: {                       // the pdf download's endgame: a completed
         std::wstring* p = (std::wstring*)lp;  // temp file checked for %PDF- - the reader
@@ -689,18 +691,24 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (t) t->pdfGuard = false;
             WebHandPdfToReader(*p);
         } else if (t && ix >= 0) {
-            WebPdfGuardOff(t, ix);                // refused or interrupted: the page stands
-            if (p) WebPdfNote(L"This link didn't deliver a PDF file - showing the page itself.");
-        }
+            WxLogf(L"pdf: the download road came up empty - the fetch takes over");
+            WebPdfEscalate(t, ix);            // refused or interrupted: the fetch gets one
+        }                                     // clean try with the session's own cookies
         delete p;
         return 0;
     }
-    case WM_APP + 14: {                       // the helper button's fetch is home: %PDF-
-        std::wstring* p = (std::wstring*)lp;  // wins and the reader opens, anything else
-        WebTab* t = WebTabById((unsigned long long)wp);
-        if (t) t->pdfFetching.clear();        // lands the honest blocked word
+    case WM_APP + 14: {                       // the fetch (button or auto net) is home:
+        std::wstring* p = (std::wstring*)lp;  // %PDF- wins and the reader opens, anything
+        WebTab* t = WebTabById((unsigned long long)wp);   // else lands the honest blocked
+        int ix = WebTabIdx((unsigned long long)wp);       // word and the page stands up
+        if (t) t->pdfFetching.clear();
         if (p && p->size() && WebHasPdfHeaderFile(*p)) WebHandPdfToReader(*p);
-        else WebPdfNote(L"This PDF couldn't be fetched - the site blocked the download.");
+        else {
+            WxLogf(L"pdf: the credentialed fetch came home empty - %s",
+                   t && !t->url.empty() ? t->url.c_str() : L"(no url)");
+            if (t && ix >= 0) WebPdfGuardOff(t, ix);
+            WebPdfNote(L"This PDF couldn't be fetched - the site blocked the download.");
+        }
         delete p;
         return 0;
     }

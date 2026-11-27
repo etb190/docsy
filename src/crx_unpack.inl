@@ -48,6 +48,14 @@ struct WebTab {
     std::wstring pdfFetching;              // the helper button's road: the address a
                                            // credentialed fetch is out on (one flight
                                            // per address, like every other road)
+    std::wstring pdfReferrer;              // the page that offered the link: captured at
+                                           // NavigationStarting before the url turns
+                                           // over, it rides the credentialed fetch
+    unsigned long long pdfCaptureStart = 0;   // the capture's clock: the pump frees a
+                                              // stuck slot after 20s and escalates itself
+    bool pdfSpokeHtml = false;             // the response event's verdict for the document
+                                           // itself: an html answer at a pdf-shaped
+                                           // address needs no fetch - the page IS it
     EventRegistrationToken tkPdfR{};               // the response event's watch, one per
                                                    // tab like the rest (the download's
                                                    // state watch rides a static token)
