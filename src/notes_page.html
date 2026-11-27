@@ -92,6 +92,46 @@ function post(o){ try{ window.chrome.webview.postMessage(o); }catch(e){} }
 var $=function(id){ return document.getElementById(id); };
 var S={ cards:[] };
 
+/* ---------------- the plate: the app's own grain, baked here ----------------
+   The opaque plate carries the chrome's own noise tile - the 1:1 JS port of
+   GrainBrush's slot 2 (pdf_render.inl, the #141414 floating surface): splitmix64
+   seed 1337, gaussian speckle around 128 (spread 150), 10% soften, 1.35
+   contrast, the purple lean on 40% of specks at 0.80 mix, at alpha 70/255*0.24.
+   Same seed, same order - the same pixels the frame's other panes lay down. */
+(function(){
+  var S2=256, st=1337n, M64=0xFFFFFFFFFFFFFFFFn;
+  function rnd(){ st=(st+0x9E3779B97F4A7C15n)&M64; var z=st;
+    z=((z^(z>>30n))*0xBF58476D1CE4E5B9n)&M64;
+    z=((z^(z>>27n))*0x94D049BB133111EBn)&M64;
+    return Number((z^(z>>31n))>>11n)/9007199254740992; }
+  var N=S2*S2, raw=new Float64Array(N), lean=new Uint8Array(N), SP=150.0, PI2=Math.PI*2;
+  for(var i=0;i<N;i++){ var u1=1-rnd(), u2=rnd();
+    var v=128+SP*Math.sqrt(-2*Math.log(u1))*Math.cos(PI2*u2);
+    raw[i]=v<0?0:(v>255?255:v); lean[i]=rnd()<0.40?1:0; }
+  var back=[20,20,20], leanC=[217,98,187];          // B,G,R - the C++ layout
+  var Alpha=70/255*0.24, Soften=0.10, Contrast=1.35, LeanMix=0.80;
+  var cv=document.createElement("canvas"); cv.width=S2; cv.height=S2;
+  var cx=cv.getContext("2d"), im=cx.createImageData(S2,S2), d=im.data;
+  for(var y=0;y<S2;y++) for(var x=0;x<S2;x++){
+    var idx=y*S2+x;
+    var around=(raw[((y+S2-1)%S2)*S2+x]+raw[((y+1)%S2)*S2+x]
+               +raw[y*S2+(x+S2-1)%S2]+raw[y*S2+(x+1)%S2])/4;
+    var soft=raw[idx]*(1-Soften)+around*Soften;
+    var shade=128+(soft-128)*Contrast; shade=shade<0?0:(shade>255?255:shade);
+    var speck=[shade,shade,shade];                   // B,G,R
+    if(lean[idx]){ var k=0.35+1.1*shade/255;
+      for(var c=0;c<3;c++){ var lv=leanC[c]*k; lv=lv<0?0:(lv>255?255:lv);
+        speck[c]=shade*(1-LeanMix)+lv*LeanMix; } }
+    var o=idx*4;
+    for(var c=0;c<3;c++){                            // canvas is RGBA: BGR rides reversed
+      d[o+(2-c)]=Math.round(back[c]*(1-Alpha)+speck[c]*Alpha);
+    }
+    d[o+3]=255;
+  }
+  cx.putImageData(im,0,0);
+  document.body.style.backgroundImage="url("+cv.toDataURL()+")";
+})();
+
 /* ---------------- markdown (AiMarkdown.cs's grammar, the cards' dialect) */
 function esc(s){ return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function inlineMd(t){

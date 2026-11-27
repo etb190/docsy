@@ -1897,6 +1897,8 @@ static void SumHideSeat(int seat, bool fromOutside) {
     if (g_sumWeb[seat])   // the digest's reader seat rides out before the fold
         g_sumWeb[seat]->ExecuteScript(L"window.__sumSaveScroll&&window.__sumSaveScroll();", nullptr);
     g_sumShown[seat] = false;
+    g_sumDragMode[seat] = 0;   // a fold mid-gesture ends the gesture: the hook's
+                               // moves would otherwise keep dragging a hidden card
     if (g_sumCtr[seat]) g_sumCtr[seat]->put_IsVisible(FALSE);   // folded = not rendered, not
                                                     // dead: the page keeps its
                                                     // DOM, a generation keeps
@@ -1980,7 +1982,7 @@ static void SumOutsideClick(long sx, long sy) {
         if (g_sumShown[s] && !PtInRect(&g_sumRect[s], pt))
             SumHideSeat(s, true);
 }
-// one tick of a drag or a grip resize: the card follows the cursor, never
+// one tick of a drag or an edge resize: the card follows the cursor, never
 // leaving the frame's client, never under its mins
 static void SumDragTick(long sx, long sy) {
     if (!g.main) return;
@@ -2005,11 +2007,22 @@ static void SumDragTick(long sx, long sy) {
                         min((int)r.top, cbB - (int)(40 * dpi)));
             r.right = r.left + w; r.bottom = r.top + hgt;
         } else {
-            w = max((int)(320 * dpi), min(px + (int)g_sumDragOff[s].x - (int)r.left,
-                                       (int)cr.right - (int)r.left));
-            hgt = max((int)(220 * dpi), min(py + (int)g_sumDragOff[s].y - (int)r.top,
-                                        (int)cr.bottom - (int)r.top));
-            r.right = (int)r.left + w; r.bottom = (int)r.top + hgt;
+            // a directional resize: the page's rim strip names the edge(s) it
+            // grabbed and the delta moves only those. Every edge rides the
+            // gesture-start rect (never the last tick's result), so a clamp
+            // mid-drag cannot compound; the card never leaves the frame's
+            // client and never shrinks under its mins.
+            unsigned e = g_sumDragEdge[s];
+            if (!e) e = 4 | 2;   // an old page's bare grip: bottom-right corner
+            RECT r0 = g_sumDragRect[s];
+            int dx = px - g_sumDragOff[s].x, dy = py - g_sumDragOff[s].y;
+            int L = (int)r0.left, T = (int)r0.top, R = (int)r0.right, B = (int)r0.bottom;
+            int minW = (int)(320 * dpi), minH = (int)(220 * dpi);
+            if (e & 4) R = min((int)cr.right, max(L + minW, R + dx));
+            if (e & 8) L = max(0, min(R - minW, L + dx));
+            if (e & 1) T = max(0, min(B - minH, T + dy));
+            if (e & 2) B = min((int)cr.bottom, max(T + minH, B + dy));
+            r.left = L; r.top = T; r.right = R; r.bottom = B;
         }
         g_sumRect[s] = r;
         SumApplyBounds(s);
@@ -2020,6 +2033,7 @@ static void SumDragEnd() {
     for (int s = 0; s < SUM_SEATS; s++)
         if (g_sumDragMode[s]) {
             g_sumDragMode[s] = 0;
+            g_sumDragEdge[s] = 0;
             SumSavePlacementSeat(s);
         }
 }
@@ -2364,15 +2378,25 @@ static void SumPanelMessage(const wchar_t* json, int seat) {
                                    pt.y - o.y - (int)g_sumRect[seat].top };
         }
     } else if (t == "resize-start") {
-        // the corner grip: the same road as the drag, anchored at the card's
-        // bottom-right corner
+        // the rim's strips (or the corner grip): the page names the edge(s) it
+        // grabbed - the same road as the drag, with the gesture-start rect
+        // stashed so every tick's delta lands on the original seat
         if (seat >= 0 && seat < SUM_SEATS && g_sumShown[seat] && g.main) {
+            unsigned e = 0;
+            const crxk::J* ed = m.get("edge");
+            if (ed && ed->t == 's') {
+                if (ed->s.find('n') != std::string::npos) e |= 1;
+                if (ed->s.find('s') != std::string::npos) e |= 2;
+                if (ed->s.find('e') != std::string::npos) e |= 4;
+                if (ed->s.find('w') != std::string::npos) e |= 8;
+            }
+            g_sumDragEdge[seat] = e;
             g_sumDragMode[seat] = 2;
+            g_sumDragRect[seat] = g_sumRect[seat];
             POINT pt; GetCursorPos(&pt);
             POINT o{ 0, 0 };
             ClientToScreen(g.main, &o);
-            g_sumDragOff[seat] = { (int)g_sumRect[seat].right - (pt.x - o.x),
-                                   (int)g_sumRect[seat].bottom - (pt.y - o.y) };
+            g_sumDragOff[seat] = { pt.x - o.x, pt.y - o.y };   // the gesture's client start
         }
     } else if (t == "word-action") {
         // the word plate's Define and Explain (Avalanche's popup actions): a

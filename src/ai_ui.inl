@@ -110,6 +110,13 @@ static HWND g_sumHwnd[SUM_SEATS] = {};    // each overlay's own surface window, 
                                           // earlier, so the unfold raises the card to the
                                           // top of the sibling order or the page buries it
 static POINT g_sumDragOff[SUM_SEATS] = {}; // the grab's cursor offset from the card
+static unsigned g_sumDragEdge[SUM_SEATS] = {};  // the grabbed resize edge(s): bit 1 N,
+                                                // 2 S, 4 E, 8 W - the page's rim strip
+                                                // names the edge, the tick moves only
+                                                // those
+static RECT g_sumDragRect[SUM_SEATS] = {}; // the card's rect when the resize began - every
+                                           // edge delta rides the gesture's start, so a
+                                           // mid-drag clamp never compounds into a runaway
 static wrl::ComPtr<ICoreWebView2Controller> g_sumCtr[SUM_SEATS];
 static wrl::ComPtr<ICoreWebView2> g_sumWeb[SUM_SEATS];
 static bool g_sumBuilding[SUM_SEATS] = {}, g_sumReady[SUM_SEATS] = {};

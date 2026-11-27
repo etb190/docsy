@@ -11,6 +11,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ilammy/msvc-dev-cmd@v1
+      - name: Rebuild embedded pages
+        shell: bash
+        run: python ci/make_deflate.py
       - name: WebView2 SDK
         shell: cmd
         run: |
