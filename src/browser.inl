@@ -881,8 +881,9 @@ static void WebNavWatchdog() {
 }
 
 static void WebCaptureTab(int id);
-static void WebPdfEscalate(WebTab* t, int ix);    // the net under the capture road; the
-                                                  // definition rides behind WebPdfFetch
+static int WebTabIdx(unsigned long long id);      // the definition rides below, with the
+                                                  // pdf roads: the pump's stall branch and
+static void WebPdfEscalate(WebTab* t, int ix);    // the net's own walk both need it early
 static void WebThumbDecode(int id, IStream* st);
 static void WebSideSync();                        // defined below WebSideCardRect; the
                                                   // NavigationCompleted bridge runs ahead of it
