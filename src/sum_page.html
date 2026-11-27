@@ -27,12 +27,15 @@
   --platebg:rgba(27, 94, 32, 0.70); --plateedge:rgba(15, 61, 20, 0.90);
   --digest:13px;
 }
-/* The card sits on the app's grain field - the host window lays the noise
-   tile down and this page paints nothing behind its rows, exactly like the
-   notes and chat faces (put_DefaultBackgroundColor(0,0,0,0) up top). */
+/* The card carries its own backdrop: a windowed CHILD surface has no DWM
+   redirection of its own, so per-pixel transparency against the frame's
+   paint is not composable - the top-level window era could let the grain
+   show through, the overlay era cannot, and a transparent pixel would
+   expose the frame's stale paint. The plate is #141414, the family's
+   floating-surface base, one step under the card so it still floats. */
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%; overflow:hidden;}
-body{background:transparent; color:var(--text); font-family:"Segoe UI",sans-serif;
+body{background:#141414; color:var(--text); font-family:"Segoe UI",sans-serif;
   font-size:13px; -webkit-user-select:none; user-select:none; cursor:default;}
 ::-webkit-scrollbar{width:10px;}
 ::-webkit-scrollbar-thumb{background:#3a3a3a; border-radius:5px; border:2px solid transparent;
@@ -179,8 +182,8 @@ select option{background-color:#242424; color:#e0e0e0;}
   -webkit-user-select:text; user-select:text; cursor:auto;}
 
 /* The card is an overlay of the main frame, not a window: it rounds, shades
-   and borders itself, and the frame's grain shows around the card. */
-html,body{background:transparent !important;}
+   and borders itself on the plate the body lays down. */
+html,body{background:#141414 !important;}
 #app{position:relative; background:var(--bg); border:1px solid #3a3a3a;
   border-radius:10px; overflow:hidden; box-shadow:0 12px 44px rgba(0,0,0,.55);}
 #grip{position:absolute; right:2px; bottom:2px; width:18px; height:18px; z-index:99;

@@ -1452,8 +1452,10 @@ static void NotesEnsure() {
                 c->get_CoreWebView2(&g_notesWeb);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
-                    c2->put_DefaultBackgroundColor({ 0, 0, 0, 0 });   // the grain field
-                                              // shows through, the pages grid's surface
+                    c2->put_DefaultBackgroundColor({ 255, 0x14, 0x14, 0x14 });   // opaque: a
+                                              // windowed CHILD surface has no DWM redirection
+                                              // of its own, so transparent page pixels expose
+                                              // the frame's stale paint; the page lays its plate
                 EventRegistrationToken tk;
                 g_notesWeb->add_WebMessageReceived(
                     Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
@@ -1787,10 +1789,11 @@ static void SumEnsureSeat(int seat) {
                 c->get_CoreWebView2(&g_sumWeb[seat]);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
-                    c2->put_DefaultBackgroundColor({ 0, 0, 0, 0 });   // the grain field
-                                              // shows through, like the notes and
-                                              // chat faces - the card sits on the
-                                              // app's noise, not on its own paint
+                    c2->put_DefaultBackgroundColor({ 255, 0x14, 0x14, 0x14 });   // opaque: a
+                                              // windowed CHILD surface has no DWM redirection
+                                              // of its own - the top-level window era could
+                                              // let the grain show through, the overlay era
+                                              // cannot; the page carries its own plate
                 EventRegistrationToken tk;
                 g_sumWeb[seat]->add_WebMessageReceived(
                     Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
