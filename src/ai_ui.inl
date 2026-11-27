@@ -98,6 +98,12 @@ static RECT g_sumRect[SUM_SEATS] = {};    // each seat's card in the frame's CLI
                                           // a resize just clamps it back inside)
 static int g_sumDragMode[SUM_SEATS] = {}; // 0 still, 1 move, 2 resize - the low-level
                                           // hook carries the gesture, the pump applies
+static std::vector<HWND> g_sumPre[SUM_SEATS];   // the frame's children before a seat's
+                                                // build - static, not a stack local: the
+                                                // completion is allowed to land long after
+                                                // the builder returned, and a by-reference
+                                                // capture of a stack vector is how a click
+                                                // turns into a crash (build-245's lesson)
 static HWND g_sumHwnd[SUM_SEATS] = {};    // each overlay's own surface window, caught at
                                           // controller birth - the frame's later webviews
                                           // (tabs, the editor) stack ABOVE a sibling born

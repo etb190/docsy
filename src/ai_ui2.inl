@@ -1756,15 +1756,15 @@ static void SumEnsureSeat(int seat) {
     }
     if (g.main) KillTimer(g.main, 4722);
     g_sumBuilding[seat] = true;
-    std::vector<HWND> pre;   // the frame's children before this build: the new surface
+    g_sumPre[seat].clear();  // the frame's children before this build: the new surface
     if (g.main)              // window is whichever handle the completion adds
         EnumChildWindows(g.main, [](HWND h, LPARAM lp) -> BOOL {
-            ((std::vector<HWND>*)lp)->push_back(h); return TRUE; }, (LPARAM)&pre);
+            ((std::vector<HWND>*)lp)->push_back(h); return TRUE; }, (LPARAM)&g_sumPre[seat]);
     g_wvEnv->CreateCoreWebView2Controller(
         g.main,   // the popup is an OVERLAY of the frame, not a window: the
                   // controller rides the frame and moves with it for free
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-            [seat, &pre](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
+            [seat](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
                 g_sumBuilding[seat] = false;
                 if (FAILED(hr) || !c || seat < 0 || seat >= SUM_SEATS) return S_OK;
                 g_sumCtr[seat] = c;
@@ -1774,9 +1774,10 @@ static void SumEnsureSeat(int seat) {
                         ((std::vector<HWND>*)lp)->push_back(h); return TRUE; }, (LPARAM)&post);
                     for (HWND h : post) {
                         bool known = false;
-                        for (HWND p2 : pre) if (p2 == h) { known = true; break; }
+                        for (HWND p2 : g_sumPre[seat]) if (p2 == h) { known = true; break; }
                         if (!known) { g_sumHwnd[seat] = h; break; }
                     }
+                    g_sumPre[seat].clear();   // the diff is done; the slot rests
                 }
                 // born while folded (the prewarm seat): the runtime hands the
                 // controller over not-rendered, and it stays that way until
