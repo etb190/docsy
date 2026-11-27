@@ -34,6 +34,9 @@ struct WebTab {
                                            // controller finishes building
     EventRegistrationToken tkNavS{}, tkNavC{}, tkSrc{}, tkTitle{}, tkHist{}, tkDl{}, tkProc{}, tkNewWin{};
     HBITMAP thumb = nullptr; int thumbW = 0, thumbH = 0; double ar = 0.0;
+    unsigned long long thumbSeq = 0;       // the decode worker's race guard: an older
+                                           // capture's thread may land after a newer
+                                           // one - its pixels must never win
 };
 static std::vector<WebTab> g_wt;
 static unsigned long long g_wtIds = 1;

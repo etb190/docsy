@@ -875,6 +875,19 @@ static void WebNavWatchdog() {
 
 static void WebCaptureTab(int id);
 static void WebThumbDecode(int id, IStream* st);
+static void WebSideSync();                        // defined below WebSideCardRect; the
+                                                  // NavigationCompleted bridge runs ahead of it
+
+static void WebSwitchSyncSoon() {                 // the tab switch's sidebar beat: the rail's
+    if (!g.main) return;                          // highlight repaints on a one-shot 60ms
+    KillTimer(g.main, 4735);                      // timer, and the new tab's own
+    SetTimer(g.main, 4735, 60, nullptr);          // NavigationCompleted snaps it in the
+}                                                 // moment the page actually presents - the
+                                                  // rail changes WITH the view's frame, never
+                                                  // a visible beat ahead of it. The old switch
+                                                  // repainted the rail instantly while the
+                                                  // webview was still waking the tab's hidden
+                                                  // renderer, so the sidebars always led.
 
 static void WebCaptureTick() {                     // the main window's pump (timer 7)
     WebNavWatchdog();                              // the stuck-navigation self-heal rides along
@@ -909,6 +922,19 @@ static void WebCaptureTab(int id) {
     t->web->CapturePreview(COREWEBVIEW2_CAPTURE_PREVIEW_IMAGE_FORMAT_PNG, st.Get(), cb.Get());
 }
 
+// the thumb's raster lands OFF the UI thread now. A full-page capture is a
+// multi-megapixel PNG: Gdiplus' decode plus GetHBITMAP plus the HALFTONE
+// downscale were 100-300ms of synchronous work on the UI thread, and they ran
+// exactly when the rail or the view was mid-move (a resize re-captures, a
+// switch re-captures) - the whole frame seized, then everything landed at once,
+// and the reader read that as the open tearing and glitching. The worker turns
+// the PNG into the 240dp DIB and posts the finished HBITMAP home (WM_APP + 10);
+// the UI thread only stores it and repaints the one card band. No GDI+ object
+// crosses the thread line: the worker owns its Bitmap end to end, the UI owns
+// only the HBITMAP. dpi is copied into the job before the spawn - g.dpi moves.
+struct WebThumbDone { int id; HBITMAP bm; int w, h; double ar; unsigned long long seq; };
+static unsigned long long g_thumbSeq = 0;
+
 static void WebThumbDecode(int id, IStream* st) {
     HGLOBAL hg = nullptr;
     if (FAILED(GetHGlobalFromStream(st, &hg)) || !hg) return;
@@ -921,34 +947,48 @@ static void WebThumbDecode(int id, IStream* st) {
     if (ok) ok = SUCCEEDED(st2->Write(p, (ULONG)sz, &wr)) && wr == sz;
     GlobalUnlock(hg);
     if (!ok) return;
-    LARGE_INTEGER z{}; st2->Seek(z, STREAM_SEEK_SET, nullptr);
-    Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromStream(st2.Get());
-    if (!bm) return;
-    int bw = (int)bm->GetWidth(), bh = (int)bm->GetHeight();
-    if (!bw || !bh) { delete bm; return; }
-    HBITMAP full = nullptr;
-    bm->GetHBITMAP(Gdiplus::Color(255, 0x1c, 0x1c, 0x1c), &full);   // the card's face behind
-    delete bm;
-    if (!full) return;
-    int TW2 = (int)(240 * g.dpi), TH2 = max(1, (int)((long long)TW2 * bh / bw));   // 240dp: the rail
-                              // stretches thumbs past 96dp now, so the capture keeps the headroom
-    BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), TW2, -TH2, 1, 32, BI_RGB };
-    void* bits = nullptr;
-    HBITMAP scaled = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
-    if (scaled) {
-        HDC m = CreateCompatibleDC(nullptr), s = CreateCompatibleDC(nullptr);
-        HGDIOBJ o1 = SelectObject(m, scaled), o2 = SelectObject(s, full);
-        SetStretchBltMode(m, HALFTONE); SetBrushOrgEx(m, 0, 0, nullptr);
-        StretchBlt(m, 0, 0, TW2, TH2, s, 0, 0, bw, bh, SRCCOPY);
-        SelectObject(m, o1); SelectObject(s, o2); DeleteDC(m); DeleteDC(s);
+    auto* job = new WebThumbDone{ id, nullptr, (int)(240 * g.dpi), 0, 0.0, ++g_thumbSeq };
+    std::thread([job, st2]() {
+        LARGE_INTEGER z{}; st2->Seek(z, STREAM_SEEK_SET, nullptr);
+        Gdiplus::Bitmap* bm = Gdiplus::Bitmap::FromStream(st2.Get());
+        int bw = bm ? (int)bm->GetWidth() : 0, bh = bm ? (int)bm->GetHeight() : 0;
+        if (!bw || !bh) { delete bm; delete job; return; }
+        HBITMAP full = nullptr;
+        bm->GetHBITMAP(Gdiplus::Color(255, 0x1c, 0x1c, 0x1c), &full);   // the card's face behind
+        delete bm;
+        if (!full) { delete job; return; }
+        int TW2 = job->w > 0 ? job->w : 240, TH2 = max(1, (int)((long long)TW2 * bh / bw));
+        BITMAPINFO bi{}; bi.bmiHeader = { sizeof(BITMAPINFOHEADER), TW2, -TH2, 1, 32, BI_RGB };
+        void* bits = nullptr;
+        HBITMAP scaled = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (scaled) {
+            HDC m = CreateCompatibleDC(nullptr), s = CreateCompatibleDC(nullptr);
+            HGDIOBJ o1 = SelectObject(m, scaled), o2 = SelectObject(s, full);
+            SetStretchBltMode(m, HALFTONE); SetBrushOrgEx(m, 0, 0, nullptr);
+            StretchBlt(m, 0, 0, TW2, TH2, s, 0, 0, bw, bh, SRCCOPY);
+            SelectObject(m, o1); SelectObject(s, o2); DeleteDC(m); DeleteDC(s);
+        }
+        DeleteObject(full);
+        if (!scaled) { delete job; return; }
+        job->bm = scaled; job->h = TH2; job->ar = (double)bh / max(1, bw);
+        if (g.main) PostMessageW(g.main, WM_APP + 10, 0, (LPARAM)job);
+        else { DeleteObject(scaled); delete job; }   // the frame died mid-flight: nobody
+    }).detach();                                     // is coming to free the DIB for us
+}
+
+static void WebThumbArrive(WebThumbDone* d) {          // WM_APP + 10: the worker's DIB is
+    if (!d) return;                                    // home - the UI thread stores it and
+    WebTab* t = WebTabById(d->id);                     // repaints just the card band. A stale
+    if (!t || d->seq < t->thumbSeq) {                  // seq loses the race to a newer capture
+        if (d->bm) DeleteObject(d->bm);                // of the same tab: the older thread's
+        delete d; return;                              // pixels must never overwrite the newer
     }
-    DeleteObject(full);
-    if (!scaled) return;
-    WebTab* t = WebTabById(id);
-    if (!t) { DeleteObject(scaled); return; }
+    t->thumbSeq = d->seq;
     if (t->thumb) DeleteObject(t->thumb);
-    t->thumb = scaled; t->thumbW = TW2; t->thumbH = TH2;
-    t->ar = (double)bh / max(1, bw);
+    t->thumb = d->bm; t->thumbW = d->w; t->thumbH = d->h;
+    t->ar = d->ar;
+    int id = d->id;                                // the band lookup runs after the job is freed
+    delete d;
     if (g_webOn && g_webSide && g.side) {      // only a SHOWN rail repaints: hidden, ws.cw is
                                                // still 0 and ws.top is empty - the card rect
                                                // below indexed a vector that never laid out,
@@ -1088,6 +1128,10 @@ static void WebEnsureController(int i) {
                             t->captureDue = GetTickCount64() + 1200;   // let the page settle, then
                             WebEnsurePump();                           // the rail gets its thumb
                             WebHistorySync(id);
+                            if (id == (unsigned long long)g_wtCur) {   // the page just presented:
+                                KillTimer(g.main, 4735);               // a pending switch beat
+                                WebSideSync();                         // lands now, not a beat
+                            }                                          // before the view's frame
                             WebRepaintChrome(); WebStripSpin(); WebSyncOmnibox();
                             return S_OK;
                         }).Get(), &t->tkNavC);
@@ -1333,11 +1377,19 @@ static void WebCloseTabAt(int i) {
 static void WebSwitchTo(int i) {
     if (i < 0 || i >= (int)g_wt.size() || i == g_wtCur) return;
     if (g_wtCur >= 0 && g_wtCur < (int)g_wt.size())      // the outgoing tab's thumb refreshes
-        g_wt[g_wtCur].captureDue = GetTickCount64();
+        g_wt[g_wtCur].captureDue = GetTickCount64() + 250;   // AFTER the beat: CapturePreview
+                                                             // against a tab that just went
+                                                             // hidden forces a render burst that
+                                                             // starved the incoming tab's first
+                                                             // present - the rail swapped while
+                                                             // the view froze, one more shape of
+                                                             // the switch lag (WebToggle's parting
+                                                             // thumb already waits 250ms for the
+                                                             // same reason)
     g_wtCur = i;
     WebShowCurrent();
     WebBarLayout();
-    WebSideSync();
+    WebSwitchSyncSoon();
     WebRepaintChrome();
     AiModeChanged();                             // the sidechat follows the focused tab
 }
@@ -1469,11 +1521,13 @@ static void WebCardPaint(HDC dc, int w, int h) {
 }
 
 static void WebRoundWebView() {
-    if (!g.view) return;
-    HWND hw = nullptr;
-    while ((hw = FindWindowExW(g.view, hw, nullptr, nullptr)) != nullptr) {
-        WCHAR cls[32]{};
-        if (!GetClassNameW(hw, cls, 32) || wcsncmp(cls, L"Chrome_WidgetWin", 16) != 0) continue;
+    static bool once = false;                      // the clear is idempotent - nothing ever
+    if (once || !g.view) return;                   // sets a region on the engine's children,
+    once = true;                                   // so re-running it on every layout pass
+    HWND hw = nullptr;                             // only force-invalidated their whole
+    while ((hw = FindWindowExW(g.view, hw, nullptr, nullptr)) != nullptr) {   // surface and
+        WCHAR cls[32]{};                           // flashed the page mid-move - the rail's
+        if (!GetClassNameW(hw, cls, 32) || wcsncmp(cls, L"Chrome_WidgetWin", 16) != 0) continue;   // open read as tear
         SetWindowRgn(hw, nullptr, TRUE);
     }
 }
@@ -1601,11 +1655,11 @@ static void WebSideSync() {                        // the highlight follows the 
     if (!g.side || g_wt.empty()) { ws.cur = -1; return; }
     if (g_wtCur == ws.cur) return;
     ws.cur = g_wtCur;
-    if (g_wtCur >= 0 && ws.docH > 0) {
-        int y0 = ws.top[g_wtCur] - (int)(8 * g.dpi);
-        int y1 = ws.top[g_wtCur] + WebSideTH(g_wtCur) + (int)(28 * g.dpi);
-        if (y1 > ws.scroll + ws.ch) WebSideScrollTo(y0 - (int)(4 * g.dpi));
-        else if (y0 < ws.scroll) WebSideScrollTo(y1 - ws.ch + (int)(4 * g.dpi));
+    if (g_wtCur >= 0 && g_wtCur < (int)ws.top.size() && ws.docH > 0) {   // the index rides
+        int y0 = ws.top[g_wtCur] - (int)(8 * g.dpi);               // ws.top's OWN size: a tab
+        int y1 = ws.top[g_wtCur] + WebSideTH(g_wtCur) + (int)(28 * g.dpi);   // count that
+        if (y1 > ws.scroll + ws.ch) WebSideScrollTo(y0 - (int)(4 * g.dpi));   // outgrew the
+        else if (y0 < ws.scroll) WebSideScrollTo(y1 - ws.ch + (int)(4 * g.dpi));   // last layout
     }
     InvalidateRect(g.side, nullptr, FALSE);
 }

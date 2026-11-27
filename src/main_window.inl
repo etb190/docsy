@@ -641,6 +641,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == 3) { InvalidateCap(h); return 0; }   // hovered-button keepalive repaint
         if (wp == 7) { WebCaptureTick(); return 0; }   // the web thumbs' capture pump
+        if (wp == 4735) {                              // the tab switch's sidebar beat: the
+            KillTimer(h, 4735);                        // rail's highlight lands with the view's
+            WebSideSync(); return 0;                   // frame instead of a beat ahead of it
+        }
         if (wp == 4713) { AiIndexTick(); return 0; }   // the AI index's OCR pump: one
                                                        // page per tick, like the find scan
         if (wp == 4714) { AiRangeTick(); return 0; }   // the AI range extraction's pump
@@ -665,6 +669,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                                                     // browser process for extension operations
     case WM_APP + 9: BmFaviconArrived((std::wstring*)lp); return 0;   // a favicon's thread is home:
                                                     // the bar's faces walk in on the UI thread
+    case WM_APP + 10: WebThumbArrive((WebThumbDone*)lp); return 0;   // the thumb decode worker's
+                                                    // DIB is home: the UI thread only stores it
     case WM_APP + 3: {                        // the drop queue's drain: one document per
         if (!g_dropQ.empty()) {               // message, so the window paints between loads
             std::wstring p = std::move(g_dropQ.front());

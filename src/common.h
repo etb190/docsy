@@ -1618,7 +1618,9 @@ static int g_wtoolHot = -1, g_wtoolDown = -1;
 
 static RECT WebToolBtn(int idx) {
     int bw = (int)(54 * g.dpi);
-    int gap = (int)(4 * g.dpi);
+    int gap = 0;                               // the reader toolbar's own rule: buttons touch,
+                                               // each face's padding makes the gap - 4dp of dead
+                                               // strip between PDF and Editor read as a hole
     int x = (int)(4 * g.dpi) + idx * (bw + gap);
     int y = (int)(2 * g.dpi);
     return RECT{ x, y, x + bw, y + TbBtnH() };
