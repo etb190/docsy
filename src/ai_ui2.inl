@@ -1756,6 +1756,10 @@ static void SumEnsureSeat(int seat) {
     }
     if (g.main) KillTimer(g.main, 4722);
     g_sumBuilding[seat] = true;
+    std::vector<HWND> pre;   // the frame's children before this build: the new surface
+    if (g.main)              // window is whichever handle the completion adds
+        EnumChildWindows(g.main, [](HWND h, LPARAM lp) -> BOOL {
+            ((std::vector<HWND>*)lp)->push_back(h); return TRUE; }, (LPARAM)&pre);
     g_wvEnv->CreateCoreWebView2Controller(
         g.main,   // the popup is an OVERLAY of the frame, not a window: the
                   // controller rides the frame and moves with it for free
@@ -1764,6 +1768,16 @@ static void SumEnsureSeat(int seat) {
                 g_sumBuilding[seat] = false;
                 if (FAILED(hr) || !c || seat < 0 || seat >= SUM_SEATS) return S_OK;
                 g_sumCtr[seat] = c;
+                if (g.main) {   // the surface window: the frame's newest child -
+                    std::vector<HWND> post;   // whatever this build added
+                    EnumChildWindows(g.main, [](HWND h, LPARAM lp) -> BOOL {
+                        ((std::vector<HWND>*)lp)->push_back(h); return TRUE; }, (LPARAM)&post);
+                    for (HWND h : post) {
+                        bool known = false;
+                        for (HWND p2 : pre) if (p2 == h) { known = true; break; }
+                        if (!known) { g_sumHwnd[seat] = h; break; }
+                    }
+                }
                 // born while folded (the prewarm seat): the runtime hands the
                 // controller over not-rendered, and it stays that way until
                 // the unfold says otherwise - the one who shows it says it
@@ -1791,6 +1805,9 @@ static void SumEnsureSeat(int seat) {
                 if (!html.empty()) g_sumWeb[seat]->NavigateToString(html.c_str());
                 SumSeatBoundsRead(seat);   // the saved card lands, clamped inside
                 c->put_Bounds(g_sumRect[seat]);
+                if (g_sumHwnd[seat] && g_sumShown[seat])   // the open raced the build:
+                    SetWindowPos(g_sumHwnd[seat], HWND_TOP, 0, 0, 0, 0,   // raised here too
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                 return S_OK;
             }).Get());
 }
@@ -1845,6 +1862,16 @@ static void SumApplyBounds(int seat) {
     if (seat < 0 || seat >= SUM_SEATS || !g_sumCtr[seat] || !g.main) return;
     g_sumCtr[seat]->put_Bounds(g_sumRect[seat]);
 }
+// the overlay's z-order: the frame's later-built webviews (a tab's page, the
+// editor's scroller) are full-cover siblings stacked ABOVE a surface born
+// earlier - a top-level window never met them, an overlay does. The unfold
+// walks the card back to the top of the sibling order; no activation stolen,
+// the MoveFocus below owns the keys.
+static void SumRaiseSeat(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || !g_sumHwnd[seat] || !g.main) return;
+    SetWindowPos(g_sumHwnd[seat], HWND_TOP, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
 // ---- the popup contract's helpers ----
 // The navigator is a popup of the frame, not a free window: a MOUSE CLICK
 // anywhere inside the frame but outside its borders folds it. Folding is a
@@ -1889,6 +1916,7 @@ static void SumSyncVisible() {
         if (want) {
             SumClampSeat(s);      // a resize keeps the card inside the frame
             SumApplyBounds(s);
+            SumRaiseSeat(s);      // and back above whatever the frame built since
         }
     }
 }
@@ -2057,6 +2085,8 @@ static void SumOpenSeat(int seat) {
                                                // was born folded and never
                                                // auto-follows anything)
         SumApplyBounds(seat);
+        SumRaiseSeat(seat);   // above the frame's later webviews - a tab's page or
+                              // the editor would bury a card born before theirs
         // the page hears keys - Esc, the word plate's Shift - without a click
         // first: a window era's SetForegroundWindow, in overlay terms
         g_sumCtr[seat]->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);

@@ -98,6 +98,11 @@ static RECT g_sumRect[SUM_SEATS] = {};    // each seat's card in the frame's CLI
                                           // a resize just clamps it back inside)
 static int g_sumDragMode[SUM_SEATS] = {}; // 0 still, 1 move, 2 resize - the low-level
                                           // hook carries the gesture, the pump applies
+static HWND g_sumHwnd[SUM_SEATS] = {};    // each overlay's own surface window, caught at
+                                          // controller birth - the frame's later webviews
+                                          // (tabs, the editor) stack ABOVE a sibling born
+                                          // earlier, so the unfold raises the card to the
+                                          // top of the sibling order or the page buries it
 static POINT g_sumDragOff[SUM_SEATS] = {}; // the grab's cursor offset from the card
 static wrl::ComPtr<ICoreWebView2Controller> g_sumCtr[SUM_SEATS];
 static wrl::ComPtr<ICoreWebView2> g_sumWeb[SUM_SEATS];
