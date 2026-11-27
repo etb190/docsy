@@ -1195,7 +1195,7 @@ static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceRe
     WebTab* t = WebTabById(id);
     if (!t || ix != g_wtCur || !a) return;             // the view on screen owns the roads
     wrl::ComPtr<ICoreWebView2WebResourceRequest> req;
-    wrl::ComPtr<ICoreWebView2WebResourceResponse> resp;
+    wrl::ComPtr<ICoreWebView2WebResourceResponseView> resp;
     if (FAILED(a->get_Request(&req)) || FAILED(a->get_Response(&resp)) || !req || !resp) return;
     LPWSTR ur = nullptr;
     std::wstring uri;
@@ -1225,34 +1225,47 @@ static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceRe
         return;
     }
     if (t->pdfCaptureBusy) return;                     // one capture at a time per tab
-    wrl::ComPtr<IStream> st;
-    if (FAILED(resp->get_Content(&st)) || !st) return;
     t->pdfCaptureBusy = true;
     WebPdfGuardOn(t, ix);
-    std::thread([id, st]() {
-        std::wstring path = WebPdfTempPath(WebPdfSafeName(L"document.pdf"));
-        bool ok = false;
-        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (f != INVALID_HANDLE_VALUE) {
-            unsigned char buf[65536];
-            ULONG got = 0;
-            bool err = false;
-            for (;;) {
-                if (FAILED(st->Read(buf, sizeof(buf), &got))) { err = true; break; }
-                if (!got) break;
-                DWORD wr = 0;
-                if (!WriteFile(f, buf, got, &wr, nullptr) || wr != got) { err = true; break; }
-            }
-            CloseHandle(f);
-            ok = !err;
-        }
-        bool pdf = ok && WebHasPdfHeaderFile(path);
-        if (ok && !pdf) DeleteFileW(path.c_str());     // temp litter is harmless but rude
-        if (g.main) PostMessageW(g.main, WM_APP + 12, (WPARAM)id,
-                                 (LPARAM)(pdf ? new std::wstring(path) : (std::wstring*)nullptr));
-        else if (pdf) DeleteFileW(path.c_str());
-    }).detach();
+    // the view's GetContent hands the stream over at completion - the runtime
+    // owns its lifetime to the handler, the same lease the managed layer gets
+    HRESULT gcHr = resp->GetContent(
+        Microsoft::WRL::Callback<ICoreWebView2WebResourceResponseViewGetContentCompletedHandler>(
+            [id](HRESULT hr, IStream* st) -> HRESULT {
+                if (FAILED(hr) || !st) {               // no bytes: the page stands back up,
+                    if (g.main) PostMessageW(g.main, WM_APP + 12, (WPARAM)id, (LPARAM)nullptr);   // the later roads take their turn
+                    return S_OK;
+                }
+                std::thread([id, st]() {
+                    std::wstring path = WebPdfTempPath(WebPdfSafeName(L"document.pdf"));
+                    bool ok = false;
+                    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                    if (f != INVALID_HANDLE_VALUE) {
+                        unsigned char buf[65536];
+                        ULONG got = 0;
+                        bool err = false;
+                        for (;;) {
+                            if (FAILED(st->Read(buf, sizeof(buf), &got))) { err = true; break; }
+                            if (!got) break;
+                            DWORD wr = 0;
+                            if (!WriteFile(f, buf, got, &wr, nullptr) || wr != got) { err = true; break; }
+                        }
+                        CloseHandle(f);
+                        ok = !err;
+                    }
+                    bool pdf = ok && WebHasPdfHeaderFile(path);
+                    if (ok && !pdf) DeleteFileW(path.c_str());     // temp litter is harmless but rude
+                    if (g.main) PostMessageW(g.main, WM_APP + 12, (WPARAM)id,
+                                             (LPARAM)(pdf ? new std::wstring(path) : (std::wstring*)nullptr));
+                    else if (pdf) DeleteFileW(path.c_str());
+                }).detach();
+                return S_OK;
+            }).Get());
+    if (FAILED(gcHr)) {                                // a refused capture frees the slot
+        t->pdfCaptureBusy = false;
+        WebPdfGuardOff(t, ix);
+    }
 }
 
 // The helper button's road: the credentialed out-of-process fetch - the
@@ -1377,7 +1390,7 @@ static void WebPdfFetch(const std::wstring& url, const std::wstring& alt, int ix
                     else if (pdf) DeleteFileW(path.c_str());
                 }).detach();
                 return S_OK;
-            }).Get(), nullptr);
+            }).Get());
     if (FAILED(hr)) t->pdfFetching.clear();            // a refused query frees the slot
 }
 
@@ -1449,7 +1462,7 @@ static void WebEnsureController(int i) {
                     if (SUCCEEDED(t->web->QueryInterface(IID_PPV_ARGS(&w4))) && w4) {
                         w4->add_DownloadStarting(
                             Microsoft::WRL::Callback<ICoreWebView2DownloadStartingEventHandler>(
-                                [](ICoreWebView2*, ICoreWebView2DownloadStartingEventArgs* a) -> HRESULT {
+                                [id](ICoreWebView2*, ICoreWebView2DownloadStartingEventArgs* a) -> HRESULT {
                                     wrl::ComPtr<ICoreWebView2DownloadOperation> op;
                                     if (FAILED(a->get_DownloadOperation(&op)) || !op) return S_OK;
                                     LPWSTR u = nullptr;
@@ -1491,9 +1504,11 @@ static void WebEnsureController(int i) {
                                                 WebPdfSafeName(suggested.empty() ? std::wstring(L"download.pdf") : suggested));
                                             a->put_Handled(TRUE);
                                             a->put_ResultFilePath(target.c_str());
-                                            op->add_StateChanged(
-                                                Microsoft::WRL::Callback<ICoreWebView2StateChangedEventHandler>(
-                                                    [id, target](ICoreWebView2DownloadOperation* o,
+                                            static EventRegistrationToken tkPdfDl;   // one download road
+                                                                                     // at a time: the
+                                            op->add_StateChanged(                    // registration
+                                                Microsoft::WRL::Callback<ICoreWebView2StateChangedEventHandler>(   // overwrites,
+                                                    [id, target](ICoreWebView2DownloadOperation* o,               // nothing unregisters
                                                                  IUnknown*) -> HRESULT {
                                                         COREWEBVIEW2_DOWNLOAD_STATE ds = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
                                                         if (o) o->get_State(&ds);   // the state rides the
@@ -1504,7 +1519,7 @@ static void WebEnsureController(int i) {
                                                             (LPARAM)(ds == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED
                                                                 ? new std::wstring(target) : (std::wstring*)nullptr));
                                                         return S_OK;
-                                                    }).Get(), &t->tkPdfDl);
+                                                    }).Get(), &tkPdfDl);
                                             return S_OK;
                                         }
                                     }

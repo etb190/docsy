@@ -48,8 +48,9 @@ struct WebTab {
     std::wstring pdfFetching;              // the helper button's road: the address a
                                            // credentialed fetch is out on (one flight
                                            // per address, like every other road)
-    EventRegistrationToken tkPdfR{}, tkPdfDl{};   // the response event and the download's
-                                                  // state watch, one per tab like the rest
+    EventRegistrationToken tkPdfR{};               // the response event's watch, one per
+                                                   // tab like the rest (the download's
+                                                   // state watch rides a static token)
 };
 static std::vector<WebTab> g_wt;
 static unsigned long long g_wtIds = 1;
