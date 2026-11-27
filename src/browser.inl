@@ -1909,6 +1909,9 @@ static void WebEnsureEnv() {
 // in browser mode reopens the same pages on the same tab - the session the
 // user closed is the session they meet. The restore path flags itself so the
 // tab births don't each rewrite the deck they are mid-writing.
+static std::string WxJsonStr(const std::wstring& w);   // the JSON string literal; its
+                                                       // definition rides ai_core.inl,
+                                                       // below this module
 static bool g_webRestoring = false;
 static void WebSessionSave() {
     if (g_sync || g_webRestoring || g_wt.empty()) return;
