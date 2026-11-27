@@ -2121,11 +2121,28 @@ static void SumSearchReveal() {
     }
 }
 // the session's last word: the navigator left standing comes back standing.
-// The open races the prewarm build by design - SumOpenSeat marks the seat
-// shown and SumEnsureSeat arms it, and the controller's completion shows the
-// card the moment the runtime hands the surface over.
+// The open races the prewarm build - at two and a half seconds the controller
+// is still mid-flight and SumOpenSeat's show block would be skipped - so the
+// restore only ARMS here; the tick below opens the card through the very door
+// a toolbar click uses, once the controller actually lives.
 static void SumRestoreOpen() {
-    if (g.main && AiGetSetting("summary.open", "0") == "1") SumOpenSeat(SUM_DOC);
+    if (g.main && AiGetSetting("summary.open", "0") == "1")
+        SetTimer(g.main, 4724, 400, nullptr);
+}
+// the restore tick: every 400 ms it waits out the prewarm build, then opens
+// the standing card; a manual open before then (or fifteen misses - the
+// runtime declared absent) takes the timer down
+static void SumRestoreTick() {
+    static int tries = 0;
+    if (g_sumShown[SUM_DOC] || ++tries > 15) {
+        if (g.main) KillTimer(g.main, 4724);
+        return;
+    }
+    if (g_sumCtr[SUM_DOC] && !g_sumBuilding[SUM_DOC]) {
+        tries = 0;
+        if (g.main) KillTimer(g.main, 4724);
+        SumOpenSeat(SUM_DOC);
+    }
 }
 // the seats' knock on the engine's door, served on the pump: one timer on the
 // frame answers for both overlays, and stands down when nobody is waiting

@@ -659,6 +659,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SumEnsureRetry();                          // they ride THIS window now; one
             return 0;                                  // timer answers for both seats
         }
+        if (wp == 4724) {                              // the summary's restore tick: the
+            SumRestoreTick();                          // last session's standing card
+            return 0;                                  // waits out its build, then opens
+        }
         if (wp == 4737) {                              // the summary's buffer kick: the
             KillTimer(h, 4737);                        // prefetch pump re-homed from the
             SumPrefetchKick();                         // window era to the frame's timers

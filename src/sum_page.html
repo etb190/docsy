@@ -635,30 +635,40 @@ function paintAll(){
 
 /* ---- Digest Word Hover Plate (DigestWordHighlightAdorner) + the word popup ---- */
 var plate=$("wordPlate"), pop=$("wordPop"), popAns=$("wordAns");
-S.pin=null;            // the popup's word: the plate holds there while it stands
+S.pin=null;            // the popup's payload {word, ctx}: it stands until a click
+                       // outside folds it or Shift lands somewhere new
 S.lastHover=null;      // {r, word, ctx} - the word the pointer last rested on
 S.selHold=null;        // {r, word, ctx} - the selection the last mousedown snapshotted
-function hideWordPlate(){ if(S.pin) return; plate.style.display="none"; }   // the pin owns it
+function hideWordPlate(){ plate.style.display="none"; }   // hover owns the plate,
+                                                          // popup or no popup
 function closeWordPop(){
   pop.style.display="none"; popAns.style.display="none"; popAns.textContent="";
   S.pin=null; plate.style.display="none";
 }
 function showWordPop(r, word, ctx){
-  S.pin={word:word};
+  S.pin={word:word, ctx:ctx};   // the pin carries its own context: the hover keeps
+                                // wandering, the answer must not follow it
   var wrapR=$("digestWrap").getBoundingClientRect();
-  var x=r.left-wrapR.left, y=r.bottom-wrapR.top+6;
-  var pw=252;
+  var x=r.left-wrapR.left, pw=252;
   pop.style.left=Math.max(4, Math.min(x-30, wrapR.width-pw-6))+"px";
-  pop.style.top=Math.max(4, Math.min(y, wrapR.height-120))+"px";   // a selection's
-                                                                   // union box may end low
-  pop.style.display="flex";
+  pop.style.top="0px"; pop.style.display="flex";   // shown before it leans: the
+                                                   // height is measured, then the
+                                                   // popup floats ABOVE the word
+  var ph=pop.offsetHeight||130;
+  var above=r.top-wrapR.top-6-ph;
+  if(above>=0) pop.style.top=above+"px";           // room above: it hangs there
+  else pop.style.top=(r.bottom-wrapR.top+6)+"px";  // pinned near the digest's top:
+                                                   // below is the only home
   popAns.style.display="none"; popAns.textContent="";
-  plate.style.display="block";                    // the pinned word keeps its plate
+  plate.style.left=(r.left-wrapR.left-2)+"px";     // the plate marks the pin, word
+  plate.style.top=(r.top-wrapR.top-1)+"px";        // or selection alike
+  plate.style.width=(r.width+4)+"px";
+  plate.style.height=(r.height+2)+"px";
+  plate.style.display="block";
 }
-/* The whole selection is a payload too: a live digest selection stands in
-   for the hovered word - Shift over it (or Shift+click it) opens the popup
-   for every word the user marked. The browser's own selection highlight
-   stands in for the word plate. */
+/* The whole selection is a payload too: a live digest selection stands in for
+   the hovered word, and Shift+click opens the popup for every word the user
+   marked. The browser's own selection highlight stands in for the plate. */
 function selPayload(sel){
   if(!sel || sel.isCollapsed || !sel.rangeCount) return null;
   if(!$("digest").contains(sel.anchorNode)) return null;
@@ -671,15 +681,10 @@ function selPayload(sel){
 }
 window.addEventListener("keydown", function(e){
   if(e.key==="Escape"){ closeWordPop(); return; }
-  if(e.key!=="Shift") return;
-  document.body.classList.add("shifthover");   // the hand: Shift makes the digest
-                                               // read as grabbable
-  if(e.repeat || S.generating || S.busy || S.pin) return;
-  var tg=e.target&&e.target.tagName?e.target.tagName.toLowerCase():"";
-  if(tg==="input"||tg==="select"||tg==="textarea") return;
-  var sel=window.getSelection();                // Shift over a live selection opens
-  var p=(sel&&!sel.isCollapsed&&sel.rangeCount) ? selPayload(sel)||S.lastHover : S.lastHover;
-  if(p) showWordPop(p.r, p.word, p.ctx);
+  if(e.key==="Shift")
+    document.body.classList.add("shifthover");   // the hand: Shift makes the digest
+                                                 // read as grabbable - the popup
+                                                 // itself waits for Shift+click
 });
 window.addEventListener("keyup", function(e){
   if(e.key==="Shift") document.body.classList.remove("shifthover");
@@ -697,7 +702,8 @@ document.addEventListener("mousedown", function(e){
 function wordAct(act){
   if(!S.pin) return;
   post({type:"word-action", action:act, word:S.pin.word,
-        context:S.lastHover?S.lastHover.ctx:""});
+        context:S.pin.ctx||""});   // the pin's context, not the hover's - the
+                                   // pointer has usually moved on by now
   popAns.textContent="\u2026"; popAns.style.display="block";
 }
 $("wpDefine").addEventListener("click", function(){ wordAct("define"); });
@@ -730,15 +736,14 @@ wireResize("rz-ne","ne"); wireResize("rz-nw","nw");
 wireResize("rz-se","se"); wireResize("rz-sw","sw");
 wireResize("grip","se");
 function updateWordHighlight(e){
-  if(S.pin) return;                                // the popup's word owns the plate
   if(S.generating){ closeWordPop(); hideWordPlate(); return; }
   var sel=window.getSelection();
   if(sel && !sel.isCollapsed && sel.rangeCount && $("digest").contains(sel.anchorNode)){
     // the selection is the payload: the plate stands down (the browser's own
-    // highlight shows what is marked) and Shift offers the popup for it all
+    // highlight shows what is marked) and Shift+click offers the popup for it
     hideWordPlate();
     var p=selPayload(sel);
-    if(p && e.shiftKey && !S.busy){ S.lastHover=p; showWordPop(p.r, p.word, p.ctx); }
+    if(p) S.lastHover=p;
     return;
   }
   var x=e.clientX, y=e.clientY;
@@ -802,18 +807,16 @@ function updateWordHighlight(e){
   if(ctx.length>300) ctx=ctx.slice(0,300);
   S.lastHover={r:{left:r.left,top:r.top,bottom:r.bottom,right:r.right,width:r.width,height:r.height},
                word:str.slice(wStart,wEnd), ctx:ctx};
-  if(e.shiftKey) showWordPop(S.lastHover.r, S.lastHover.word, S.lastHover.ctx);
 }
 $("digest").addEventListener("mousemove", updateWordHighlight);
 $("digest").addEventListener("click", function(e){
-  // Shift+click anchors the popup over the clicked word - or over the whole
-  // selection the mousedown snapshotted before the click collapsed it -
-  // whichever order the Shift came in
-  if(e.shiftKey && !S.generating && !S.busy && !S.pin){
+  // Shift+click (and only that) re-pins the popup: over the clicked word, or
+  // over the whole selection the mousedown snapshotted before the click
+  // collapsed it - and it moves wherever Shift lands next
+  if(e.shiftKey && !S.generating && !S.busy){
     var p=S.selHold||S.lastHover;
-    if(p){ S.lastHover=p; showWordPop(p.r, p.word, p.ctx); }   // lastHover rides the
-  }                                                            // payload: Define and
-                                                               // Explain ground in it
+    if(p) showWordPop(p.r, p.word, p.ctx);
+  }
 });
 $("digest").addEventListener("mouseleave", hideWordPlate);
 $("digest").addEventListener("scroll", function(){ closeWordPop(); requestScrollSave(); });
