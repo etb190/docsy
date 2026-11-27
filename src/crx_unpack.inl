@@ -37,6 +37,19 @@ struct WebTab {
     unsigned long long thumbSeq = 0;       // the decode worker's race guard: an older
                                            // capture's thread may land after a newer
                                            // one - its pixels must never win
+    bool pdfGuard = false;                 // the early visual guard (Avalanche's roads): a
+                                           // pdf-shaped navigation hides the view a beat
+                                           // before the headers speak, and every exit -
+                                           // stand-down, failed capture, the hand-off -
+                                           // brings it back
+    bool pdfCaptureBusy = false;           // one response capture at a time per tab: the
+                                           // worker that drains the response event's own
+                                           // stream while Chromium keeps writing it
+    std::wstring pdfFetching;              // the helper button's road: the address a
+                                           // credentialed fetch is out on (one flight
+                                           // per address, like every other road)
+    EventRegistrationToken tkPdfR{}, tkPdfDl{};   // the response event and the download's
+                                                  // state watch, one per tab like the rest
 };
 static std::vector<WebTab> g_wt;
 static unsigned long long g_wtIds = 1;

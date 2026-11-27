@@ -498,6 +498,197 @@ static void WxAddFolderFresh(const std::wstring& dir, const std::wstring& id,
         WxAddFolder(dir, done);
     }
 }
+
+// ---- the bundled pdf helper (Avalanche's avalanche-pdf, ported) ----------
+// The PDF hand-off's last line of defense, riding the store install's own
+// machinery: a two-kilobyte content-script extension that wears an "open in
+// docsy" button on every pdf-shaped page - Chromium's own viewer, the
+// <embed>/<object> documents academic publishers serve inside HTML shells,
+// the /doi/pdf/ and getpdf routes repositories use - and posts the document's
+// address (the embedded one first, the wrapper's second) to the host, which
+// fetches it with the session's own cookies and hands it to the reader. The
+// automatic roads (the response event, the download) catch most documents;
+// this button catches what they cannot see from the outside. The three files
+// ship as literals here and are written to the extensions root on first run,
+// then added to the profile exactly like any unpacked folder.
+static const char kWxPdfManifest[] = R"json({
+  "manifest_version": 3,
+  "name": "Docsy PDF Helper",
+  "version": "1.0",
+  "description": "Opens PDFs in Docsy reader",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["button.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": []
+}
+)json";
+
+static const char kWxPdfContent[] = R"js(function() {
+  function check() {
+  // Detect PDF pages - Chromium's native viewer AND the embedded/wrapped
+  // documents academic publishers serve. Wiley (and its kin) answer the PDF
+  // route with an HTML shell that carries the document in an iframe, embed or
+  // object, so the PAGE answers text/html while the document is still on it.
+  const isPdf = document.contentType === 'application/pdf'
+    || window.location.href.startsWith('chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/')
+    || document.querySelector('embed[type="application/pdf"]') !== null
+    || document.querySelector('iframe[src$=".pdf"]') !== null
+    || document.querySelector('iframe[src*="application/pdf"]') !== null
+    || document.querySelector('object[type="application/pdf"]') !== null
+    || document.querySelector('object[data$=".pdf"]') !== null;
+
+  // Publisher viewer wrappers: the address itself is pdf-shaped even when the
+  // page is an HTML shell around the document - Wiley's /doi/pdf/... among
+  // them, plus the getpdf and viewcontent.cgi routes repositories use.
+  const urlPath = window.location.pathname.toLowerCase();
+  const urlLooksPdf = urlPath.endsWith('.pdf')
+    || /\/pdf\//.test(urlPath)
+    || /\/doi\/pdf\//.test(urlPath)
+    || /getpdf/i.test(urlPath)
+    || /viewcontent\.cgi/i.test(urlPath);
+
+  if (!isPdf && !urlLooksPdf) return;
+  if (document.getElementById('docsy-open-btn')) return;
+
+  const btn = document.createElement('button');
+  btn.id = 'docsy-open-btn';
+  btn.title = 'Open in docsy';
+  btn.innerHTML = '<svg viewBox="0 0 24 24" width="28" height="28" fill="white">' +
+    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/>' +
+    '<polyline points="14,2 14,8 20,8" fill="none" stroke="white" stroke-width="1.5"/>' +
+    '<line x1="9" y1="13" x2="15" y2="13" stroke="rgba(30,165,76,1)" stroke-width="1.5"/>' +
+    '<line x1="9" y1="17" x2="13" y2="17" stroke="rgba(30,165,76,1)" stroke-width="1.5"/>' +
+    '</svg>';
+
+  btn.addEventListener('click', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // A wrapper page keeps the real document in its own element: prefer the
+    // embedded address over the wrapper's, so the host's fetch carries the
+    // bytes and not the shell. Only a real http(s) address is worth
+    // preferring - a blob or an empty src is nothing the host can fetch.
+    function httpish(u) {
+      return typeof u === 'string' && (u.indexOf('http://') === 0 || u.indexOf('https://') === 0);
+    }
+    var pdfUrl = window.location.href;
+    var embed = document.querySelector('embed[type="application/pdf"]');
+    var iframe = document.querySelector('iframe[src$=".pdf"]')
+              || document.querySelector('iframe[src*="pdf"]');
+    var obj = document.querySelector('object[type="application/pdf"]')
+           || document.querySelector('object[data$=".pdf"]');
+
+    if (embed && httpish(embed.src)) pdfUrl = embed.src;
+    else if (iframe && httpish(iframe.src)) pdfUrl = iframe.src;
+    else if (obj && httpish(obj.data)) pdfUrl = obj.data;
+
+    // The host's own road first: the message hands the address to the app,
+    // which fetches it with the browser's own credentials and hands the
+    // document to the reader - no navigation, no download, no reroute.
+    // The anchor download that ran before is the fallback now: on some sites
+    // the anchor turned into a navigation the view never chose (an about:blank
+    // shell among them) and nothing was ever handed over. The page's own
+    // address rides along as "alt" - the host gives it a turn when the first
+    // candidate answers with anything but a document.
+    try {
+      window.chrome.webview.postMessage(JSON.stringify({
+        type: 'docsy-open-pdf',
+        url: pdfUrl,
+        alt: window.location.href
+      }));
+      return;
+    } catch(err) { /* no host behind this page - the anchor rides alone */ }
+
+    try {
+      var a = document.createElement('a');
+      a.href = pdfUrl;
+      a.download = 'document.pdf';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch(err2) {}
+  });
+
+  document.body.appendChild(btn);
+  }
+
+  // Wiley's viewer loads its iframe long after document_idle: the whole check
+  // runs again on a delay, so the button appears once the document's shell
+  // exists. Re-running is safe - the guard above keeps one button alive.
+  setTimeout(check, 2000);
+  setTimeout(check, 5000);
+})();
+)js";
+
+static const char kWxPdfCss[] = R"css(#docsy-open-btn {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 2147483647;
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, #1ea54c 0%, #158a3e 100%);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3), 0 2px 4px rgba(0,0,0,0.2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, opacity 0.3s ease;
+  opacity: 0.85;
+  padding: 0;
+}
+#docsy-open-btn:hover {
+  transform: scale(1.1);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+  opacity: 1;
+}
+#docsy-open-btn:active { transform: scale(0.95); }
+#docsy-open-btn svg { pointer-events: none; }
+)css";
+
+static bool WxPutFile(const std::wstring& path, const char* data, size_t n) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD wr = 0;
+    BOOL ok = WriteFile(f, data, (DWORD)n, &wr, nullptr) && wr == (DWORD)n;
+    CloseHandle(f);
+    return ok;
+}
+
+static void WxEnsurePdfHelper() {
+    static bool tried = false;
+    if (tried) return;
+    tried = true;
+    std::wstring dir = WxRoot() + L"\\docsy-pdf";
+    std::wstring mf = dir + L"\\manifest.json";
+    WIN32_FIND_DATAW fd{};
+    HANDLE fh = FindFirstFileW(mf.c_str(), &fd);
+    bool have = fh != INVALID_HANDLE_VALUE;
+    if (have) FindClose(fh);
+    if (!have) {                                   // first run, or the reader swept the
+        WxMkdirs(dir);                             // temp root: the helper writes itself
+        bool ok = WxPutFile(mf, kWxPdfManifest, sizeof(kWxPdfManifest) - 1)
+               && WxPutFile(dir + L"\\content.js", kWxPdfContent, sizeof(kWxPdfContent) - 1)
+               && WxPutFile(dir + L"\\button.css", kWxPdfCss, sizeof(kWxPdfCss) - 1);
+        WxLogf(L"pdf helper: files %s -> %s", ok ? L"written" : L"FAILED", dir.c_str());
+        if (!ok) return;
+    }
+    // the add rides WxAddFolderFresh: the profile remembers extensions across
+    // runs, and a repeat add of a remembered folder answers INVALID_STATE -
+    // the store install's own stale-registration net clears the road first
+    WxAddFolderFresh(dir, L"docsy-pdf", [](HRESULT hr, ICoreWebView2BrowserExtension* ext) {
+        WxLogf(L"pdf helper: AddBrowserExtension -> 0x%08lX", (unsigned long)hr);
+        (void)ext;                                 // no toolbar row: the helper's button is
+    });                                            // the page's own, not a pill
+}
 static void WxNotifyTabs();
 static void CALLBACK WxVerifyTimer(HWND, UINT, UINT_PTR, DWORD);
 static void CALLBACK WxInitWatchTimer(HWND, UINT, UINT_PTR, DWORD);

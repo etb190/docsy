@@ -671,6 +671,39 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                                                     // the bar's faces walk in on the UI thread
     case WM_APP + 10: WebThumbArrive((WebThumbDone*)lp); return 0;   // the thumb decode worker's
                                                     // DIB is home: the UI thread only stores it
+    case WM_APP + 12: {                       // the pdf response capture's endgame: the
+        std::wstring* p = (std::wstring*)lp;  // worker drained the response stream - the
+        WebTab* t = WebTabById((unsigned long long)wp);
+        int ix = WebTabIdx((unsigned long long)wp);
+        if (t) t->pdfCaptureBusy = false;
+        if (p && p->size() && WebHasPdfHeaderFile(*p)) WebHandPdfToReader(*p);
+        else if (t && ix >= 0) WebPdfGuardOff(t, ix);   // a cache-served answer hid its
+        delete p;                             // bytes: the page stands back up, and the
+        return 0;                             // later roads take their turn
+    }
+    case WM_APP + 13: {                       // the pdf download's endgame: a completed
+        std::wstring* p = (std::wstring*)lp;  // temp file checked for %PDF- - the reader
+        WebTab* t = WebTabById((unsigned long long)wp);
+        int ix = WebTabIdx((unsigned long long)wp);
+        if (p && WebHasPdfHeaderFile(*p)) {
+            if (t) t->pdfGuard = false;
+            WebHandPdfToReader(*p);
+        } else if (t && ix >= 0) {
+            WebPdfGuardOff(t, ix);                // refused or interrupted: the page stands
+            if (p) WebPdfNote(L"This link didn't deliver a PDF file - showing the page itself.");
+        }
+        delete p;
+        return 0;
+    }
+    case WM_APP + 14: {                       // the helper button's fetch is home: %PDF-
+        std::wstring* p = (std::wstring*)lp;  // wins and the reader opens, anything else
+        WebTab* t = WebTabById((unsigned long long)wp);
+        if (t) t->pdfFetching.clear();        // lands the honest blocked word
+        if (p && p->size() && WebHasPdfHeaderFile(*p)) WebHandPdfToReader(*p);
+        else WebPdfNote(L"This PDF couldn't be fetched - the site blocked the download.");
+        delete p;
+        return 0;
+    }
     case WM_APP + 3: {                        // the drop queue's drain: one document per
         if (!g_dropQ.empty()) {               // message, so the window paints between loads
             std::wstring p = std::move(g_dropQ.front());

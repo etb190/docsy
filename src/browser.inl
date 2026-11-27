@@ -790,11 +790,17 @@ static void WebGo(const std::wstring& what) {
     t->web->Navigate(url.c_str());
 }
 
+// the pdf roads' transient word (Avalanche's status strip, drawn in the view
+// itself): a fetch in flight, a site that refused, a link that never was one
+static std::wstring g_webNote;
+static unsigned long long g_webNoteUntil = 0;
+
 static void WebEnsurePump() {
     if (!g.main) return;
     bool need = false;
     for (auto& t : g_wt)                   // a navigation in flight rides the pump too: the
         if (t.captureDue || t.capturePending || t.loading) need = true;   // watchdog lives there,
+    if (g_webNoteUntil) need = true;       // and a standing word needs its take-down beat
     if (need) SetTimer(g.main, 7, 200, nullptr);   // and a stuck load is the blackscreen's
     else KillTimer(g.main, 7);                     // last standing shape
 }
@@ -891,6 +897,11 @@ static void WebSwitchSyncSoon() {                 // the tab switch's sidebar be
 
 static void WebCaptureTick() {                     // the main window's pump (timer 7)
     WebNavWatchdog();                              // the stuck-navigation self-heal rides along
+    if (g_webNoteUntil && GetTickCount64() >= g_webNoteUntil) {   // the word's take-down beat
+        g_webNote.clear();
+        g_webNoteUntil = 0;
+        if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+    }
     unsigned long long now = GetTickCount64();
     for (auto& t : g_wt) {
         if (t.captureDue && now >= t.captureDue && t.web) {
@@ -1021,6 +1032,355 @@ static void WebHistorySync(int id) {
     if (g.bar) InvalidateRect(g.bar, nullptr, FALSE);   // or not, the pill's fill follows the URL
 }
 
+// ---- The PDF hand-off (Avalanche's roads, ported verbatim) ---------------
+// A PDF is never rendered by the browser, and the browser's own request is
+// never cancelled: navigations and downloads ride Chromium's network stack,
+// the only one a CDN or an anti-bot wall will trust. A download streams
+// through DownloadStarting straight into the temp area; a document the engine
+// receives itself is copied out of the response event's own stream; the
+// bundled helper's button hands the embedded document's address over for the
+// pages the host cannot see into - and every candidate is checked for a real
+// %PDF- header before the reader ever hears of it. Every road ends at
+// WebHandPdfToReader, which is the window's HideWebPane + OpenInNewTab: the
+// browser steps aside and the document opens as an ordinary reader tab.
+
+static int WebTabIdx(unsigned long long id) {
+    for (int i = 0; i < (int)g_wt.size(); i++)
+        if (g_wt[i].id == id) return i;
+    return -1;
+}
+
+static void WebPdfGuardOn(WebTab* t, int ix) {         // the early visual guard: blank the
+    if (!t || t->pdfGuard) return;                     // view the beat before the headers
+    t->pdfGuard = true;                                // speak - a false positive costs one
+    if (t->ctr && ix == g_wtCur) t->ctr->put_IsVisible(FALSE);   // blanked moment, never a
+}                                                      // cancelled navigation
+
+static void WebPdfGuardOff(WebTab* t, int ix) {        // the guard's stand-down: only the
+    if (!t) return;                                    // view on screen gets its paint back
+    t->pdfGuard = false;
+    if (t->ctr && ix == g_wtCur && g_webOn) t->ctr->put_IsVisible(TRUE);
+}
+
+static void WebPdfNote(const wchar_t* msg) {
+    g_webNote = msg;
+    g_webNoteUntil = GetTickCount64() + 3000;
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+}
+
+// The pdf-shaped-address test for the EARLY VISUAL GUARD only - it never
+// cancels a navigation. A .pdf suffix or a publisher route (/pdf/<id>, a
+// trailing /pdf, /getpdf?id=) raises the guard a beat before the response
+// headers speak; a false positive costs one blanked moment, and the
+// header-driven stand-down gives the page straight back.
+static bool WebLooksLikePdf(const std::wstring& url) {
+    if (url.size() < 9) return false;
+    wchar_t sch = 0;
+    if (_wcsnicmp(url.c_str(), L"http://", 7) == 0) sch = 1;
+    else if (_wcsnicmp(url.c_str(), L"https://", 8) == 0) sch = 1;
+    if (!sch) return false;
+    std::wstring path = url;
+    {   size_t q = path.find_first_of(L"?#");          // the query never names the document
+        if (q != std::wstring::npos) path = path.substr(0, q);
+    }
+    size_t at = path.find(L"/", 8);                    // the authority ends at the first slash
+    path = at != std::wstring::npos ? path.substr(at) : L"/";
+    for (auto& c : path) c = (wchar_t)towlower(c);
+    if (path.size() >= 4 && path.compare(path.size() - 4, 4, L".pdf") == 0) return true;
+    std::vector<std::wstring> segs;
+    {   std::wstring cur;
+        for (wchar_t c : path) {
+            if (c == L'/') { if (!cur.empty()) segs.push_back(cur); cur.clear(); }
+            else cur += c;
+        }
+        if (!cur.empty()) segs.push_back(cur);
+    }
+    for (size_t i = 0; i + 1 < segs.size(); i++)
+        if (segs[i] == L"pdf") return true;            // /pdf/<id>
+    if (!segs.empty() && (segs.back() == L"pdf" || segs.back() == L"getpdf")) return true;
+    return false;
+}
+
+// A real PDF announces itself with %PDF- within the first kilobyte - the
+// window every reader scans. Anything else never reaches the reader.
+static bool WebHasPdfHeaderFile(const std::wstring& path) {
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    unsigned char head[1024];
+    DWORD got = 0;
+    ReadFile(f, head, sizeof(head), &got, nullptr);
+    CloseHandle(f);
+    if (got < 100) return false;
+    int scan = (int)(got >= 1024 ? 1024u : got) - 4;
+    for (int i = 0; i < scan; i++)
+        if (head[i] == 0x25 && head[i + 1] == 0x50 && head[i + 2] == 0x44
+            && head[i + 3] == 0x46 && head[i + 4] == 0x2D)
+            return true;
+    return false;
+}
+
+static std::wstring WebPdfTempDir() {
+    wchar_t tmp[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, tmp);
+    std::wstring dir = (n ? std::wstring(tmp) : std::wstring(L".")) + L"docsy_pdf";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+static std::wstring WebPdfSafeName(std::wstring name) {   // a path or a bare URL reduced
+    size_t q = name.find_first_of(L"?#");                 // to a clean file name
+    if (q != std::wstring::npos) name = name.substr(0, q);
+    size_t at = name.find_last_of(L"/\\");
+    if (at != std::wstring::npos) name = name.substr(at + 1);
+    if (name.empty()) name = L"document.pdf";
+    static const wchar_t* bad = L"<>:\"|?*";
+    for (wchar_t& c : name) if (c < 32 || wcschr(bad, c)) c = L'_';
+    if (name.size() > 64) name = name.substr(name.size() - 64);   // keep the tail: the
+                                                                  // extension usually lives there
+    if (name.size() < 4 || _wcsicmp(name.c_str() + name.size() - 4, L".pdf") != 0) name += L".pdf";
+    return name;
+}
+
+static std::wstring WebPdfTempPath(const std::wstring& name) {   // one unique temp file
+    std::wstring dir = WebPdfTempDir();
+    std::wstring p = dir + L"\\" + name;
+    wchar_t alt[MAX_PATH];
+    for (int k = 2; k < 1000; k++) {
+        HANDLE f = CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) { CloseHandle(f); return p; }
+        swprintf_s(alt, L"%s\\%04d_%s", dir.c_str(), k, name.c_str());
+        p = alt;
+    }
+    return p;
+}
+
+static void WebHandPdfToReader(const std::wstring& path) {   // every road's one ending:
+    if (!g_webOn || g_sync) return;                          // the pane steps aside, and the
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;   // document is an
+    for (auto& t : g_wt) {                                   // ordinary reader tab
+        t.pdfGuard = false;
+        t.pdfCaptureBusy = false;
+        t.pdfFetching.clear();
+    }
+    WebToggle(false);
+    TabOpenInto(false, path);
+}
+
+// A tiny quoted-string field out of the helper's JSON word - no parser, one
+// shape the content script posts, {"type":"docsy-open-pdf","url":...,"alt":...}
+static std::wstring WebJsonField(const std::wstring& m, const wchar_t* key) {
+    std::wstring needle = std::wstring(L"\"") + key + L"\"";
+    size_t p = m.find(needle);
+    if (p == std::wstring::npos) return L"";
+    p = m.find(L'"', p + needle.size());               // the colon, then the opening quote
+    if (p == std::wstring::npos) return L"";
+    p++;
+    std::wstring out;
+    while (p < m.size() && m[p] != L'"') {
+        if (m[p] == L'\\' && p + 1 < m.size()) { p++; }  // the escapes a URL can carry ride raw
+        out += m[p++];
+    }
+    return out;
+}
+
+// The response event's capture: the engine's own bytes are already copying -
+// the worker drains the stream the runtime hands the handler, while Chromium
+// keeps writing it, and the endgame lands on the UI thread (WM_APP + 12) to
+// check the header, hand the reader the document or give the page straight
+// back. Cache-served answers hide their bytes; the later roads fetch for those.
+static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceResponseReceivedEventArgs* a) {
+    int ix = WebTabIdx(id);
+    WebTab* t = WebTabById(id);
+    if (!t || ix != g_wtCur || !a) return;             // the view on screen owns the roads
+    wrl::ComPtr<ICoreWebView2WebResourceRequest> req;
+    wrl::ComPtr<ICoreWebView2WebResourceResponse> resp;
+    if (FAILED(a->get_Request(&req)) || FAILED(a->get_Response(&resp)) || !req || !resp) return;
+    LPWSTR ur = nullptr;
+    std::wstring uri;
+    if (SUCCEEDED(req->get_Uri(&ur)) && ur) { uri = ur; CoTaskMemFree(ur); }
+    std::wstring mime;
+    wrl::ComPtr<ICoreWebView2HttpResponseHeaders> rh;
+    if (SUCCEEDED(resp->get_Headers(&rh)) && rh) {
+        BOOL has = FALSE;
+        if (SUCCEEDED(rh->Contains(L"Content-Type", &has)) && has) {
+            LPWSTR ct = nullptr;
+            if (SUCCEEDED(rh->GetHeader(L"Content-Type", &ct)) && ct) { mime = ct; CoTaskMemFree(ct); }
+        }
+    }
+    size_t cut = mime.find(L';');
+    if (cut != std::wstring::npos) mime = mime.substr(0, cut);
+    bool isPdf = _wcsicmp(mime.c_str(), L"application/pdf") == 0
+              || _wcsicmp(mime.c_str(), L"application/x-pdf") == 0;
+    if (!isPdf) {
+        // a pdf-shaped address that delivered an ordinary page gets the engine
+        // straight back - an HTML answer (a Cloudflare challenge included) is
+        // a page the reader must see and solve, WHATEVER status code it carries
+        int status = 0;
+        resp->get_StatusCode(&status);
+        bool html = mime.rfind(L"text/html", 0) == 0;
+        if (t->pdfGuard && (html || (status >= 200 && status < 300 && WebLooksLikePdf(uri))))
+            WebPdfGuardOff(t, ix);
+        return;
+    }
+    if (t->pdfCaptureBusy) return;                     // one capture at a time per tab
+    wrl::ComPtr<IStream> st;
+    if (FAILED(resp->get_Content(&st)) || !st) return;
+    t->pdfCaptureBusy = true;
+    WebPdfGuardOn(t, ix);
+    std::thread([id, st]() {
+        std::wstring path = WebPdfTempPath(WebPdfSafeName(L"document.pdf"));
+        bool ok = false;
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f != INVALID_HANDLE_VALUE) {
+            unsigned char buf[65536];
+            ULONG got = 0;
+            bool err = false;
+            for (;;) {
+                if (FAILED(st->Read(buf, sizeof(buf), &got))) { err = true; break; }
+                if (!got) break;
+                DWORD wr = 0;
+                if (!WriteFile(f, buf, got, &wr, nullptr) || wr != got) { err = true; break; }
+            }
+            CloseHandle(f);
+            ok = !err;
+        }
+        bool pdf = ok && WebHasPdfHeaderFile(path);
+        if (ok && !pdf) DeleteFileW(path.c_str());     // temp litter is harmless but rude
+        if (g.main) PostMessageW(g.main, WM_APP + 12, (WPARAM)id,
+                                 (LPARAM)(pdf ? new std::wstring(path) : (std::wstring*)nullptr));
+        else if (pdf) DeleteFileW(path.c_str());
+    }).detach();
+}
+
+// The helper button's road: the credentialed out-of-process fetch - the
+// session's own cookies (HttpOnly ones too, straight from the engine's own
+// jar), the engine's real user agent, the page that offered the link as
+// referrer, and honest decompression. Sites that answered an anonymous fetch
+// with a wall answer this one the way they answer the user's own browser.
+static void WebPdfFetch(const std::wstring& url, const std::wstring& alt, int ix) {
+    if (ix < 0 || ix >= (int)g_wt.size()) return;
+    WebTab* t = &g_wt[ix];
+    if (!t->web) return;
+    if (t->pdfFetching == url) return;                 // one flight per address
+    t->pdfFetching = url;
+    WebPdfNote(L"Fetching the PDF for the reader...");
+    std::wstring ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+    {   wrl::ComPtr<ICoreWebView2Settings> stg;        // the engine's own UA, when it has one
+        wrl::ComPtr<ICoreWebView2Settings2> stg2;
+        if (SUCCEEDED(t->web->get_Settings(&stg)) && stg
+            && SUCCEEDED(stg->QueryInterface(IID_PPV_ARGS(&stg2))) && stg2) {
+            LPWSTR u = nullptr;
+            if (SUCCEEDED(stg2->get_UserAgent(&u)) && u && *u) { ua = u; CoTaskMemFree(u); }
+            else if (u) CoTaskMemFree(u);
+        }
+    }
+    wrl::ComPtr<ICoreWebView2_2> w2;
+    if (FAILED(t->web->QueryInterface(IID_PPV_ARGS(&w2))) || !w2) { t->pdfFetching.clear(); return; }
+    wrl::ComPtr<ICoreWebView2CookieManager> cm;
+    if (FAILED(w2->get_CookieManager(&cm)) || !cm) { t->pdfFetching.clear(); return; }
+    unsigned long long tid = t->id;
+    HWND main = g.main;
+    HRESULT hr = cm->GetCookies(url.c_str(),
+        Microsoft::WRL::Callback<ICoreWebView2GetCookiesCompletedHandler>(
+            [tid, url, alt, ua, main](HRESULT hr, ICoreWebView2CookieList* list) -> HRESULT {
+                std::wstring cookieHdr;
+                if (SUCCEEDED(hr) && list) {
+                    UINT32 n = 0;
+                    if (SUCCEEDED(list->get_Count(&n)))
+                        for (UINT32 i = 0; i < n; i++) {
+                            wrl::ComPtr<ICoreWebView2Cookie> ck;
+                            if (FAILED(list->GetValueAtIndex(i, &ck)) || !ck) continue;
+                            LPWSTR nm = nullptr, vl = nullptr;
+                            std::wstring a, b;
+                            if (SUCCEEDED(ck->get_Name(&nm)) && nm) { a = nm; CoTaskMemFree(nm); }
+                            if (SUCCEEDED(ck->get_Value(&vl)) && vl) { b = vl; CoTaskMemFree(vl); }
+                            if (!a.empty()) {
+                                if (!cookieHdr.empty()) cookieHdr += L"; ";
+                                cookieHdr += a + L"=" + b;
+                            }
+                        }
+                }
+                // the fetch itself lives on a worker: WinHttp, the store download's
+                // own road, carrying the cookies and the referrer
+                std::thread([tid, url, alt, ua, cookieHdr, main]() {
+                    bool ok = false;
+                    std::wstring path;
+                    wchar_t host[256] = L"", pth[2048] = L"", extra[2048] = L"";
+                    URL_COMPONENTS uc{};
+                    uc.dwStructSize = sizeof uc;
+                    uc.lpszHostName = host; uc.dwHostNameLength = 256;
+                    uc.lpszUrlPath = pth; uc.dwUrlPathLength = 2048;
+                    uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 2048;
+                    if (WinHttpCrackUrl(url.c_str(), 0, 0, &uc)) {
+                        HINTERNET s = WinHttpOpen(ua.c_str(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                                  WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+                        if (s) {
+                            WinHttpSetTimeouts(s, 10000, 10000, 30000, 120000);
+                            HINTERNET c = WinHttpConnect(s, host, uc.nPort, 0);
+                            if (c) {
+                                std::wstring full = std::wstring(pth) + extra;
+                                HINTERNET rq = WinHttpOpenRequest(c, L"GET", full.c_str(), nullptr,
+                                    WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                    uc.nScheme == INTERNET_SCHEME_HTTPS ? WINHTTP_FLAG_SECURE : 0);
+                                if (rq) {
+                                    DWORD redir = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+                                    WinHttpSetOption(rq, WINHTTP_OPTION_REDIRECT_POLICY, &redir, sizeof redir);
+                                    DWORD dec = WINHTTP_DECOMPRESSION_FLAG_GZIP | WINHTTP_DECOMPRESSION_FLAG_DEFLATE;
+                                    WinHttpSetOption(rq, WINHTTP_OPTION_DECOMPRESSION, &dec, sizeof dec);
+                                    std::wstring hdrs = L"Accept: application/pdf,application/octet-stream,*/*;q=0.8\r\n";
+                                    hdrs += L"User-Agent: " + ua + L"\r\n";
+                                    if (_wcsnicmp(alt.c_str(), L"https://", 8) == 0)
+                                        hdrs += L"Referer: " + alt + L"\r\n";   // the page that offered the link
+                                    if (!cookieHdr.empty()) hdrs += L"Cookie: " + cookieHdr + L"\r\n";
+                                    if (WinHttpSendRequest(rq, hdrs.c_str(), (DWORD)hdrs.size(),
+                                                           WINHTTP_NO_REQUEST_DATA, 0, 0, 0)
+                                        && WinHttpReceiveResponse(rq, nullptr)) {
+                                        DWORD code = 0, sz = sizeof code;
+                                        WinHttpQueryHeaders(rq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                                            WINHTTP_HEADER_NAME_BY_INDEX, &code, &sz,
+                                                            WINHTTP_NO_HEADER_INDEX);
+                                        if (code >= 200 && code < 300) {
+                                            path = WebPdfTempPath(WebPdfSafeName(url));
+                                            HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                                                   CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+                                            if (f != INVALID_HANDLE_VALUE) {
+                                                ok = true;
+                                                for (;;) {
+                                                    DWORD avail = 0;
+                                                    if (!WinHttpQueryDataAvailable(rq, &avail)) { ok = false; break; }
+                                                    if (!avail) break;
+                                                    std::vector<unsigned char> chunk(avail);
+                                                    DWORD got = 0;
+                                                    if (!WinHttpReadData(rq, chunk.data(), avail, &got)) { ok = false; break; }
+                                                    DWORD wr = 0;
+                                                    if (got && (!WriteFile(f, chunk.data(), got, &wr, nullptr) || wr != got)) { ok = false; break; }
+                                                }
+                                                CloseHandle(f);
+                                                if (!ok) DeleteFileW(path.c_str());
+                                            }
+                                        }
+                                    }
+                                    WinHttpCloseHandle(rq);
+                                }
+                                WinHttpCloseHandle(c);
+                            }
+                            WinHttpCloseHandle(s);
+                        }
+                    }
+                    bool pdf = ok && !path.empty() && WebHasPdfHeaderFile(path);
+                    if (ok && !pdf) DeleteFileW(path.c_str());
+                    if (main) PostMessageW(main, WM_APP + 14, (WPARAM)tid,
+                                           (LPARAM)(pdf ? new std::wstring(path) : (std::wstring*)nullptr));
+                    else if (pdf) DeleteFileW(path.c_str());
+                }).detach();
+                return S_OK;
+            }).Get(), nullptr);
+    if (FAILED(hr)) t->pdfFetching.clear();            // a refused query frees the slot
+}
+
 static void WebEnsureController(int i) {
     if (!g_wvEnv || i < 0 || i >= (int)g_wt.size()) return;
     WebTab* t = &g_wt[i];
@@ -1043,17 +1403,40 @@ static void WebEnsureController(int i) {
                                                                                     // engine's spin-up reads as the
                                                                                     // card's own surface, never as
                                                                                     // Chromium's white or black glass
+                {   // the built-in viewer's toolbar is pinned off: a document that still
+                    // reaches the viewer is the hand-off's failure, not a promised
+                    // surface - the reader is the only PDF face this app shows
+                    wrl::ComPtr<ICoreWebView2Settings> stg;
+                    if (SUCCEEDED(t->web->get_Settings(&stg)) && stg) {
+                        wrl::ComPtr<ICoreWebView2Settings7> stg7;
+                        if (SUCCEEDED(stg->QueryInterface(IID_PPV_ARGS(&stg7))) && stg7)
+                            stg7->put_HiddenPdfToolbarItems(COREWEBVIEW2_PDF_TOOLBAR_ITEMS_NONE);
+                    }
+                }
                 t->web->AddScriptToExecuteOnDocumentCreated(kWxStoreScript, nullptr);   // the store's "Add to Docsy"
+                WxEnsurePdfHelper();               // the bundled pdf helper rides once per session:
+                                                   // the "open in docsy" button is the profile's own
                 {   EventRegistrationToken tkm;
                     t->web->add_WebMessageReceived(
                         Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-                            [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* a) -> HRESULT {
-                                LPWSTR src = nullptr; std::wstring from;
-                                if (SUCCEEDED(a->get_Source(&src)) && src) { from = src; CoTaskMemFree(src); }
-                                if (!WxStoreHost(from, nullptr)) return S_OK;      // only the store may ask
+                            [id](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* a) -> HRESULT {
                                 LPWSTR msg = nullptr;
                                 if (SUCCEEDED(a->TryGetWebMessageAsString(&msg)) && msg) {
                                     std::wstring m = msg; CoTaskMemFree(msg);
+                                    if (m.find(L"docsy-open-pdf") != std::wstring::npos) {
+                                        // the bundled helper's word: the floating button hands
+                                        // the document's address over (the embedded one first,
+                                        // the page's own as alt) and the credentialed fetch
+                                        // takes it from here - any page may ask, the reader
+                                        // renders the verdict itself
+                                        std::wstring url = WebJsonField(m, L"url");
+                                        std::wstring alt = WebJsonField(m, L"alt");
+                                        if (!url.empty()) WebPdfFetch(url, alt, WebTabIdx(id));
+                                        return S_OK;
+                                    }
+                                    LPWSTR src = nullptr; std::wstring from;
+                                    if (SUCCEEDED(a->get_Source(&src)) && src) { from = src; CoTaskMemFree(src); }
+                                    if (!WxStoreHost(from, nullptr)) return S_OK;      // only the store may ask
                                     if (m.rfind(L"docsy-install:", 0) == 0) WxInstall(m.substr(14));
                                 }
                                 return S_OK;
@@ -1084,10 +1467,63 @@ static void WebEnsureController(int i) {
                                         if (!sid.empty()) {
                                             a->put_Handled(TRUE); a->put_Cancel(TRUE);
                                             WxInstall(sid);
+                                            return S_OK;
+                                        }
+                                    }
+                                    // the pdf download road (Avalanche's OnDownloadStarting):
+                                    // a document the engine delivers as a download streams into
+                                    // the temp area under our handling - no Edge flyout for a
+                                    // file the reader is about to eat - and a completed %PDF-
+                                    // file hands itself to the reader, while a refused one is
+                                    // deleted and the page stands back up
+                                    {
+                                        LPWSTR dm = nullptr; std::wstring mime;
+                                        if (SUCCEEDED(op->get_MimeType(&dm)) && dm) { mime = dm; CoTaskMemFree(dm); }
+                                        LPWSTR rp = nullptr; std::wstring suggested;
+                                        if (SUCCEEDED(a->get_ResultFilePath(&rp)) && rp) { suggested = rp; CoTaskMemFree(rp); }
+                                        bool isPdf = _wcsicmp(mime.c_str(), L"application/pdf") == 0
+                                                  || _wcsicmp(mime.c_str(), L"application/x-pdf") == 0
+                                                  || (_wcsicmp(mime.c_str(), L"application/octet-stream") == 0
+                                                      && suggested.size() >= 4
+                                                      && _wcsicmp(suggested.c_str() + suggested.size() - 4, L".pdf") == 0);
+                                        if (isPdf) {
+                                            std::wstring target = WebPdfTempPath(
+                                                WebPdfSafeName(suggested.empty() ? std::wstring(L"download.pdf") : suggested));
+                                            a->put_Handled(TRUE);
+                                            a->put_ResultFilePath(target.c_str());
+                                            op->add_StateChanged(
+                                                Microsoft::WRL::Callback<ICoreWebView2StateChangedEventHandler>(
+                                                    [id, target](ICoreWebView2DownloadOperation* o,
+                                                                 IUnknown*) -> HRESULT {
+                                                        COREWEBVIEW2_DOWNLOAD_STATE ds = COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS;
+                                                        if (o) o->get_State(&ds);   // the state rides the
+                                                        if (ds == COREWEBVIEW2_DOWNLOAD_STATE_IN_PROGRESS) return S_OK;   // sender
+                                                        // the endgame rides the UI thread: the header
+                                                        // check, the hand-off, the stand-down
+                                                        if (g.main) PostMessageW(g.main, WM_APP + 13, (WPARAM)id,
+                                                            (LPARAM)(ds == COREWEBVIEW2_DOWNLOAD_STATE_COMPLETED
+                                                                ? new std::wstring(target) : (std::wstring*)nullptr));
+                                                        return S_OK;
+                                                    }).Get(), &t->tkPdfDl);
+                                            return S_OK;
                                         }
                                     }
                                     return S_OK;
                                 }).Get(), &t->tkDl);
+                    }
+                }
+                {   // the pdf capture road (Avalanche's WebResourceResponseReceived): the
+                    // engine's own response event - the headers speak here first, and a
+                    // document answer's bytes copy straight out of the response's own
+                    // stream while Chromium is still writing them
+                    wrl::ComPtr<ICoreWebView2_2> w2;
+                    if (SUCCEEDED(t->web->QueryInterface(IID_PPV_ARGS(&w2))) && w2) {
+                        w2->add_WebResourceResponseReceived(
+                            Microsoft::WRL::Callback<ICoreWebView2WebResourceResponseReceivedEventHandler>(
+                                [id](ICoreWebView2*, ICoreWebView2WebResourceResponseReceivedEventArgs* a) -> HRESULT {
+                                    WebPdfResponseSeen(id, a);
+                                    return S_OK;
+                                }).Get(), &t->tkPdfR);
                     }
                 }
                 t->web->add_NavigationStarting(
@@ -1096,7 +1532,18 @@ static void WebEnsureController(int i) {
                             WebTab* t = WebTabById(id);
                             if (!t) return S_OK;
                             LPWSTR nu = nullptr;
-                            if (SUCCEEDED(a->get_Uri(&nu)) && nu) { WxLogf(L"nav: start %s", nu); CoTaskMemFree(nu); }
+                            std::wstring navUrl;
+                            if (SUCCEEDED(a->get_Uri(&nu)) && nu) {
+                                navUrl = nu;
+                                WxLogf(L"nav: start %s", nu);
+                                CoTaskMemFree(nu);
+                            }
+                            // the early visual guard: a pdf-shaped address blanks the view a
+                            // beat before the response headers speak, and any other fresh
+                            // navigation stands a stale guard down - nothing is cancelled,
+                            // the hand-off catches the document wherever it lands
+                            if (WebLooksLikePdf(navUrl)) WebPdfGuardOn(t, WebTabIdx(id));
+                            else if (t->pdfGuard) WebPdfGuardOff(t, WebTabIdx(id));
                             t->loading = true;
                             t->navStart = GetTickCount64();   // the watchdog's clock starts here
                             t->navKicked = false; t->navReloaded = false;
@@ -1123,6 +1570,11 @@ static void WebEnsureController(int i) {
                                 if (a) a->get_WebErrorStatus(&es);
                                 WxLogf(L"nav: failed %s (%s)", t->url.c_str(), WebErrName(es));
                             }
+                            // the guard's stand-down: a navigation that landed without a
+                            // capture reading (no pdf response ever spoke) gives the page
+                            // straight back - a completed pdf keeps its capture busy, and
+                            // the worker's endgame owns the view from there
+                            if (t->pdfGuard && !t->pdfCaptureBusy) WebPdfGuardOff(t, WebTabIdx(id));
                             WebPlace();                                // a watchdog kick returns to the card
                             WxPushState(t->web.Get());                 // the store button learns what is installed
                             t->captureDue = GetTickCount64() + 1200;   // let the page settle, then
@@ -1518,6 +1970,37 @@ static void WebCardPaint(HDC dc, int w, int h) {
         FillRect(dc, &vr, pb); DeleteObject(pb);
     }
     if (g_webFail) { WebFailCard(dc, w, h); return; }
+    if (!g_webNote.empty()) {                      // the pdf roads' word: one dark chip
+        int nh = (int)(34 * g.dpi);                // near the card's foot, gone in 3s
+        SetBkMode(dc, TRANSPARENT);
+        HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+        RECT mc{ 0, 0, 0, 0 };
+        DrawTextW(dc, g_webNote.c_str(), -1, &mc, DT_CALCRECT | DT_SINGLELINE);
+        int nw = (int)(mc.right - mc.left) + (int)(28 * g.dpi);
+        int ny = h - nh - (int)(18 * g.dpi);
+        RECT nr{ max(0, (w - nw) / 2), max(0, ny), max(0, (w - nw) / 2) + nw, max(0, ny) + nh };
+        {
+            Gdiplus::Graphics gs(dc);
+            gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath p;
+            float rr = (float)(8 * g.dpi);
+            float fx = (float)nr.left, fy = (float)nr.top;
+            float fw = (float)(nr.right - nr.left), fh = (float)(nr.bottom - nr.top);
+            p.AddArc(fx, fy, 2 * rr, 2 * rr, 180, 90);
+            p.AddArc(fx + fw - 2 * rr, fy, 2 * rr, 2 * rr, 270, 90);
+            p.AddArc(fx + fw - 2 * rr, fy + fh - 2 * rr, 2 * rr, 2 * rr, 0, 90);
+            p.AddArc(fx, fy + fh - 2 * rr, 2 * rr, 2 * rr, 90, 90);
+            p.CloseFigure();
+            Gdiplus::SolidBrush fill(Gdiplus::Color(235, 0x1c, 0x1c, 0x1c));
+            Gdiplus::Pen edge(Gdiplus::Color(255, 0x3a, 0x3a, 0x3a), 1.0f);
+            gs.FillPath(&fill, &p);
+            gs.DrawPath(&edge, &p);
+        }
+        SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
+        RECT tr{ nr.left + (int)(14 * g.dpi), nr.top, nr.right - (int)(14 * g.dpi), nr.bottom };
+        DrawTextW(dc, g_webNote.c_str(), -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, of);
+    }
 }
 
 static void WebRoundWebView() {
