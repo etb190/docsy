@@ -171,8 +171,9 @@ static void WebStripPaint(HDC dc, int w, int h) {
     SetBkMode(dc, TRANSPARENT);
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr, L"\uE81C", L"\uE8BD"
-    };                                                 // reload and star ride beside the field; hist and the AI robot at far right
+        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr, L"\uE81C", L"\uE8F1", L"\uE8BD"
+    };                                                 // reload and star ride beside the field; hist, the
+                                                       // summary navigator and the AI robot at far right
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
         if (i == WB_RELOAD || i == WB_STAR) continue;  // custom tiles outside the field
@@ -495,6 +496,9 @@ static void WebBarLayout() {
     g_wbR[WB_MENU] = { 0, 0, 0, 0 };               // the 3-dot is gone: the toolbar keeps only
     g_wbR[WB_HIST] = { mx - d, cy, mx, cy + d };   // history button at the far right
     mx -= pitch;
+    g_wbR[WB_SUM] = { mx - d, cy, mx, cy + d };    // the summary navigator beside it:
+                                                   // the browser's own web seat
+    mx -= pitch;
     g_wbR[WB_AI] = { mx - d, cy, mx, cy + d };     // the AI robot beside it: the panel's
                                                    // toggle in browser mode, like the
                                                    // reader toolbar's and editor's
@@ -705,6 +709,7 @@ static void WebBarClick(int id) {
         return;
     case WB_NEWTAB: WebNewTab(L"https://www.google.com/", true); return;
     case WB_HIST: HistDropdownToggle(); return;
+    case WB_SUM: SumToggle(1); return;             // the browser's own web summary seat
     case WB_AI: AiChatToggle(); return;            // the browser sidechat's own toggle
     case WB_STAR: BmStarClick(); return;           // the pill's star: saved page back off the list,
                                                    // stranger to the bubble (bookmarks.inl)
@@ -1178,6 +1183,16 @@ static void WebHandPdfToReader(const std::wstring& path) {   // every road's one
     g_webNote.clear(); g_webNoteUntil = 0;   // the fetching word's job is done
     WebToggle(false);
     TabOpenInto(false, path);
+    // the browser steps back on its own: the document left it, and the road
+    // home is the one the user came on - the page that offered the link. The
+    // next flip to the browser lands on the search results, not on a dead
+    // viewer tab, and the browsing continues from where the click began.
+    WebTab* back = WebCur();
+    if (back && back->web) {
+        BOOL canBack = FALSE;
+        if (SUCCEEDED(back->web->get_CanGoBack(&canBack)) && canBack)
+            back->web->GoBack();
+    }
 }
 
 // A tiny quoted-string field out of the helper's JSON word - no parser, one
@@ -1449,6 +1464,10 @@ static void WebPdfEscalate(WebTab* t, int ix) {
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);   // timeouts bound the wait
 }
 
+static void WebSessionSave();                      // the session's deck write; the
+                                                   // definition rides behind WebNewTab,
+                                                   // the NavigationCompleted bridge
+                                                   // below calls it on every landing
 static void WebEnsureController(int i) {
     if (!g_wvEnv || i < 0 || i >= (int)g_wt.size()) return;
     WebTab* t = &g_wt[i];
@@ -1645,6 +1664,8 @@ static void WebEnsureController(int i) {
                             if (a) a->get_IsSuccess(&navOk);
                             if (navOk) {
                                 WxLogf(L"nav: done %s", t->url.c_str());
+                                WebSessionSave();    // the deck keeps the address the tab
+                                                     // settled on: a relaunch reopens it
                                 HistAdd(t->url, t->title);
                                 std::wstring host = BmHostOf(t->url);
                                 if (!host.empty()) EnsureHostFavicon(host);
@@ -1882,6 +1903,25 @@ static void WebEnsureEnv() {
     }
 }
 
+// ---- the browser's session: the tabs and their addresses ride settings.json ----
+// Every tab opening, closing, switch and committed navigation writes the deck
+// (capped at 20 tabs) plus the front tab's index, and a launch that comes back
+// in browser mode reopens the same pages on the same tab - the session the
+// user closed is the session they meet. The restore path flags itself so the
+// tab births don't each rewrite the deck they are mid-writing.
+static bool g_webRestoring = false;
+static void WebSessionSave() {
+    if (g_sync || g_webRestoring || g_wt.empty()) return;
+    std::string j = "[";
+    for (size_t i = 0; i < g_wt.size() && i < 20; i++) {
+        if (i) j += ",";
+        j += WxJsonStr(WxU(g_wt[i].url));
+    }
+    j += "]";
+    AiSetSetting("web.session.urls", j);
+    AiSetSetting("web.session.cur", std::to_string(g_wtCur < 0 ? 0 : g_wtCur));
+}
+
 static void WebNewTab(std::wstring url, bool makeCurrent) {
     bool band0 = WebBandH() > 0;
     WebTab t; t.id = g_wtIds++; t.url = url; t.pending = url;
@@ -1897,6 +1937,7 @@ static void WebNewTab(std::wstring url, bool makeCurrent) {
     WebSideLayout();
     WebRepaintChrome();
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+    WebSessionSave();                // the deck remembers the tab the moment it exists
 }
 
 static void WebCloseTabAt(int i) {
@@ -1916,6 +1957,7 @@ static void WebCloseTabAt(int i) {
     WebBarLayout();
     WebSideLayout(); WebSideSync();
     WebRepaintChrome();
+    WebSessionSave();                // the closed tab is gone from the deck the moment it dies
 }
 
 static void WebSwitchTo(int i) {
@@ -1936,6 +1978,41 @@ static void WebSwitchTo(int i) {
     WebSwitchSyncSoon();
     WebRepaintChrome();
     AiModeChanged();                             // the sidechat follows the focused tab
+    WebSessionSave();                            // the front tab's seat rides the deck too
+}
+
+// the word plate's Search road: every lookup rides ONE dedicated tab - the
+// same tab all the time - and the browser itself takes the stage to show it.
+// The tab is found by its id and rebuilt when closed; its query pages never
+// enter the session deck (the restore must not resurrect a search the plate
+// made, not the user).
+static unsigned long long g_lookupTab = 0;
+static void WebToggle(bool on);                    // the stage's own switch, defined below
+                                                   // with the mode's other machinery
+static void WebWordLookup(const std::wstring& word) {
+    std::wstring q = word;
+    for (auto& c : q) if (c == L' ') c = L'+';   // Google's own query shape
+    std::wstring url = L"https://www.google.com/search?q=" + q;
+    int hit = -1;
+    if (g_lookupTab)
+        for (int i = 0; i < (int)g_wt.size(); i++)
+            if (g_wt[i].id == g_lookupTab) { hit = i; break; }
+    if (hit < 0) {                               // the lookup tab died with its last
+        g_webRestoring = true;                   // run: a new one wears the seat
+        WebNewTab(url, false);
+        g_webRestoring = false;
+        hit = (int)g_wt.size() - 1;
+        g_lookupTab = g_wt[hit].id;
+    } else if (g_wt[hit].web) {
+        g_wt[hit].web->Navigate(url.c_str());    // the same tab, a fresh query
+        g_wt[hit].url = url;
+    } else {
+        g_wt[hit].pending = url;                 // the controller is still being born
+        g_wt[hit].url = url;
+    }
+    g_wtCur = hit;                               // the seat lands before the stage shows
+    if (!g_webOn) WebToggle(true);
+    else { WebShowCurrent(); WebBarLayout(); WebSwitchSyncSoon(); WebRepaintChrome(); AiModeChanged(); }
 }
 
 // the page: the reader's own container, edge to edge. The webview rides in
@@ -2137,7 +2214,27 @@ static void WebToggle(bool on) {
     if (on) {
         WxLoadDisk();
         BmLoad();                                  // the list is home before the bar first paints
-        if (g_wt.empty()) WebNewTab(L"https://www.google.com/", true);
+        if (g_wt.empty()) {
+            // the session comes home: the same tab deck the last run wore, the
+            // same front tab - a launch lands where the last one left off, not
+            // on a fresh google page the user never asked for
+            std::string urls = AiGetSetting("web.session.urls", "");
+            crxk::J sj;
+            std::vector<std::wstring> ru;
+            if (!urls.empty() && crxk::JParse(urls, sj) && sj.t == 'a')
+                for (auto& e : sj.a)
+                    if (e.t == 's' && !e.s.empty()) ru.push_back(WxW(e.s));
+            if (!ru.empty()) {
+                g_webRestoring = true;
+                for (auto& u : ru) WebNewTab(u, false);
+                g_webRestoring = false;
+                int c = max(0, min((int)ru.size() - 1,
+                                   atoi(AiGetSetting("web.session.cur", "0").c_str())));
+                if (c < (int)g_wt.size()) WebSwitchTo(c);
+            } else {
+                WebNewTab(L"https://www.google.com/", true);
+            }
+        }
         else { WebEnsureEnv(); WebShowCurrent(); }
         if (g_wtool) { ShowWindow(g_wtool, SW_SHOWNOACTIVATE); InvalidateRect(g_wtool, nullptr, FALSE); }
         if (g_wstrip) { ShowWindow(g_wstrip, SW_SHOWNOACTIVATE); InvalidateRect(g_wstrip, nullptr, FALSE); }
@@ -2169,6 +2266,7 @@ static void WebToggle(bool on) {
 }
 
 static void WebShutdown() {
+    WebSessionSave();                  // the deck rides out with the window, even on a hard exit
     WxPopClose();
     for (auto& e : g_wx) { if (e.icon) { delete e.icon; e.icon = nullptr; } e.ext.Reset(); }
     g_wx.clear(); g_wxProf.Reset();

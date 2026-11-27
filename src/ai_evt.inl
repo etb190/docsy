@@ -27,7 +27,10 @@ enum AiEvKind {
     AIEV_SUM_ERROR, AIEV_SUM_NOTEXT, AIEV_EXTRACT_DONE, AIEV_WEB_TEXT,
     AIEV_ED_TEXT, AIEV_TEST_OUT, AIEV_AXO_DONE,
     AIEV_SUM_PREFETCH,    // a: buffer digest (empty = failed); key: first page
-    AIEV_SUM_TESTOUT      // a: beaker probe output; flag: ok; gen: the run
+    AIEV_SUM_TESTOUT,     // a: beaker probe output; flag: ok; gen: the run
+    AIEV_WORD_OUT         // the word plate's Define/Explain answer: a: text;
+                          // b: action ("define"/"explain"); key: the seat id;
+                          // flag: ok
 };
 struct AiDocIndex;                       // complete in ai_index.inl - the heavy
                                          // rider below only moves through here,

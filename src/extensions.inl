@@ -1704,7 +1704,7 @@ static bool WebBtnEnabled(int id) {
     // every press, so the browser sidechat's own toggle read as a dead button.
     // It toggles the panel like the reader toolbar's, always armed.
     case WB_RELOAD: case WB_READER: case WB_NEWTAB: case WB_MENU: case WB_SIDE: case WB_EXT:
-    case WB_STAR: case WB_HIST: case WB_AI:          // the star arms with the pill: its own click
+    case WB_STAR: case WB_HIST: case WB_SUM: case WB_AI:   // the star arms with the pill: its own click
         return true;                                 // answers in WebBarClick, not here
     }
     return false;

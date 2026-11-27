@@ -30,8 +30,12 @@ static int PaneW(bool b) { return b ? max(0, g.cw - g.splitX - SplitHalf())
 static int PaneX0(bool b) { return b ? g.splitX + SplitHalf() : 0; }  // the pass's view x
 static int CardX(bool b) { return b ? (int)(4 * g.dpi) : 0; }         // the card inside the pass
 static int CardW(bool b) {
-    if (!g.split) return max(0, g.cw - (int)(8 * g.dpi));
-    return b ? max(0, PaneW(true) - (int)(12 * g.dpi))
+    // the card's right edge keeps the classic 8px window gutter - EXCEPT when
+    // the AI sidechat is docked: the pane's own 1px border is the seam there,
+    // the panel wears none (the gutter's pixels go to the document, the two
+    // borders the reader wore against the chat never stack again)
+    if (!g.split) return max(0, g.cw - (g_aiDockW > 0 ? 0 : (int)(8 * g.dpi)));
+    return b ? max(0, PaneW(true) - (g_aiDockW > 0 ? 4 : 12) * (int)g.dpi)
              : max(0, PaneW(false) - (int)(4 * g.dpi));
 }
 

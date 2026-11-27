@@ -158,7 +158,7 @@ static void AiPanelMessage(const wchar_t* json) {
             // "send and nothing happens" report)
             g_webAiPendingInput = input;
             g_webAiTextPending = true;
-            AiWebExtract(++g_sumGen);
+            AiWebExtract(++g_webAiCb);
         } else {
             AiStartReplyThread(g_aiCurKey, input);
         }
@@ -232,7 +232,7 @@ static void AiPanelMessage(const wchar_t* json) {
         } else if (mode1) {
             g_webAiPendingInput = input;
             g_webAiTextPending = true;
-            AiWebExtract(++g_sumGen);
+            AiWebExtract(++g_webAiCb);
         } else {
             AiStartReplyThread(g_aiCurKey, input);
         }
@@ -575,12 +575,14 @@ static void AiHandleEvent(AiEv* e) {
             }
             AiStartReplyThread(key, input);
         } else if (g_sumWebPending != 0 && e->gen == g_sumWebPending) {
-            // the web summary's extraction: the thread takes the page text
+            // the web seat's extraction: the thread takes the page text. Every
+            // state and post below belongs to SUM_WEB - the web navigator's
+            // runs never touch the document seat's busy flag or window.
             if (g_webAiText.empty() ||
                 g_webAiText.find("\"ok\":true") == std::string::npos) {
-                SumPost("{\"cmd\":\"error\",\"gen\":" + std::to_string(e->gen) +
+                SumPostSeat(SUM_WEB, "{\"cmd\":\"error\",\"gen\":" + std::to_string(e->gen) +
                         ",\"text\":\"I can't read a page here. Open a web page in the browser tab and try again.\"}");
-                g_sumBusy = false;
+                g_sumBusy[SUM_WEB] = false;
                 g_sumWebPending = 0;
                 break;
             }
@@ -596,15 +598,15 @@ static void AiHandleEvent(AiEv* e) {
             int words = 1000;
             std::string lang = "English", genre = "nonfiction_classic";
             std::string docId = "web_" + AiSha256Hex16(pageText);
-            unsigned long long run = g_sumRun;          // this thread's owner token
-            auto cancel = g_sumCancel;                  // this run's own stop flag
+            unsigned long long run = g_sumRun[SUM_WEB];   // this thread's owner token
+            auto cancel = g_sumCancel[SUM_WEB];           // this run's own stop flag
             std::thread([gen, run, cancel, docId, pageText, words, lang, genre]() {
                 // the worker's guard: an uncaught exception on a detached
                 // thread is std::terminate - the run would take the app down
                 try {
-                    AiSumRun(gen, run, cancel, docId, pageText, 1, 1, words, lang, genre, false);
+                    AiSumRun(gen, run, cancel, docId, pageText, 1, 1, words, lang, genre, false, SUM_WEB);
                 } catch (...) {
-                    if (run == g_sumRun) g_sumBusy = false;
+                    if (run == g_sumRun[SUM_WEB]) g_sumBusy[SUM_WEB] = false;
                     AiEv* se = AiEvMake(AIEV_SUM_ERROR);
                     se->gen = gen;
                     se->a = WxU(L"The run stopped after an internal error.");
@@ -636,7 +638,7 @@ static void AiHandleEvent(AiEv* e) {
             // pressed mid-test redirects (bumps g_sumRun), and this probe's
             // completion must not un-busy the run that replaced it.
             unsigned long long gen = e->gen;
-            unsigned long long run = g_sumRun;
+            unsigned long long run = g_sumRun[SUM_DOC];   // the beaker rides the doc seat
             std::wstring text = WxW(e->a);
             std::thread([gen, run, text]() {
                 // the worker's guard: an uncaught exception on a detached
@@ -651,7 +653,7 @@ static void AiHandleEvent(AiEv* e) {
                         te->a = "The selected pages have no readable text to verify.";
                         te->flag = false;
                         AiPost(te);
-                        if (run == g_sumRun) g_sumBusy = false;
+                        if (run == g_sumRun[SUM_DOC]) g_sumBusy[SUM_DOC] = false;
                         return;
                     }
                     AiLoadSettings();
@@ -667,14 +669,14 @@ static void AiHandleEvent(AiEv* e) {
                     te->a = out;
                     te->flag = ok;
                     AiPost(te);
-                    if (run == g_sumRun) g_sumBusy = false;
+                    if (run == g_sumRun[SUM_DOC]) g_sumBusy[SUM_DOC] = false;
                 } catch (...) {
                     AiEv* te = AiEvMake(AIEV_SUM_TESTOUT);
                     te->gen = gen;
                     te->a = "The probe stopped after an internal error.";
                     te->flag = false;
                     AiPost(te);
-                    if (run == g_sumRun) g_sumBusy = false;
+                    if (run == g_sumRun[SUM_DOC]) g_sumBusy[SUM_DOC] = false;
                 }
             }).detach();
         } else if (what == 0) {
@@ -689,16 +691,16 @@ static void AiHandleEvent(AiEv* e) {
             std::string lang = g_range.lang, genre = g_range.genre;
             bool bypass = g_range.bypass;
             std::string docId = AiDocSessionKey(g_range.path);
-            unsigned long long run = g_sumRun;          // this thread's owner token
-            auto cancel = g_sumCancel;                  // this run's own stop flag
+            unsigned long long run = g_sumRun[SUM_DOC]; // this thread's owner token
+            auto cancel = g_sumCancel[SUM_DOC];         // this run's own stop flag
             std::thread([gen, run, cancel, docId, text, first, last, words, lang, genre, bypass]() {
-                // the worker's guard: an uncaught exception on a detached
-                // thread is std::terminate - the run would take the app down;
-                // the page hears a plain error instead
+                // the worker's guard: an uncaught exception on a detached thread is
+                // std::terminate - the run would take the app down; the page hears
+                // a plain error instead
                 try {
-                    AiSumRun(gen, run, cancel, docId, text, first, last, words, lang, genre, bypass);
+                    AiSumRun(gen, run, cancel, docId, text, first, last, words, lang, genre, bypass, SUM_DOC);
                 } catch (...) {
-                    if (run == g_sumRun) g_sumBusy = false;
+                    if (run == g_sumRun[SUM_DOC]) g_sumBusy[SUM_DOC] = false;
                     AiEv* se = AiEvMake(AIEV_SUM_ERROR);
                     se->gen = gen;
                     se->a = WxU(L"The run stopped after an internal error.");
@@ -709,10 +711,12 @@ static void AiHandleEvent(AiEv* e) {
         break;
     }
     case AIEV_SUM_DELTA:
-        SumPost("{\"cmd\":\"delta\",\"gen\":" + std::to_string(e->gen) +
+        SumPostSeat(SumOwnerOf(e->gen), "{\"cmd\":\"delta\",\"gen\":" + std::to_string(e->gen) +
                 ",\"text\":" + WxJsonStr(e->a) + "}");
         break;
     case AIEV_SUM_DONE: {
+        int owner = SumOwnerOf(e->gen);   // the gen names its window: the two seats
+                                          // run side by side and never share a post
         int words = 0;
         for (size_t i = 0; i < e->a.size(); i++)
             if (!isspace((unsigned char)e->a[i])) {
@@ -731,21 +735,22 @@ static void AiHandleEvent(AiEv* e) {
         // one gets the native ear - PlaySound answers whether or not any
         // webview renders. The page learns which ear rang through "ping":
         // false mutes its own chime so the room never hears a double.
-        bool winVisible = g_sumWnd && IsWindowVisible(g_sumWnd) != FALSE;
-        bool currentRun = e->gen == g_sumGen;   // a superseded run's chime
-                                                // belongs to no one alive
+        bool winVisible = g_sumWnd[owner] && IsWindowVisible(g_sumWnd[owner]) != FALSE;
+        bool currentRun = e->gen == g_sumGen[owner];   // a superseded run's chime
+                                                       // belongs to no one alive
         if (!winVisible && currentRun &&
             AiGetSetting("summary.ping.enabled", "1") != "0")
             SumPingNative();
-        SumPost("{\"cmd\":\"done\",\"gen\":" + std::to_string(e->gen) +
+        SumPostSeat(owner, "{\"cmd\":\"done\",\"gen\":" + std::to_string(e->gen) +
                 ",\"text\":" + WxJsonStr(e->a) +
                 ",\"status\":" + WxJsonStr(status) +
                 ",\"ping\":" + (winVisible ? "true" : "false") +
                 ",\"model\":" + WxJsonStr(g_aiCfg.model) + "}");
         // the saved digest rides the CURRENT run's gen: a superseded run's
         // completion (its text already gen-gated away on the page) must not
-        // overwrite the digest row with the old range
-        if (g_sumMode == 0 && e->gen == g_sumGen) {
+        // overwrite the digest row with the old range. The document seat keys
+        // by the open file; the web seat by the page's address.
+        if (owner == SUM_DOC && e->gen == g_sumGen[SUM_DOC]) {
             DocState& D = DVF();
             if (!D.path.empty()) {
                 std::string docId = AiDocSessionKey(D.path);
@@ -756,19 +761,23 @@ static void AiHandleEvent(AiEv* e) {
                 AiSetSetting("summary.digest." + docId + ".model", WxU(g_aiCfg.model));
                 AiSetSetting("summary.start." + docId, std::to_string(g_sumStart));
             }
+        } else if (owner == SUM_WEB && e->gen == g_sumGen[SUM_WEB]
+                   && !g_sumWebDocId.empty()) {
+            AiSetSetting("summary.digest." + g_sumWebDocId, e->a);
+            AiSetSetting("summary.digest." + g_sumWebDocId + ".model", WxU(g_aiCfg.model));
         }
         break;
     }
     case AIEV_SUM_ERROR:
-        SumPost("{\"cmd\":\"error\",\"gen\":" + std::to_string(e->gen) +
+        SumPostSeat(SumOwnerOf(e->gen), "{\"cmd\":\"error\",\"gen\":" + std::to_string(e->gen) +
                 ",\"text\":" + WxJsonStr(e->a) + "}");
-        g_sumBusy = false;
+        g_sumBusy[SumOwnerOf(e->gen)] = false;
         break;
     case AIEV_SUM_NOTEXT:
-        SumPost("{\"cmd\":\"notext\",\"gen\":" + std::to_string(e->gen) + "}");
+        SumPostSeat(SumOwnerOf(e->gen), "{\"cmd\":\"notext\",\"gen\":" + std::to_string(e->gen) + "}");
         break;
     case AIEV_SUM_PROGRESS:
-        SumPost("{\"cmd\":\"progress\",\"gen\":" + std::to_string(e->gen) +
+        SumPostSeat(SumOwnerOf(e->gen), "{\"cmd\":\"progress\",\"gen\":" + std::to_string(e->gen) +
                 ",\"text\":" + WxJsonStr(e->a) + "}");
         break;
     case AIEV_TEST_OUT:
@@ -780,13 +789,23 @@ static void AiHandleEvent(AiEv* e) {
                 ",\"text\":" + WxJsonStr(e->a) +
                 ",\"ok\":" + (e->flag ? "true" : "false") + "}");
         break;
+    case AIEV_WORD_OUT: {    // the word plate's Define/Explain answer lands on
+                             // the UI thread - the only ground a webview post
+                             // can cross - and rides home to its own seat
+        int seat = atoi(e->key.c_str());
+        if (seat < 0 || seat >= SUM_SEATS) seat = SUM_DOC;
+        SumPostSeat(seat, "{\"cmd\":\"word-answer\",\"action\":" + WxJsonStr(e->b) +
+                ",\"text\":" + WxJsonStr(e->a) +
+                ",\"ok\":" + (e->flag ? "true" : "false") + "}");
+        break;
+    }
     case AIEV_SUM_PREFETCH: {   // the buffer's fill: the thread's word comes
                                 // home here, on the UI thread, before any
                                 // webview hears it. Empty = the fill failed
                                 // or found nothing - the page must hear that
                                 // too, or its chip hangs on "generating".
         int first = atoi(e->key.c_str());
-        bool winVisible = g_sumWnd && IsWindowVisible(g_sumWnd) != FALSE;
+        bool winVisible = g_sumWnd[SUM_DOC] && IsWindowVisible(g_sumWnd[SUM_DOC]) != FALSE;
         if (!e->a.empty()) {
             if (!winVisible &&
                 AiGetSetting("summary.ping.enabled", "1") != "0")

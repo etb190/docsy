@@ -84,29 +84,45 @@ static bool g_aiNotesBusy = false;
 static std::vector<AiNoteCard> g_aiNotesCards;
 static std::wstring g_aiNotesDocPath;
 
-// the summarizer window
-static HWND g_sumWnd = nullptr;
-static int g_sumFrame = 0;               // the OS border width NCCALCSIZE kept
-static wrl::ComPtr<ICoreWebView2Controller> g_sumCtr;
-static wrl::ComPtr<ICoreWebView2> g_sumWeb;
-static bool g_sumBuilding = false, g_sumReady = false;
-static int g_sumMode = 0;                // 0 doc, 1 web
+// the summarizer windows: TWO seats, one per surface. Seat 0 is the reader's
+// document navigator (the open PDF's pages); seat 1 is the browser's web
+// navigator (the live page's own text). Two separate windows with two separate
+// runs: summarizing a web page never folds or overwrites the book's digest,
+// and both can stand open side by side.
+enum { SUM_DOC = 0, SUM_WEB = 1, SUM_SEATS = 2 };
+static HWND g_sumWnd[SUM_SEATS] = {};
+static int g_sumFrame[SUM_SEATS] = {};               // the OS border width NCCALCSIZE kept
+static wrl::ComPtr<ICoreWebView2Controller> g_sumCtr[SUM_SEATS];
+static wrl::ComPtr<ICoreWebView2> g_sumWeb[SUM_SEATS];
+static bool g_sumBuilding[SUM_SEATS] = {}, g_sumReady[SUM_SEATS] = {};
+static int g_sumMode[SUM_SEATS] = { 0, 1 };          // seat 0 doc, seat 1 web - fixed per seat
 static std::wstring g_sumDocPath;
 static int g_sumPageCount = 0, g_sumStart = 1, g_sumRange = 20;
-static unsigned long long g_sumGen = 0;   // the gen the page's last accepted start rode
-                                          // - a completion whose gen differs is stale and
-                                          // only its display is gen-gated away, never its
-                                          // state writes
-static unsigned long long g_sumRun = 0;   // bumped by every accepted start: the owner of
-                                          // the busy flag. A superseded run's dying thread
-                                          // sees its own run number gone and stands down
-                                          // instead of un-busying the run that replaced it
-static unsigned long long g_sumWebPending = 0;   // the web summary waiting on its extraction
-static std::shared_ptr<std::atomic<bool>> g_sumCancel;   // the CURRENT run's stop flag -
-                                          // one flag per run, so a redirected Start folds
-                                          // the old stream without racing the new one's flag
-static bool g_sumBusy = false;
+static unsigned long long g_sumGen[SUM_SEATS] = {};  // per seat: the gen the page's last
+                                                     // accepted start rode - a completion
+                                                     // whose gen differs is stale and only
+                                                     // its display is gen-gated away
+static unsigned long long g_sumRun[SUM_SEATS] = {};  // bumped by every accepted start: the
+                                                     // owner of the busy flag. A superseded
+                                                     // run's dying thread sees its own run
+                                                     // number gone and stands down instead of
+                                                     // un-busying the run that replaced it
+static unsigned long long g_sumWebPending = 0;       // the web seat waiting on its extraction
+static std::string g_sumWebDocId;                    // the web seat's current page key: the
+                                                     // digest settings ride the page's url
+static std::shared_ptr<std::atomic<bool>> g_sumCancel[SUM_SEATS];
+static bool g_sumBusy[SUM_SEATS] = {};
 static std::wstring g_sumOwnerPanePath;  // the pane whose pages the window follows
+// the web seat's gens live in their own numbering, so every completion finds
+// its owner by the gen alone: seat 0 counts from 1, seat 1 from a base far
+// above anything a document run could ever reach
+static const unsigned long long kSumWebGenBase = 1000000000ULL;
+static int SumOwnerOf(unsigned long long gen) {
+    return gen >= kSumWebGenBase ? SUM_WEB : SUM_DOC;
+}
+static unsigned long long g_webAiCb = 0;   // the sidechat's extraction callback
+                                          // token - an opaque id of its own,
+                                          // never a summary run's gen
 
 // editor text (the aitext round trip)
 static std::string g_edAiText;

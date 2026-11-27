@@ -5,12 +5,17 @@
 #pragma once
 
 static void AiPanelMessage(const wchar_t* json);
-static void SumPanelMessage(const wchar_t* json);
+static void SumPanelMessage(const wchar_t* json, int seat);
+static void SumPostSeat(int seat, const std::string& j);
 static void SumPost(const std::string& j);
 static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
-static void SumHide(bool fromOutside);   // the popup contract: a click outside
-                                         // its borders folds it, alive
-static void SumPrewarm();        // the idle seat: window + webview build hidden
+static void SumHideSeat(int seat, bool fromOutside);   // the popup contract: a click
+                                                       // outside its borders folds
+                                                       // it, alive
+static void SumOpenSeat(int seat);
+static void SumEnsureSeat(int seat);
+static void SumSavePlacementSeat(int seat);
+static void SumPrewarm();        // the idle seats: window + webviews build hidden
 static void SumSavePlacement();  // one settings write per gesture, not per pixel
 
 #include <mmsystem.h>            // PlaySound - the fold's chime lives below
@@ -60,15 +65,15 @@ static void SumPingNative() {
                SND_MEMORY | SND_ASYNC | SND_NODEFAULT);
 }
 
-static DWORD g_sumHideTick = 0;          // when an outside click folded it: the
-                                         // toolbar's own click must not reopen
-static RECT g_sumOwnerPrev{};            // the frame's last screen rect: the
-                                         // popup rides its moves like a pane
-static HHOOK g_sumMouseHook = nullptr;   // the click-outside watcher, only
-                                         // while the popup is unfolded
-static std::string g_sumInitDoc;         // what the page's last init was built
-                                         // for - a reopen only re-inits when the
-                                         // document moved under the hood
+static DWORD g_sumHideTick[SUM_SEATS] = {};  // when an outside click folded a seat: the
+                                             // toolbar's own click must not reopen
+static RECT g_sumOwnerPrev[SUM_SEATS]{};     // the frame's last screen rect: each popup
+                                             // rides its moves like a pane
+static HHOOK g_sumMouseHook = nullptr;       // the click-outside watcher, one hook
+                                             // serving both seats while any is open
+static std::string g_sumInitDoc[SUM_SEATS];  // what each page's last init was built
+                                             // for - a reopen only re-inits when the
+                                             // document moved under the hood
 
 // ---- the page text builder: [p. N] anchored, running paragraphs ----
 static std::wstring AiPageTextOf(const TxtPage& pt) {
@@ -308,9 +313,9 @@ static void AiRangeStart(const std::wstring& path, int first, int last, int what
 }
 static void AiRangeTick() {
     if (!g_range.active) { KillTimer(g.main, 4714); return; }
-    if ((g_range.what == 0 || g_range.what == 3) && !g_sumWnd) return;
+    if ((g_range.what == 0 || g_range.what == 3) && !g_sumWnd[SUM_DOC]) return;
     if (g_range.what == 1 && !g_sideNotes) return;
-    if (g_range.what == 2 && !g_sumWnd) return;   // the beaker's range test rides the summary window
+    if (g_range.what == 2 && !g_sumWnd[SUM_DOC]) return;   // the beaker's range test rides the summary window
     DocState& D = DVF();
     if (D.path.empty() || D.path != g_range.path) {
         g_range.active = false;
@@ -1194,7 +1199,7 @@ static void AiNotesGenerate(const std::wstring& rangeText) {
     _snwprintf_s(b, _TRUNCATE, L"Generating notes for pages %d to %d\u2026", first, last);
     e->a = WxU(b); e->flag = true;
     AiPost(e);
-    unsigned long long gen = ++g_sumGen;
+    unsigned long long gen = ++g_sumGen[SUM_DOC];
     AiRangeStart(D.path, first, last, 1, gen);
 }
 static void AiNotesRunModel(std::wstring rangeText, int first, int last) {
@@ -1650,28 +1655,38 @@ static void AiWebExtract(unsigned long long cbId) {
 }
 
 // ---- the summarizer window ----
-static void SumSendInit();
-static void SumOpen(int mode);
+static void SumSendInitSeat(int seat);
+static void SumOpenSeat(int seat);
 
-static void SumPost(const std::string& j) {
-    if (g_sumWeb) g_sumWeb->PostWebMessageAsJson(WxW(j).c_str());
+static void SumPostSeat(int seat, const std::string& j) {
+    if (seat >= 0 && seat < SUM_SEATS && g_sumWeb[seat])
+        g_sumWeb[seat]->PostWebMessageAsJson(WxW(j).c_str());
 }
-static void SumSendInit() {
+static void SumPost(const std::string& j) { SumPostSeat(SUM_DOC, j); }   // the doc seat's
+                                                                        // own events ride
+                                                                        // here by name
+// the web seat's page key: the digest settings ride the address the tab wears,
+// so a reopen finds the digest without re-reading the page
+static std::string SumWebDocKey() {
+    std::wstring curUrl = (g_webOn && g_wtCur >= 0 && g_wtCur < (int)g_wt.size())
+                          ? g_wt[g_wtCur].url : L"";
+    return "web_" + AiSha256Hex16(curUrl);
+}
+static void SumSendInitSeat(int seat) {
     AiLoadSettings();
-    std::string sRange = AiGetSetting("summary.range", "20");
-    int range = max(1, atoi(sRange.c_str()));
-    g_sumRange = range;
     int words = max(100, atoi(AiGetSetting("summary.words", "1000").c_str()));
     std::string lang = AiGetSetting("summary.lang", "English");
-    std::string genre = AiGetSetting("summary.default_genre", "nonfiction_classic");
     int font = max(10, min(24, atoi(AiGetSetting("summary.font", "13").c_str())));
-    bool ping = AiGetSetting("summary.ping.enabled", "1") != "0";
-    bool buffer = AiGetSetting("summary.buffer.enabled", "1") != "0";
-    bool recap = AiGetSetting("summary.recap.enabled", "0") == "1";
-    bool discord = AiGetSetting("summary.discord.enabled", "0") == "1";
-
-    std::string j = "{\"cmd\":\"init\",\"mode\":\"" + std::string(g_sumMode ? "web" : "doc") + "\"";
-    if (g_sumMode == 0) {
+    std::string j;
+    if (seat == SUM_DOC) {
+        std::string sRange = AiGetSetting("summary.range", "20");
+        int range = max(1, atoi(sRange.c_str()));
+        g_sumRange = range;
+        bool ping = AiGetSetting("summary.ping.enabled", "1") != "0";
+        bool buffer = AiGetSetting("summary.buffer.enabled", "1") != "0";
+        bool recap = AiGetSetting("summary.recap.enabled", "0") == "1";
+        bool discord = AiGetSetting("summary.discord.enabled", "0") == "1";
+        j = "{\"cmd\":\"init\",\"mode\":\"doc\"";
         DocState& D = DVF();
         std::string docId = AiDocSessionKey(D.path);
         std::string sStart = AiGetSetting("summary.start." + docId);
@@ -1684,7 +1699,7 @@ static void SumSendInit() {
         j += ",\"rangePages\":" + std::to_string(g_sumRange);
         j += ",\"words\":" + std::to_string(words);
         j += ",\"lang\":" + WxJsonStr(lang);
-        j += ",\"genre\":" + WxJsonStr(genre);
+        j += ",\"genre\":" + WxJsonStr(AiGetSetting("summary.default_genre", "nonfiction_classic"));
         j += ",\"font\":" + std::to_string(font);
         j += ",\"ping\":" + std::string(ping ? "true" : "false");
         j += ",\"buffer\":" + std::string(buffer ? "true" : "false");
@@ -1702,19 +1717,33 @@ static void SumSendInit() {
             if (!savedModel.empty()) j += ",\"digestModel\":" + WxJsonStr(savedModel);
             if (!savedScroll.empty()) j += ",\"digestScroll\":" + savedScroll;
         }
+        g_sumInitDoc[SUM_DOC] = AiDocSessionKey(DVF().path);
     } else {
+        // the web seat: the live page's own text. Its digest rides the page's
+        // address, so coming back to a page the user already summarized picks
+        // the digest straight off the disk - the web never had that before.
+        bool ping = AiGetSetting("summary.ping.enabled", "1") != "0";
+        j = "{\"cmd\":\"init\",\"mode\":\"web\"";
         j += ",\"words\":" + std::to_string(words);
         j += ",\"lang\":" + WxJsonStr(lang);
         j += ",\"prompts\":[{\"id\":\"web_nonfiction_classic\",\"title\":\"Nonfiction\"}]";
         j += ",\"font\":" + std::to_string(font);
+        j += ",\"ping\":" + std::string(ping ? "true" : "false");
+        g_sumWebDocId = SumWebDocKey();
+        std::string savedDigest = AiGetSetting("summary.digest." + g_sumWebDocId);
+        if (!savedDigest.empty()) {
+            j += ",\"digest\":" + WxJsonStr(savedDigest);
+            std::string savedModel = AiGetSetting("summary.digest." + g_sumWebDocId + ".model");
+            if (!savedModel.empty()) j += ",\"digestModel\":" + WxJsonStr(savedModel);
+        }
+        g_sumInitDoc[SUM_WEB] = g_sumWebDocId;
     }
     j += ",\"model\":" + WxJsonStr(g_aiCfg.model);
     j += "}";
-    g_sumInitDoc = (g_sumMode == 0) ? AiDocSessionKey(DVF().path) : std::string("web");
-    SumPost(j);
+    SumPostSeat(seat, j);
 }
-static void SumEnsure() {
-    if (g_sumCtr || g_sumBuilding) return;
+static void SumEnsureSeat(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || g_sumCtr[seat] || g_sumBuilding[seat]) return;
     WebEnsureEnv();
     if (!g_wvEnv) {
         // the engine warms up asynchronously: a silent bail here left the seat
@@ -1722,24 +1751,24 @@ static void SumEnsure() {
         // and the editor but never this seat - the popup's first open then
         // showed nothing but grain. A quiet knock retries until the env
         // answers, and stands down the moment the runtime is declared absent.
-        if (g_sumWnd && !g_webFail) SetTimer(g_sumWnd, 4722, 250, nullptr);
+        if (g_sumWnd[seat] && !g_webFail) SetTimer(g_sumWnd[seat], 4722, 250, nullptr);
         return;
     }
-    if (g_sumWnd) KillTimer(g_sumWnd, 4722);
-    g_sumBuilding = true;
+    if (g_sumWnd[seat]) KillTimer(g_sumWnd[seat], 4722);
+    g_sumBuilding[seat] = true;
     g_wvEnv->CreateCoreWebView2Controller(
-        g_sumWnd,
+        g_sumWnd[seat],
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-            [](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
-                g_sumBuilding = false;
-                if (FAILED(hr) || !c) return S_OK;
-                g_sumCtr = c;
+            [seat](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
+                g_sumBuilding[seat] = false;
+                if (FAILED(hr) || !c || seat < 0 || seat >= SUM_SEATS) return S_OK;
+                g_sumCtr[seat] = c;
                 // born against a hidden window (the prewarm seat): the runtime
                 // hands the controller over not-rendered, and it stays that way
                 // even after the popup unfolds - the grain showed, the page
                 // never did. The one who shows the window says it may draw.
-                c->put_IsVisible(IsWindowVisible(g_sumWnd) ? TRUE : FALSE);
-                c->get_CoreWebView2(&g_sumWeb);
+                c->put_IsVisible(IsWindowVisible(g_sumWnd[seat]) ? TRUE : FALSE);
+                c->get_CoreWebView2(&g_sumWeb[seat]);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
                     c2->put_DefaultBackgroundColor({ 0, 0, 0, 0 });   // the grain field
@@ -1747,19 +1776,19 @@ static void SumEnsure() {
                                               // chat faces - the card sits on the
                                               // app's noise, not on its own paint
                 EventRegistrationToken tk;
-                g_sumWeb->add_WebMessageReceived(
+                g_sumWeb[seat]->add_WebMessageReceived(
                     Microsoft::WRL::Callback<ICoreWebView2WebMessageReceivedEventHandler>(
-                        [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* a) -> HRESULT {
+                        [seat](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* a) -> HRESULT {
                             LPWSTR msg = nullptr;
                             if (SUCCEEDED(a->get_WebMessageAsJson(&msg)) && msg) {
-                                SumPanelMessage(msg);
+                                SumPanelMessage(msg, seat);
                                 CoTaskMemFree(msg);
                             }
                             return S_OK;
                         }).Get(), &tk);
                 std::wstring html = AiSumHtml();
-                if (!html.empty()) g_sumWeb->NavigateToString(html.c_str());
-                RECT r; GetClientRect(g_sumWnd, &r);
+                if (!html.empty()) g_sumWeb[seat]->NavigateToString(html.c_str());
+                RECT r; GetClientRect(g_sumWnd[seat], &r);
                 c->put_Bounds(r);
                 return S_OK;
             }).Get());
@@ -1775,22 +1804,25 @@ static void SumEnsure() {
 // so alt-tab, the taskbar, other apps and even the popup's own select
 // dropdowns never trip the contract).
 static void SumUnhookMouse() {
+    // the hook watches for BOTH seats: it leaves only when no seat is unfolded
+    for (int s = 0; s < SUM_SEATS; s++)
+        if (g_sumWnd[s] && IsWindowVisible(g_sumWnd[s])) return;
     if (g_sumMouseHook) { UnhookWindowsHookEx(g_sumMouseHook); g_sumMouseHook = nullptr; }
 }
-static void SumHide(bool fromOutside) {
-    if (!g_sumWnd) return;
-    if (g_sumWeb)   // the digest's reader seat rides out before the fold
-        g_sumWeb->ExecuteScript(L"window.__sumSaveScroll&&window.__sumSaveScroll();", nullptr);
-    if (g_sumCtr) g_sumCtr->put_IsVisible(FALSE);   // folded = not rendered, not
+static void SumHideSeat(int seat, bool fromOutside) {
+    if (seat < 0 || seat >= SUM_SEATS || !g_sumWnd[seat]) return;
+    if (g_sumWeb[seat])   // the digest's reader seat rides out before the fold
+        g_sumWeb[seat]->ExecuteScript(L"window.__sumSaveScroll&&window.__sumSaveScroll();", nullptr);
+    if (g_sumCtr[seat]) g_sumCtr[seat]->put_IsVisible(FALSE);   // folded = not rendered, not
                                                     // dead: the page keeps its
                                                     // DOM, a generation keeps
                                                     // streaming into it, and the
                                                     // compositor stops burning
                                                     // frames nobody can see
-    SumSavePlacement();
-    ShowWindow(g_sumWnd, SW_HIDE);
+    SumSavePlacementSeat(seat);
+    ShowWindow(g_sumWnd[seat], SW_HIDE);
     SumUnhookMouse();
-    if (fromOutside) g_sumHideTick = GetTickCount();
+    if (fromOutside) g_sumHideTick[seat] = GetTickCount();
 }
 // The frame's folds drive the seat's render. A minimize is a fold SumHide
 // never sees: Windows hides an owned popup with its owner, the controller
@@ -1800,22 +1832,27 @@ static void SumHide(bool fromOutside) {
 // explicit: FALSE on the way down, TRUE on the way back rebuilds the
 // composition fresh. Both calls no-op when nothing actually moved.
 static void SumSyncVisible() {
-    if (!g_sumCtr || !g_sumWnd) return;
-    BOOL want = (IsWindowVisible(g_sumWnd) && g.main && !IsIconic(g.main)) ? TRUE : FALSE;
-    g_sumCtr->put_IsVisible(want);
+    for (int s = 0; s < SUM_SEATS; s++) {
+        if (!g_sumCtr[s] || !g_sumWnd[s]) continue;
+        BOOL want = (IsWindowVisible(g_sumWnd[s]) && g.main && !IsIconic(g.main)) ? TRUE : FALSE;
+        g_sumCtr[s]->put_IsVisible(want);
+    }
 }
 static LRESULT CALLBACK SumMouseHookProc(int code, WPARAM wp, LPARAM lp) {
-    if (code == HC_ACTION && g_sumWnd && IsWindowVisible(g_sumWnd)) {
+    if (code == HC_ACTION) {
         switch (wp) {
         case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
         case WM_XBUTTONDOWN: case WM_NCLBUTTONDOWN: case WM_NCRBUTTONDOWN: {
             POINT pt = ((MSLLHOOKSTRUCT*)lp)->pt;
             HWND w = WindowFromPoint(pt);
             HWND root = w ? GetAncestor(w, GA_ROOT) : nullptr;
-            if (root && root != g_sumWnd && (root == g.main || IsChild(g.main, root)))
-                PostMessageW(g_sumWnd, WM_APP + 61, 0, 0);   // a click inside the
-            break; }   // frame, outside the navigator - the fold itself runs on
-        }                  // the pump: a hook must never do file I/O
+            if (root && (root == g.main || IsChild(g.main, root))) {
+                for (int s = 0; s < SUM_SEATS; s++)   // every unfolded seat folds on the
+                    if (g_sumWnd[s] && IsWindowVisible(g_sumWnd[s]) && root != g_sumWnd[s])
+                        PostMessageW(g_sumWnd[s], WM_APP + 61, 0, 0);   // pump, never the hook
+            }
+            break; }
+        }
     }
     return CallNextHookEx(nullptr, code, wp, lp);
 }
@@ -1823,72 +1860,78 @@ static void SumHookMouse() {
     if (!g_sumMouseHook)
         g_sumMouseHook = SetWindowsHookExW(WH_MOUSE_LL, SumMouseHookProc, g.hinst, 0);
 }
-static void SumSavePlacement() {
-    if (!g_sumWnd || IsIconic(g_sumWnd)) return;
-    RECT wr; GetWindowRect(g_sumWnd, &wr);
+static void SumSavePlacementSeat(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || !g_sumWnd[seat] || IsIconic(g_sumWnd[seat])) return;
+    RECT wr; GetWindowRect(g_sumWnd[seat], &wr);
     double dpi = g.dpi > 0 ? g.dpi : 1.0;
-    AiSetSetting("summary.win.w", std::to_string((int)((wr.right - wr.left) / dpi)));
-    AiSetSetting("summary.win.h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
+    const char* pre = seat == SUM_WEB ? "summary.win.web" : "summary.win";
+    AiSetSetting(std::string(pre) + ".w", std::to_string((int)((wr.right - wr.left) / dpi)));
+    AiSetSetting(std::string(pre) + ".h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
     if (g.main && !IsIconic(g.main)) {   // the popup's seat is relative to the
         RECT mr; GetWindowRect(g.main, &mr);   // frame - it belongs to the app,
-        AiSetSetting("summary.win.relx",       // not to the desktop
+        AiSetSetting(std::string(pre) + ".relx",   // not to the desktop
                      std::to_string((int)((wr.left - mr.left) / dpi)));
-        AiSetSetting("summary.win.rely",
+        AiSetSetting(std::string(pre) + ".rely",
                      std::to_string((int)((wr.top - mr.top) / dpi)));
     }
 }
-// the frame moved: the popup rides along like any docked pane, and the
-// WINDOWPOSCHANGING clamp below keeps it inside the frame while it goes
+// the frame moved: the popups ride along like any docked pane, and the
+// WINDOWPOSCHANGING clamp below keeps each inside the frame while it goes
 static void SumOwnerMoved() {
     if (!g.main || IsIconic(g.main)) return;
     RECT mr; GetWindowRect(g.main, &mr);
-    if (g_sumOwnerPrev.right > g_sumOwnerPrev.left && g_sumWnd && IsWindowVisible(g_sumWnd)) {
-        int dx = mr.left - g_sumOwnerPrev.left, dy = mr.top - g_sumOwnerPrev.top;
-        if (dx || dy) {
-            RECT wr; GetWindowRect(g_sumWnd, &wr);
-            SetWindowPos(g_sumWnd, nullptr, wr.left + dx, wr.top + dy, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    for (int s = 0; s < SUM_SEATS; s++) {
+        if (g_sumOwnerPrev[s].right > g_sumOwnerPrev[s].left && g_sumWnd[s]
+            && IsWindowVisible(g_sumWnd[s])) {
+            int dx = mr.left - g_sumOwnerPrev[s].left, dy = mr.top - g_sumOwnerPrev[s].top;
+            if (dx || dy) {
+                RECT wr; GetWindowRect(g_sumWnd[s], &wr);
+                SetWindowPos(g_sumWnd[s], nullptr, wr.left + dx, wr.top + dy, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
         }
+        g_sumOwnerPrev[s] = mr;
     }
-    g_sumOwnerPrev = mr;
 }
-static void SumToggle(int mode) {
-    if (g_sumHideTick && GetTickCount() - g_sumHideTick < 400) {
-        g_sumHideTick = 0;   // this button click IS the outside click that just
-        return;              // folded it - a toggle-off, not an invitation back
+// the toolbar's toggle: each surface opens its own seat and folds it again
+static void SumToggle(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS) return;
+    if (g_sumHideTick[seat] && GetTickCount() - g_sumHideTick[seat] < 400) {
+        g_sumHideTick[seat] = 0;   // this button click IS the outside click that just
+        return;                    // folded it - a toggle-off, not an invitation back
     }
-    if (g_sumWnd && IsWindowVisible(g_sumWnd) && g_sumMode == mode) {
-        SumHide(false);   // the toolbar button is a toggle: open again rolls it up
+    if (g_sumWnd[seat] && IsWindowVisible(g_sumWnd[seat])) {
+        SumHideSeat(seat, false);   // the toolbar button is a toggle: open again rolls it up
         return;
     }
-    SumOpen(mode);
+    SumOpenSeat(seat);
 }
-// what the page's current init was built for - a reopen only re-sends init
-// when the document or surface moved under the hood, because re-initing a
-// living page wipes its digest view, its busy state and its scroll, exactly
+// what a seat's page's current init was built for - a reopen only re-sends
+// init when the document or surface moved under the hood, because re-initing
+// a living page wipes its digest view, its busy state and its scroll, exactly
 // the "close it and everything resets" the fold was built to stop
-static bool SumInitStale() {
-    std::string key = (g_sumMode == 0) ? AiDocSessionKey(DVF().path) : std::string("web");
-    return key != g_sumInitDoc;
+static bool SumInitStale(int seat) {
+    std::string key = (seat == SUM_DOC) ? AiDocSessionKey(DVF().path) : SumWebDocKey();
+    return key != g_sumInitDoc[seat];
 }
-// the frame moved while the popup was folded: a reopen re-seats it inside the
+// the frame moved while a popup was folded: a reopen re-seats it inside the
 // frame (the WM_WINDOWPOSCHANGING clamp only rides real moves, and a bare
 // ShowWindow carries none)
-static void SumClampIntoFrame() {
-    if (!g_sumWnd || !g.main || IsIconic(g.main)) return;
+static void SumClampIntoFrame(int seat) {
+    if (!g_sumWnd[seat] || !g.main || IsIconic(g.main)) return;
     RECT mr; GetWindowRect(g.main, &mr);
     if (mr.right <= mr.left || mr.bottom <= mr.top) return;
-    RECT wr; GetWindowRect(g_sumWnd, &wr);
+    RECT wr; GetWindowRect(g_sumWnd[seat], &wr);
     int w = wr.right - wr.left, hgt = wr.bottom - wr.top;
     int x = max(mr.left, min(wr.left, mr.right - w));
     int y = max(mr.top, min(wr.top, mr.bottom - hgt));
     if (x != wr.left || y != wr.top)
-        SetWindowPos(g_sumWnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(g_sumWnd[seat], nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
-// the window itself, born hidden: SumPrewarm builds the seat at idle and the
-// first SumOpen just unfolds it
-static void SumCreateWindow() {
-    if (g_sumWnd) return;
+// the windows themselves, born hidden: SumPrewarm builds both seats at idle
+// and the first open just unfolds the one the surface asked for
+static void SumCreateWindowSeat(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || g_sumWnd[seat]) return;
     static bool cls = false;
     if (!cls) {
         cls = true;
@@ -1901,32 +1944,28 @@ static void SumCreateWindow() {
         RegisterClassExW(&wc);
     }
     double dpi = g.dpi > 0 ? g.dpi : 1.0;
+    const char* pre = seat == SUM_WEB ? "summary.win.web" : "summary.win";
     int defW = (int)(560 * dpi), defH = (int)(630 * dpi);
-    std::string sW = AiGetSetting("summary.win.w");
-    std::string sH = AiGetSetting("summary.win.h");
+    std::string sW = AiGetSetting(std::string(pre) + ".w");
+    std::string sH = AiGetSetting(std::string(pre) + ".h");
     int w = sW.empty() ? defW : max((int)(460 * dpi), (int)(atof(sW.c_str()) * dpi));
     int h = sH.empty() ? defH : max((int)(390 * dpi), (int)(atof(sH.c_str()) * dpi));
     // the popup's seat is the frame's seat: centered over the app on first
     // open, then the saved offset from the frame's corner (a plain absolute
     // restore put it wherever the desktop last saw it - the old windows-own-
-    // desktop behavior the popup is here to bury)
+    // desktop behavior the popup is here to bury). The web seat sits a step
+    // to the side of the reader's, so the two can stand open together.
     RECT mr{ 0, 0, 0, 0 };
     if (g.main) GetWindowRect(g.main, &mr);
     int x = mr.left + max(0, (int)(((mr.right - mr.left) - w) / 2));
     int y = mr.top + max(0, (int)(((mr.bottom - mr.top) - h) / 3));
-    std::string sRX = AiGetSetting("summary.win.relx");
-    std::string sRY = AiGetSetting("summary.win.rely");
+    std::string sRX = AiGetSetting(std::string(pre) + ".relx");
+    std::string sRY = AiGetSetting(std::string(pre) + ".rely");
     if (!sRX.empty() && !sRY.empty()) {
         x = mr.left + (int)(atof(sRX.c_str()) * dpi);
         y = mr.top + (int)(atof(sRY.c_str()) * dpi);
-    } else {
-        std::string sL = AiGetSetting("summary.win.left");
-        std::string sT = AiGetSetting("summary.win.top");
-        if (!sL.empty() && !sT.empty()) {   // a pre-popup session's absolute seat
-            x = (int)(atof(sL.c_str()) * dpi);   // migrates: the clamp below
-            y = (int)(atof(sT.c_str()) * dpi);   // pulls it back inside the app
-        }
     }
+    if (seat == SUM_WEB && sRX.empty()) x = mr.left + max(0, (int)(((mr.right - mr.left) - w) / 5 * 4));
     if (mr.right > mr.left) {   // never even propose a seat outside the frame
         int maxX = max(mr.left, mr.right - w);
         int maxY = max(mr.top, mr.bottom - h);
@@ -1948,44 +1987,45 @@ static void SumCreateWindow() {
     DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_CAPTION) | WS_CLIPCHILDREN;
     RECT rc{ 0, 0, w, h };
     AdjustWindowRect(&rc, style, FALSE);
-    g_sumWnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"docsy_sum", L"Page Summary",
+    g_sumWnd[seat] = CreateWindowExW(WS_EX_TOOLWINDOW, L"docsy_sum",
+                               seat == SUM_WEB ? L"Web Summary" : L"Page Summary",
                                style,
                                x, y,
                                rc.right - rc.left, rc.bottom - rc.top,
                                g.main, nullptr, g.hinst, nullptr);
-    if (g_sumWnd) {
-        SetWindowPos(g_sumWnd, nullptr, 0, 0, 0, 0,
+    if (g_sumWnd[seat]) {
+        SetWindowLongPtrW(g_sumWnd[seat], GWLP_USERDATA, (LONG_PTR)seat);   // the proc's
+        SetWindowPos(g_sumWnd[seat], nullptr, 0, 0, 0, 0,   // way home to its own state
                      SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        DwmApply(g_sumWnd);    // the card's rounded corners + tinted border
-        g_sumOwnerPrev = RECT{};
-        if (g.main) GetWindowRect(g.main, &g_sumOwnerPrev);
+        DwmApply(g_sumWnd[seat]);    // the card's rounded corners + tinted border
+        g_sumOwnerPrev[seat] = RECT{};
+        if (g.main) GetWindowRect(g.main, &g_sumOwnerPrev[seat]);
     }
 }
 // the idle seat: two and a half seconds after launch the frame builds its
-// navigator hidden - window, controller, page and all - so the first click on
-// the toolbar unfolds a living popup instead of a construction site
+// navigators hidden - window, controller, page and all - so the first click on
+// either toolbar unfolds a living popup instead of a construction site
 static void SumPrewarm() {
-    SumCreateWindow();
-    SumEnsure();
-}
-static void SumOpen(int mode) {
-    SumCreateWindow();
-    if (!g_sumWnd) return;
-    if (g_sumMode != mode) {
-        g_sumMode = mode;
-        if (g_sumCtr) { g_sumCtr->Close(); g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false; }
+    for (int s = 0; s < SUM_SEATS; s++) {
+        SumCreateWindowSeat(s);
+        SumEnsureSeat(s);
     }
-    ShowWindow(g_sumWnd, SW_SHOWNOACTIVATE);
-    if (g_sumCtr) g_sumCtr->put_IsVisible(TRUE);   // the fold took the render
+}
+static void SumOpenSeat(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS) return;
+    SumCreateWindowSeat(seat);
+    if (!g_sumWnd[seat]) return;
+    ShowWindow(g_sumWnd[seat], SW_SHOWNOACTIVATE);
+    if (g_sumCtr[seat]) g_sumCtr[seat]->put_IsVisible(TRUE);   // the fold took the render
                                                    // away; the unfold hands it
                                                    // back (the webview was born
                                                    // hidden and never auto-follows
                                                    // its parent's visibility)
-    SetForegroundWindow(g_sumWnd);
-    SumHookMouse();
-    SumEnsure();   // no-ops while the webview lives; re-arms it after a mode switch
-    SumClampIntoFrame();
-    if (g_sumReady && SumInitStale()) SumSendInit();
+    SetForegroundWindow(g_sumWnd[seat]);
+    if (!g_sumMouseHook) g_sumMouseHook = SetWindowsHookExW(WH_MOUSE_LL, SumMouseHookProc, g.hinst, 0);
+    SumEnsureSeat(seat);   // no-ops while the webview lives; re-arms it after a rebuild
+    SumClampIntoFrame(seat);
+    if (g_sumReady[seat] && SumInitStale(seat)) SumSendInitSeat(seat);
 }
 
 // ---- the summary's generation thread ----
@@ -1997,7 +2037,8 @@ static void SumOpen(int mode) {
 static void AiSumRun(unsigned long long gen, unsigned long long run,
                      std::shared_ptr<std::atomic<bool>> cancel, const std::string& docId,
                      std::wstring rangeText, int first, int last,
-                     int words, std::string lang, std::string genre, bool bypass) {
+                     int words, std::string lang, std::string genre, bool bypass,
+                     int seat = SUM_DOC) {
     AiLoadSettings();
     AiCfg cfg = g_aiCfg;
     std::wstring bodyW = std::regex_replace(rangeText,
@@ -2006,7 +2047,7 @@ static void AiSumRun(unsigned long long gen, unsigned long long run,
         AiEv* e = AiEvMake(AIEV_SUM_NOTEXT);
         e->gen = gen;
         AiPost(e);                       // the panel learns on the pump's thread
-        if (run == g_sumRun) g_sumBusy = false;
+        if (run == g_sumRun[seat]) g_sumBusy[seat] = false;
         return;
     }
     std::string hash = [&] {
@@ -2027,7 +2068,7 @@ static void AiSumRun(unsigned long long gen, unsigned long long run,
         e->a = WxU(cached);
         e->b = "fromCache";
         AiPost(e);
-        if (run == g_sumRun) g_sumBusy = false;
+        if (run == g_sumRun[seat]) g_sumBusy[seat] = false;
         return;
     }
     std::string sys = PromptBodyOf(genre.c_str());
@@ -2069,7 +2110,7 @@ static void AiSumRun(unsigned long long gen, unsigned long long run,
         AiEv* e = AiEvMake(AIEV_SUM_PROGRESS);
         e->gen = gen; e->a = WxU(L"Stopped");
         AiPost(e);
-        if (run == g_sumRun) g_sumBusy = false;
+        if (run == g_sumRun[seat]) g_sumBusy[seat] = false;
         return;
     }
     if (!ok || full.empty()) {
@@ -2088,7 +2129,7 @@ static void AiSumRun(unsigned long long gen, unsigned long long run,
                 msg = L"Authentication failed (API key invalid or expired). Please check your AI API key in Settings.";
             e->a = WxU(msg);
             AiPost(e);
-            if (run == g_sumRun) g_sumBusy = false;
+            if (run == g_sumRun[seat]) g_sumBusy[seat] = false;
             return;
         }
     }
@@ -2106,11 +2147,12 @@ static void AiSumRun(unsigned long long gen, unsigned long long run,
     e->a = WxU(answer);
     e->b = "gen";
     AiPost(e);
-    if (run == g_sumRun) g_sumBusy = false;
+    if (run == g_sumRun[seat]) g_sumBusy[seat] = false;
 }
 
 // ---- the summarizer panel's messages ----
-static void SumPanelMessage(const wchar_t* json) {
+static void SumPanelMessage(const wchar_t* json, int seat) {
+    if (seat < 0 || seat >= SUM_SEATS) return;
     std::string u8 = WxU(json);
     crxk::J m;
     if (!crxk::JParse(u8, m) || m.t != 'o') return;
@@ -2118,8 +2160,8 @@ static void SumPanelMessage(const wchar_t* json) {
     if (!typ || typ->t != 's') return;
     std::string t = typ->s;
     if (t == "ready") {
-        g_sumReady = true;
-        SumSendInit();
+        g_sumReady[seat] = true;
+        SumSendInitSeat(seat);
     } else if (t == "start") {
         // A second Start is a REDIRECT, not a drop. The old gate swallowed the
         // click while a run was busy: the page kept saying "Reading pages..."
@@ -2130,24 +2172,31 @@ static void SumPanelMessage(const wchar_t* json) {
         // by the page. The new run owns the busy flag from here.
         const crxk::J* g = m.get("gen"), * w = m.get("words"), * st = m.get("start"),
             * rg = m.get("range"), * lg = m.get("lang"), * gr = m.get("genre"), * bp = m.get("bypass");
-        unsigned long long gen = g ? (unsigned long long)g->d : ++g_sumGen;
-        g_sumGen = gen;                      // the accepted gen: stale completions
+        unsigned long long gen;
+        if (seat == SUM_WEB) {
+            // the web seat mints its own gens from a base no document run can
+            // reach: every completion finds its window by the gen alone
+            gen = (g_sumGen[seat] < kSumWebGenBase) ? kSumWebGenBase : g_sumGen[seat] + 1;
+        } else {
+            gen = g ? (unsigned long long)g->d : g_sumGen[seat] + 1;
+        }
+        g_sumGen[seat] = gen;                // the accepted gen: stale completions
                                              // recognize themselves against it
-        ++g_sumRun;                          // the new run owns the busy flag
-        if (g_sumBusy) {
-            if (g_sumCancel) *g_sumCancel = true;   // the old stream folds quietly
-            if (!(g_range.active && (g_range.what == 0 || g_range.what == 2)))
+        ++g_sumRun[seat];                    // the new run owns the busy flag
+        if (g_sumBusy[seat]) {
+            if (g_sumCancel[seat]) *g_sumCancel[seat] = true;   // the old stream folds quietly
+            if (seat == SUM_DOC && !(g_range.active && (g_range.what == 0 || g_range.what == 2)))
                 g_range.active = false;   // a model-phase run: the pump is idle;
                                           // an extraction in flight just gets
                                           // overwritten by the AiRangeStart below
         }
-        g_sumCancel = std::make_shared<std::atomic<bool>>(false);
-        int words = w ? (int)w->d : 1000;
+        g_sumCancel[seat] = std::make_shared<std::atomic<bool>>(false);
+        int words = w && w->t == 'd' ? (int)w->d : 1000;
         std::string lang = lg && lg->t == 's' ? lg->s : "English";
         std::string genre = gr && gr->t == 's' ? gr->s : "nonfiction_classic";
         bool bypass = bp && bp->b;
-        g_sumBusy = true;
-        if (g_sumMode == 0) {
+        g_sumBusy[seat] = true;
+        if (seat == SUM_DOC) {
             if (st && st->t == 'd') g_sumStart = max(1, (int)st->d);
             if (rg && rg->t == 'd') g_sumRange = max(1, (int)rg->d);
             DocState& D = DVF();
@@ -2156,7 +2205,7 @@ static void SumPanelMessage(const wchar_t* json) {
                 e->gen = gen;
                 e->a = WxU(L"Open a PDF first, then summarize its pages.");
                 AiPost(e);
-                g_sumBusy = false;
+                g_sumBusy[seat] = false;
                 return;
             }
             int last = min(g_sumStart + g_sumRange - 1, D.n);
@@ -2166,7 +2215,10 @@ static void SumPanelMessage(const wchar_t* json) {
             g_range.genre = genre;
             g_range.bypass = bypass;
         } else {
-            // the live page: one extraction, then the thread
+            // the live page: one extraction, then the thread. The digest key
+            // rides the tab's address, so a reopen of the same page lands the
+            // saved digest without a rerun.
+            g_sumWebDocId = SumWebDocKey();
             g_sumWebPending = gen;
             AiWebExtract(gen);
         }
@@ -2175,17 +2227,21 @@ static void SumPanelMessage(const wchar_t* json) {
         // was still breathing behind it: the old run folds quietly (its posts
         // are gen-gated away) and the busy flag dies with it - no reset, the
         // cache and the digest stay
-        if (g_sumCancel) *g_sumCancel = true;
-        g_range.active = false;
-        KillTimer(g.main, 4714);
-        g_sumBusy = false;
+        if (g_sumCancel[seat]) *g_sumCancel[seat] = true;
+        if (seat == SUM_DOC) {
+            g_range.active = false;
+            KillTimer(g.main, 4714);
+        }
+        g_sumBusy[seat] = false;
     } else if (t == "reset") {
-        if (g_sumCancel) *g_sumCancel = true;
-        g_range.active = false;              // an extraction in flight dies with
-        KillTimer(g.main, 4714);             // the reset - the old code left the
-                                             // pump grinding a wiped range
-        g_sumBusy = false;
-        if (g_sumMode == 0) {
+        if (g_sumCancel[seat]) *g_sumCancel[seat] = true;
+        if (seat == SUM_DOC) {
+            g_range.active = false;              // an extraction in flight dies with
+            KillTimer(g.main, 4714);             // the reset - the old code left the
+                                                 // pump grinding a wiped range
+        }
+        g_sumBusy[seat] = false;
+        if (seat == SUM_DOC) {
             DocState& D = DVF();
             if (!D.path.empty()) {
                 std::string docId = AiDocSessionKey(D.path);
@@ -2205,31 +2261,115 @@ static void SumPanelMessage(const wchar_t* json) {
                 AiSetSetting("summary.digest." + docId + ".scroll", "");
             }
         }
-    } else if (t == "save-scroll") {   // the digest's reader seat, per document
+    } else if (t == "save-scroll") {   // the digest's reader seat, per subject
         const crxk::J* tp = m.get("top");
-        if (g_sumMode == 0 && tp && tp->t == 'd') {
-            DocState& D = DVF();
-            if (!D.path.empty()) {
-                std::string docId = AiDocSessionKey(D.path);
+        if (tp && tp->t == 'd') {
+            if (seat == SUM_DOC) {
+                DocState& D = DVF();
+                if (!D.path.empty()) {
+                    std::string docId = AiDocSessionKey(D.path);
+                    int top = max(0, (int)tp->d);
+                    AiSetSetting("summary.digest." + docId + ".scroll", std::to_string(top));
+                }
+            } else if (!g_sumWebDocId.empty()) {
                 int top = max(0, (int)tp->d);
-                AiSetSetting("summary.digest." + docId + ".scroll", std::to_string(top));
+                AiSetSetting("summary.digest." + g_sumWebDocId + ".scroll", std::to_string(top));
             }
         }
     } else if (t == "close") {
         // the chrome's own close chip (DialogChrome's red mark) or Esc: the
         // fold is a hide - the webview, its digest and a running generation
         // all keep breathing behind it
-        SumHide(false);
+        SumHideSeat(seat, false);
     } else if (t == "drag") {
         // the HTML title bar's drag handle: hand the move to the OS caption
         // loop - ReleaseCapture is what lets the mouse leave the WebView2
-        if (g_sumWnd) {
+        if (g_sumWnd[seat]) {
             ReleaseCapture();
-            SendMessageW(g_sumWnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            SendMessageW(g_sumWnd[seat], WM_NCLBUTTONDOWN, HTCAPTION, 0);
         }
+    } else if (t == "word-action") {
+        // the word plate's Define and Explain (Avalanche's popup actions): a
+        // small buffered pass on the seat's own thread, the answer riding back
+        // to the same window's plate. Temperature-0 fact lookups, not streams.
+        const crxk::J* ac = m.get("action"), * wd = m.get("word"), * cx = m.get("context");
+        std::string action = ac && ac->t == 's' ? ac->s : "";
+        std::string word = wd && wd->t == 's' ? wd->s : "";
+        std::string context = cx && cx->t == 's' ? cx->s : "";
+        if (word.empty() || (action != "define" && action != "explain")) return;
+        std::string lang = AiGetSetting("summary.lang", "English");
+        std::thread([seat, action, word, context, lang]() {
+            // the worker's guard: an uncaught exception on a detached thread
+            // is std::terminate - the plate would take the app down with it
+            try {
+                AiLoadSettings();
+                AiCfg cfg = g_aiCfg;
+                std::string sys = action == "define"
+                    ? "You are an authoritative, concise dictionary assistant."
+                    : "You are a scholarly reading companion.";
+                std::string user;
+                if (action == "define") {
+                    std::string tpl = PromptBodyOf("word_define");
+                    if (tpl.empty())
+                        tpl = "The reader is studying a text in {language} and highlighted the term: \"{term}\".\n\n"
+                              "Define \"{term}\" concisely in English (1-3 sentences):\n"
+                              "1. Part of speech and core literal definition.\n"
+                              "2. If the term is non-English, provide its exact English translation first.\n"
+                              "3. Any cultural, technical, or contextual nuance in how the term is used.\n"
+                              "Do NOT include conversational meta-talk or introductory pleasantries.";
+                    size_t p;
+                    while ((p = tpl.find("{term}")) != std::string::npos) tpl.replace(p, 6, word);
+                    while ((p = tpl.find("{language}")) != std::string::npos) tpl.replace(p, 10, lang);
+                    user = tpl;
+                } else {
+                    std::string tpl = PromptBodyOf("word_explain");
+                    if (tpl.empty())
+                        tpl = "The reader is studying a text and highlighted the following passage/term:\n"
+                              "\"{term}\"\n\nThe sentence it appears in:\n{context}\n\n"
+                              "Explain it as a scholarly reading companion would: what it means HERE, "
+                              "grounded in the sentence's own context; unpack any jargon; quote the "
+                              "words that carry the meaning. 2-5 sentences, no meta-talk.";
+                    size_t p;
+                    while ((p = tpl.find("{term}")) != std::string::npos) tpl.replace(p, 6, word);
+                    while ((p = tpl.find("{context}")) != std::string::npos) tpl.replace(p, 9, context);
+                    while ((p = tpl.find("{language}")) != std::string::npos) tpl.replace(p, 10, lang);
+                    user = tpl;
+                }
+                std::string content;
+                AiError err;
+                bool ok = AiChatBuffered(cfg, sys, {}, user, 4096, nullptr, true, content, err, nullptr);
+                if (!ok || content.empty()) {
+                    AiError e2;
+                    if (AiChatBuffered(cfg, sys, {}, user, 8192, nullptr, true, content, e2, nullptr)
+                        && !content.empty()) ok = true;
+                    else ok = false;
+                }
+                AiEv* ev = AiEvMake(AIEV_WORD_OUT);
+                ev->key = std::to_string(seat);
+                ev->b = action;
+                ev->a = ok ? content : WxU(err.Friendly().empty()
+                     ? std::wstring(L"The lookup failed - check the AI settings.") : err.Friendly());
+                ev->flag = ok;
+                AiPost(ev);
+            } catch (...) {
+                AiEv* ev = AiEvMake(AIEV_WORD_OUT);
+                ev->key = std::to_string(seat);
+                ev->b = action;
+                ev->flag = false;
+                ev->a = "The word lookup stopped after an internal error.";
+                AiPost(ev);
+            }
+        }).detach();
+    } else if (t == "word-search") {
+        // the word plate's Search (Avalanche's system-browser road, made the
+        // app's own): one dedicated browser tab carries every lookup, and the
+        // browser itself takes the stage to show it
+        const crxk::J* wd = m.get("word");
+        std::string word = wd && wd->t == 's' ? wd->s : "";
+        if (!word.empty()) WebWordLookup(WxW(word));
     } else if (t == "page") {
         const crxk::J* p = m.get("page");
-        if (p && p->t == 'd' && g_sumMode == 0) {
+        if (p && p->t == 'd' && seat == SUM_DOC) {
             int pg = max(1, min((int)p->d, DVF().n));
             SetPage(pg - 1);
             DocState& D = DVF();
@@ -2254,7 +2394,7 @@ static void SumPanelMessage(const wchar_t* json) {
             }
         }
     } else if (t == "save-digest") {
-        if (g_sumMode == 0) {
+        if (seat == SUM_DOC) {
             DocState& D = DVF();
             if (!D.path.empty()) {
                 std::string docId = AiDocSessionKey(D.path);
@@ -2264,24 +2404,30 @@ static void SumPanelMessage(const wchar_t* json) {
                 if (l && l->t == 'd') AiSetSetting("summary.digest." + docId + ".last", std::to_string((int)l->d));
                 if (mdl && mdl->t == 's') AiSetSetting("summary.digest." + docId + ".model", mdl->s);
             }
+        } else if (!g_sumWebDocId.empty()) {
+            // the web digest saves itself under the page's address: a reopen
+            // of the same page finds it without a rerun
+            const crxk::J* txt = m.get("text"), * mdl = m.get("model");
+            if (txt && txt->t == 's') AiSetSetting("summary.digest." + g_sumWebDocId, txt->s);
+            if (mdl && mdl->t == 's') AiSetSetting("summary.digest." + g_sumWebDocId + ".model", mdl->s);
         }
     } else if (t == "test-range") {
         // the title bar's beaker (Avalanche's TestRangeRequested -> OpenAiTestForRange):
         // the tester_standard probe reads the current stretch and reports the first
         // and last sentences it saw - proof the extraction carries real text
-        if (g_sumBusy || g_sumMode != 0) return;
+        if (seat != SUM_DOC || g_sumBusy[seat]) return;
         DocState& D = DVF();
         if (D.path.empty()) return;
         const crxk::J* f = m.get("first"), * l = m.get("last");
         int first = f && f->t == 'd' ? max(1, (int)f->d) : g_sumStart;
         int last = l && l->t == 'd' ? min((int)l->d, D.n) : min(g_sumStart + g_sumRange - 1, D.n);
         if (first > last) return;
-        g_sumBusy = true;
-        AiRangeStart(D.path, first, last, 2, ++g_sumGen);
+        g_sumBusy[seat] = true;
+        AiRangeStart(D.path, first, last, 2, ++g_sumGen[SUM_DOC]);
     } else if (t == "prefetch") {
         const crxk::J* st = m.get("start"), * rg = m.get("range"),
             * w = m.get("words"), * lg = m.get("lang"), * gr = m.get("genre");
-        if (g_sumMode == 0 && st && st->t == 'd') {
+        if (seat == SUM_DOC && st && st->t == 'd') {
             int first = (int)st->d;
             int pages = rg && rg->t == 'd' ? (int)rg->d : g_sumRange;
             int words = w && w->t == 'd' ? (int)w->d : 1000;
@@ -2303,12 +2449,16 @@ static void SumPanelMessage(const wchar_t* json) {
                 g_sumPf.words = words;
                 g_sumPf.lang = lang;
                 g_sumPf.genre = genre;
-                if (g_sumWnd) SetTimer(g_sumWnd, 4723, 1200, nullptr);
+                if (g_sumWnd[SUM_DOC]) SetTimer(g_sumWnd[SUM_DOC], 4723, 1200, nullptr);
             }
         }
     }
 }
 static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
+    // the seat this window serves: stamped into GWLP_USERDATA at birth (0 reads
+    // as the document seat, the safe default for the class's earliest messages)
+    int seat = (int)GetWindowLongPtrW(h, GWLP_USERDATA);
+    if (seat < 0 || seat >= SUM_SEATS) seat = SUM_DOC;
     switch (m) {
     case WM_NCCALCSIZE: {   // DialogChrome: the caption row joins the client; the
                             // OS side/bottom borders stay for the resize bands.
@@ -2327,7 +2477,7 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             return 0;
         }
         DefWindowProcW(h, m, wp, lp);          // the OS lays out its full frame...
-        g_sumFrame = p->rgrc[0].left - orig.left;
+        g_sumFrame[seat] = p->rgrc[0].left - orig.left;
         p->rgrc[0].top = orig.top;             // ...and only the caption is dropped
         return 0;
     }
@@ -2336,9 +2486,9 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                            // HTML bar drags itself through the "drag" message
         POINT s{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         RECT rc; GetWindowRect(h, &rc);
-        if (!IsZoomed(h) && g_sumFrame > 0 && s.y < rc.top + g_sumFrame) {
-            if (s.x <  rc.left + g_sumFrame) return HTTOPLEFT;
-            if (s.x >= rc.right - g_sumFrame) return HTTOPRIGHT;
+        if (!IsZoomed(h) && g_sumFrame[seat] > 0 && s.y < rc.top + g_sumFrame[seat]) {
+            if (s.x <  rc.left + g_sumFrame[seat]) return HTTOPLEFT;
+            if (s.x >= rc.right - g_sumFrame[seat]) return HTTOPRIGHT;
             return HTTOP;
         }
         break;
@@ -2403,13 +2553,13 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_APP + 61:   // the mouse watcher's verdict, run on the pump: a click
-        SumHide(true);  // inside the frame folded the navigator from outside
+        SumHideSeat(seat, true);  // inside the frame folded this seat from outside
         return 0;
     case WM_TIMER:
         if (wp == 4722) {   // the seat's knock on the engine's door: the env was
-            KillTimer(h, 4722);   // still warming when SumEnsure last looked;
-            SumEnsure();          // SumEnsure re-arms the knock itself until the
-            return 0;             // runtime answers or is declared absent
+            KillTimer(h, 4722);   // still warming when SumEnsureSeat last looked;
+            SumEnsureSeat(seat);  // it re-arms the knock itself until the runtime
+            return 0;             // answers or is declared absent
         }
         if (wp == 4723) {   // the buffer's deferred kick: the open's paint has
             KillTimer(h, 4723);   // landed; if the pump is free, the background
@@ -2428,9 +2578,9 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         break;
     case WM_SIZE: {
-        if (g_sumCtr) {
+        if (g_sumCtr[seat]) {
             RECT r; GetClientRect(h, &r);
-            g_sumCtr->put_Bounds(r);
+            g_sumCtr[seat]->put_Bounds(r);
         }
         DwmApply(h);       // corner rounding flips when the window maximizes
         return 0;
@@ -2438,18 +2588,18 @@ static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_EXITSIZEMOVE:   // one settings write per gesture, not per pixel -
                             // the old WM_MOVE save rewrote settings.json four
                             // times a pixel while the window dragged
-        SumSavePlacement();
+        SumSavePlacementSeat(seat);
         return 0;
     case WM_DESTROY: {   // the one true teardown: the frame died (owned popups
-                         // go with it) - only here does the navigator really
-                         // stop: hook out, placement saved, generation cancelled
-        SumSavePlacement();
+                         // go with it) - only here does a seat really stop:
+                         // hook out, placement saved, generation cancelled
+        SumSavePlacementSeat(seat);
         SumUnhookMouse();
-        g_sumHideTick = 0;
-        if (g_sumCancel) *g_sumCancel = true;
-        g_range.active = false;
-        g_sumWnd = nullptr;
-        g_sumCtr = nullptr; g_sumWeb = nullptr; g_sumReady = false;
+        g_sumHideTick[seat] = 0;
+        if (g_sumCancel[seat]) *g_sumCancel[seat] = true;
+        if (seat == SUM_DOC) g_range.active = false;
+        g_sumWnd[seat] = nullptr;
+        g_sumCtr[seat] = nullptr; g_sumWeb[seat] = nullptr; g_sumReady[seat] = false;
         return 0;
     }
     case WM_CLOSE:

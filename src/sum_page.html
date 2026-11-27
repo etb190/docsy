@@ -162,6 +162,22 @@ select option{background-color:#242424; color:#e0e0e0;}
   border:1px solid var(--plateedge); border-radius:3px; display:none; z-index:10;
   box-sizing:border-box;}
 
+/* The word plate's action popup (Avalanche's Shift-over-a-word popup): three
+   buttons - Define, Explain, Search - and an answer that unfolds inside the
+   card. The pinned word keeps its plate while the popup stands. */
+#wordPop{position:absolute; display:none; flex-direction:column; z-index:20;
+  background:#252525; border:1px solid #3d3d3d; border-radius:8px;
+  box-shadow:0 6px 22px rgba(0,0,0,.55); padding:6px; gap:4px;
+  min-width:252px; max-width:340px;}
+#wordPop .wpRow{display:flex; gap:4px;}
+#wordPop .wpBtn{flex:1; background:var(--rowhover); color:var(--text); border:1px solid var(--line);
+  border-radius:5px; padding:5px 10px; font-size:11.5px; cursor:pointer; font-family:inherit;}
+#wordPop .wpBtn:hover{background:#505050; border-color:#606060;}
+#wordAns{display:none; background:var(--pane); border:1px solid var(--line); border-radius:5px;
+  padding:7px 9px; font-size:12px; line-height:1.45; color:var(--text);
+  white-space:pre-wrap; word-break:break-word; max-height:220px; overflow-y:auto;
+  -webkit-user-select:text; user-select:text; cursor:auto;}
+
 /* Empty State */
 #emptyState{position:absolute; inset:0; display:none; flex-direction:column;
   align-items:center; justify-content:center; text-align:center; pointer-events:none;}
@@ -305,6 +321,14 @@ select option{background-color:#242424; color:#e0e0e0;}
     <div id="digestWrap">
       <div id="digest"></div>
       <div id="wordPlate"></div>
+      <div id="wordPop">
+        <div class="wpRow">
+          <button class="wpBtn" id="wpDefine">Define</button>
+          <button class="wpBtn" id="wpExplain">Explain</button>
+          <button class="wpBtn" id="wpSearch">Search</button>
+        </div>
+        <div id="wordAns"></div>
+      </div>
       <div id="emptyState">
         <svg width="42" height="42" viewBox="0 0 24 24" fill="#a0a0a0" fill-rule="evenodd">
           <rect x="4" y="7" width="16" height="12" rx="3.5"/>
@@ -517,12 +541,50 @@ function paintAll(){
   S.shown=S.full.length; typeStop(); paint();
 }
 
-/* ---- Digest Word Hover Plate (DigestWordHighlightAdorner) ---- */
-var plate=$("wordPlate");
-function hideWordPlate(){ plate.style.display="none"; }
+/* ---- Digest Word Hover Plate (DigestWordHighlightAdorner) + the word popup ---- */
+var plate=$("wordPlate"), pop=$("wordPop"), popAns=$("wordAns");
+var S.pin=null;        // the popup's word: the plate holds there while it stands
+var S.lastHover=null;  // {r, word, ctx} - the word the pointer last rested on
+function hideWordPlate(){ if(S.pin) return; plate.style.display="none"; }   // the pin owns it
+function closeWordPop(){
+  pop.style.display="none"; popAns.style.display="none"; popAns.textContent="";
+  S.pin=null; plate.style.display="none";
+}
+function showWordPop(r, word, ctx){
+  S.pin={word:word};
+  var wrapR=$("digestWrap").getBoundingClientRect();
+  var x=r.left-wrapR.left, y=r.bottom-wrapR.top+6;
+  var pw=252;
+  pop.style.left=Math.max(4, Math.min(x-30, wrapR.width-pw-6))+"px";
+  pop.style.top=y+"px";
+  pop.style.display="flex";
+  popAns.style.display="none"; popAns.textContent="";
+  plate.style.display="block";                    // the pinned word keeps its plate
+}
+window.addEventListener("keydown", function(e){
+  if(e.key==="Shift" && !e.repeat && S.lastHover && !S.generating && !S.busy){
+    showWordPop(S.lastHover.r, S.lastHover.word, S.lastHover.ctx);
+  } else if(e.key==="Escape"){
+    closeWordPop();
+  }
+});
+function wordAct(act){
+  if(!S.pin) return;
+  post({type:"word-action", action:act, word:S.pin.word,
+        context:S.lastHover?S.lastHover.ctx:""});
+  popAns.textContent="\u2026"; popAns.style.display="block";
+}
+$("wpDefine").addEventListener("click", function(){ wordAct("define"); });
+$("wpExplain").addEventListener("click", function(){ wordAct("explain"); });
+$("wpSearch").addEventListener("click", function(){
+  if(!S.pin) return;
+  post({type:"word-search", word:S.pin.word});
+  closeWordPop();
+});
 function updateWordHighlight(e){
+  if(S.pin) return;                                // the popup's word owns the plate
   if(S.generating || window.getSelection().toString().length>0){
-    hideWordPlate(); return;
+    closeWordPop(); hideWordPlate(); return;
   }
   var x=e.clientX, y=e.clientY;
   var range=null;
@@ -573,10 +635,22 @@ function updateWordHighlight(e){
   plate.style.width=(r.width + 4)+"px";
   plate.style.height=(r.height + 2)+"px";
   plate.style.display="block";
+
+  // the popup's own ammunition: the word and the sentence it sits in - the
+  // Explain answer grounds itself in that sentence, the way the ported
+  // popup grounds itself in the author's pages
+  var sA=wStart, sB=wEnd, guard=0;
+  while(sA>0 && guard++<400 && !/[.!?\u3002\uff01\uff1f]/.test(str[sA-1])) sA--;
+  guard=0;
+  while(sB<str.length && guard++<400 && !/[.!?\u3002\uff01\uff1f]/.test(str[sB])) sB++;
+  var ctx=str.slice(sA,sB).trim();
+  if(ctx.length>300) ctx=ctx.slice(0,300);
+  S.lastHover={r:{left:r.left,top:r.top,bottom:r.bottom,right:r.right,width:r.width,height:r.height},
+               word:str.slice(wStart,wEnd), ctx:ctx};
 }
 $("digest").addEventListener("mousemove", updateWordHighlight);
 $("digest").addEventListener("mouseleave", hideWordPlate);
-$("digest").addEventListener("scroll", function(){ hideWordPlate(); requestScrollSave(); });
+$("digest").addEventListener("scroll", function(){ closeWordPop(); requestScrollSave(); });
 
 /* ---- Card States & Nav ---- */
 function emptyState(idle, busy){
@@ -749,6 +823,7 @@ function handleHostMessage(m){
     // gen) dies HERE, before the new state paints - the saved digest painting
     // through the "Nothing summarized yet" card was exactly this mop missing
     S.gen++; S.generating=false; S.incoming=[]; typeStop(); setBusy(false);
+    closeWordPop();   // a re-init's new subject takes its plate and popup back
     overlay("",false);
     prefetch.text=""; prefetch.ready=false;
     $("stBuffer").textContent="";
@@ -854,6 +929,12 @@ function handleHostMessage(m){
     status("");
     checkPrefetchBuffer();   // the run died but the buffer's job is separate -
                              // a dropped request gets re-asked here, not hung
+    break;
+
+  case "word-answer":    // the word plate's Define/Explain: the answer unfolds
+                         // inside the standing popup, its own card, no gen
+    popAns.textContent=(m.ok?"":"\u26a0 ")+(m.text||"");
+    popAns.style.display="block";
     break;
 
   case "error":
