@@ -602,6 +602,7 @@ static void EditorToggle(bool on) {
     UpdateTitle();
     // the session remembers the view (the flag already flipped at the top)
     AiSetSetting("app.view", g_editOn ? "editor" : (g_webOn ? "web" : "pdf"));
+    SumSearchReveal();   // the reader is back under the editor: a card a word-search folded pops back
 }
 
 static RECT EditorBtnRect(int id, int w, int h) {

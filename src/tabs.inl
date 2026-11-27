@@ -213,6 +213,7 @@ static void SwitchTab(bool b, int idx) {
     TabTrimCaches(b);
     LayoutMain();                                 // the band may appear or collapse; reflow
     TabChrome(b);
+    SumSearchReveal();   // the reader's deck moved: a card a word-search folded pops back
 }
 
 // FindOpenSession: an open session for this exact file (case-insensitive full

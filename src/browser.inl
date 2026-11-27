@@ -2291,6 +2291,7 @@ static void WebToggle(bool on) {
     UpdateTitle();
     // the session remembers the view: a launch with no file restores this exact face
     AiSetSetting("app.view", on ? "web" : (g_editOn ? "editor" : "pdf"));
+    SumSearchReveal();   // the stage landed: a card a word-search folded pops back
 }
 
 static void WebShutdown() {

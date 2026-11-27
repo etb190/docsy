@@ -15,6 +15,8 @@ static void AiModeChanged();          // browser/editor/reader flips rebind the 
 static void AiPanelMessage(const wchar_t* json);   // defined in ai_ui2.inl
 static void AiHandleEvent(AiEv* e);                // defined in ai_ui3.inl
 static void AiIndexKickoff(const std::wstring& path);   // defined in ai_ui2.inl
+static void SumSearchReveal();                     // defined in ai_ui2.inl - the stage's
+                                                   // return unfolds a card a word-search folded
 
 // ---- the panel ----
 static wrl::ComPtr<ICoreWebView2Controller> g_aiCtr;

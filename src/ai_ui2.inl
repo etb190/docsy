@@ -1870,11 +1870,13 @@ static void SumApplyBounds(int seat) {
 // panes under it a repaint - the ghost of the card's last position stays
 // stamped on the document until their queued paint lands, and at one tick per
 // mousemove the ghosts stack up as a trail of glitching behind the card.
-// Every bounds tick therefore repaints the union of the card's old and new
-// footprint SYNCHRONOUSLY: each pane under the card redraws its one atomic
-// frame before the next tick can stamp another ghost. Each window composes
-// its own redirection surface, so the panes painting under the card never
-// scratch it - DWM lays the card back on top.
+// The bands pile up in g_sumDirty and one synchronous pass clears them all,
+// budgeted to the frame (16ms) rather than the mouse: a paint per tick
+// flooded the message queue and the card crawled behind its cursor. Each
+// window composes its own redirection surface, so the panes painting under
+// the card never scratch it - DWM lays the card back on top.
+static RECT g_sumDirty[SUM_SEATS] = {};    // exposed bands waiting for the next cure
+static DWORD g_sumPaintAt[SUM_SEATS] = {}; // the tick the last cure ran, per seat
 static void SumRepaintUnder(int seat, RECT u) {
     if (!g.main) return;
     for (HWND c = GetWindow(g.main, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
@@ -1890,7 +1892,10 @@ static void SumRepaintUnder(int seat, RECT u) {
         RECT px;
         if (!IntersectRect(&px, &cr, &pc)) continue;
         InvalidateRect(c, &px, FALSE);
-        UpdateWindow(c);                                    // now, not when the queue gets to it
+        wchar_t cls[32]; GetClassNameW(c, cls, 32);         // Chromium-hosted siblings (a tab's
+        bool chromium = wcsncmp(cls, L"Chrome_", 7) == 0;   // page) blit their own surface on
+        if (!chromium)                                      // their own clock - UpdateWindow
+            UpdateWindow(c);                                // against one stalls the drag
     }
     InvalidateRect(g.main, &u, FALSE);   // the strips no child covers (gaps between panes)
 }
@@ -1927,6 +1932,9 @@ static void SumHideSeat(int seat, bool fromOutside) {
     g_sumShown[seat] = false;
     g_sumDragMode[seat] = 0;   // a fold mid-gesture ends the gesture: the hook's
                                // moves would otherwise keep dragging a hidden card
+    g_sumDirty[seat] = { 0, 0, 0, 0 };   // and its unpainted band dies with it - the
+                                         // fold exposes the whole card and the panes
+                                         // repaint that themselves
     if (g_sumCtr[seat]) g_sumCtr[seat]->put_IsVisible(FALSE);   // folded = not rendered, not
                                                     // dead: the page keeps its
                                                     // DOM, a generation keeps
@@ -2058,19 +2066,57 @@ static void SumDragTick(long sx, long sy) {
         }
         g_sumRect[s] = r;
         SumApplyBounds(s);
+        if (pre.left == r.left && pre.top == r.top && pre.right == r.right &&
+            pre.bottom == r.bottom)
+            continue;   // the cursor idled: no band was exposed, nothing to cure
         RECT u{ min(pre.left, r.left), min(pre.top, r.top),
                 max(pre.right, r.right), max(pre.bottom, r.bottom) };
-        SumRepaintUnder(s, u);   // the vacated and newly covered bands, repainted now
+        RECT& d = g_sumDirty[s];
+        if (d.left >= d.right || d.top >= d.bottom) d = u;
+        else {   // the bands pile up; one cure clears them all
+            d.left = min(d.left, u.left); d.top = min(d.top, u.top);
+            d.right = max(d.right, u.right); d.bottom = max(d.bottom, u.bottom);
+        }
+        DWORD now = GetTickCount();
+        if (now - g_sumPaintAt[s] >= 16) {   // one repaint per frame, not per tick
+            SumRepaintUnder(s, d);
+            d = { 0, 0, 0, 0 };
+            g_sumPaintAt[s] = now;
+        }
     }
 }
 // the gesture's button-up: the placement rides out once, not per pixel
 static void SumDragEnd() {
-    for (int s = 0; s < SUM_SEATS; s++)
+    for (int s = 0; s < SUM_SEATS; s++) {
         if (g_sumDragMode[s]) {
             g_sumDragMode[s] = 0;
             g_sumDragEdge[s] = 0;
             SumSavePlacementSeat(s);
         }
+        if (g_sumDirty[s].left < g_sumDirty[s].right) {   // the last tick's exposed
+            SumRepaintUnder(s, g_sumDirty[s]);            // band goes out with the
+            g_sumDirty[s] = { 0, 0, 0, 0 };               // gesture, not the next one
+        }
+    }
+}
+// the word plate's Search folds the issuing card so the stage it called up
+// breathes: the lookup lands on the browser and the card would only float
+// over it. The fold is MARKED, not owned - g_sumSearchHide remembers which
+// seat a word-search folded, and the stage's return to that seat's side
+// (the editor for the doc card, the browser for the web card) unfolds it
+// again. A fold from any other road - the close chip, Esc, an outside click -
+// never sets the mark, so it never reopens by itself.
+static bool g_sumSearchHide[SUM_SEATS] = {};
+static void SumSearchReveal() {
+    if (g_sumSearchHide[SUM_DOC] && !g_sumShown[SUM_DOC] &&
+        !g_webOn && !g_editOn) {          // the reader is the stage again
+        g_sumSearchHide[SUM_DOC] = false;
+        SumOpenSeat(SUM_DOC);
+    }
+    if (g_sumSearchHide[SUM_WEB] && !g_sumShown[SUM_WEB] && g_webOn) {
+        g_sumSearchHide[SUM_WEB] = false;
+        SumOpenSeat(SUM_WEB);
+    }
 }
 // the seats' knock on the engine's door, served on the pump: one timer on the
 // frame answers for both overlays, and stands down when nobody is waiting
@@ -2511,7 +2557,16 @@ static void SumPanelMessage(const wchar_t* json, int seat) {
         // browser itself takes the stage to show it
         const crxk::J* wd = m.get("word");
         std::string word = wd && wd->t == 's' ? wd->s : "";
-        if (!word.empty()) WebWordLookup(WxW(word));
+        if (!word.empty()) {
+            WebWordLookup(WxW(word));
+            // the stage turned to the lookup: the issuing card folds so the
+            // result shows, and the stage's return brings it back
+            // (SumSearchReveal, wired into the mode flips)
+            if (g_sumShown[seat]) {
+                g_sumSearchHide[seat] = true;
+                SumHideSeat(seat, false);
+            }
+        }
     } else if (t == "page") {
         const crxk::J* p = m.get("page");
         if (p && p->t == 'd' && seat == SUM_DOC) {

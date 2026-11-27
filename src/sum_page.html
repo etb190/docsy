@@ -183,13 +183,18 @@ select option{background-color:#242424; color:#e0e0e0;}
   white-space:pre-wrap; word-break:break-word; max-height:220px; overflow-y:auto;
   -webkit-user-select:text; user-select:text; cursor:auto;}
 
-/* The card is an overlay of the main frame, not a window: it rounds, shades
-   and borders itself on the plate the body lays down. The !important guards
-   the COLOR only - a shorthand here would carry background-image:none with
-   it and stomp the grain tile the script paints onto the body. */
-html,body{background-color:#141414 !important;}
+/* The card is an overlay of the main frame, not a window: it fills the
+   controller's bounds edge to edge, SQUARE - no radius, no shadow, no body
+   margin. The old plate rounded itself 10px and cast a 44px shadow onto the
+   body, and the body sat inside the browser's default 8px margin: with the
+   body now opaque (#141414, the trail's cure) all of that rendered as a
+   weird black rim and dark notched corners around the card. The 1px hairline
+   stays for definition against the page. The !important guards the COLOR
+   only - a shorthand here would carry background-image:none with it and
+   stomp the grain tile the script paints onto the body. */
+html,body{margin:0; background-color:#141414 !important;}
 #app{position:relative; background:var(--bg); border:1px solid #3a3a3a;
-  border-radius:10px; overflow:hidden; box-shadow:0 12px 44px rgba(0,0,0,.55);}
+  border-radius:0; overflow:hidden; box-shadow:none;}
 /* The rim's resize strips: the popup is resizable from every side and
    corner, not just the grip's one corner - eight invisible strips around
    the card's edge, above the rows, below the grip's affordance mark. */
@@ -203,7 +208,7 @@ html,body{background-color:#141414 !important;}
 #rz-se{bottom:0; right:0; width:14px; height:14px; cursor:nwse-resize;}
 #rz-sw{bottom:0; left:0; width:14px; height:14px; cursor:nesw-resize;}
 #grip{position:absolute; right:2px; bottom:2px; width:18px; height:18px; z-index:99;
-  cursor:nwse-resize; border-radius:0 0 9px 0;
+  cursor:nwse-resize;
   background:linear-gradient(135deg, transparent 0 50%, rgba(160,160,160,.45) 50%);}
 
 /* Empty State */
