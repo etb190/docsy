@@ -13,6 +13,8 @@ static void SumHideSeat(int seat, bool fromOutside);   // the popup contract: a 
                                                        // it, alive
 static void SumOpenSeat(int seat);
 static void SumEnsureSeat(int seat);
+static void SumRaiseSeat(int seat);   // the unfold's walk back to the top of the
+                                      // sibling order - defined below the geometry
 static void SumSavePlacementSeat(int seat);
 static void SumPrewarm();        // the idle seats: overlays build hidden
 static void SumSavePlacementSeat(int seat);   // one settings write per gesture
@@ -1819,9 +1821,10 @@ static void SumEnsureSeat(int seat) {
                 if (!html.empty()) g_sumWeb[seat]->NavigateToString(html.c_str());
                 SumSeatBoundsRead(seat);   // the saved card lands, clamped inside
                 c->put_Bounds(g_sumRect[seat]);
-                if (g_sumHwnd[seat] && g_sumShown[seat])   // the open raced the build:
-                    SetWindowPos(g_sumHwnd[seat], HWND_TOP, 0, 0, 0, 0,   // raised here too
-                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                if (g_sumShown[seat]) SumRaiseSeat(seat);   // the open raced the build:
+                                                    // raised here too - by the card's
+                                                    // own bounds, not the diff's
+                                                    // possibly-swapped handle
                 return S_OK;
             }).Get());
 }
@@ -1910,12 +1913,42 @@ static void SumRepaintUnder(int seat, RECT u) {
     InvalidateRect(g.main, &u, FALSE);   // the strips no child covers (gaps between panes)
 }
 // the overlay's z-order: the frame's later-built webviews (a tab's page, the
-// editor's scroller) are full-cover siblings stacked ABOVE a surface born
-// earlier - a top-level window never met them, an overlay does. The unfold
-// walks the card back to the top of the sibling order; no activation stolen,
-// the MoveFocus below owns the keys.
+// editor's scroller, the AI panel) are full-cover siblings stacked ABOVE a
+// surface born earlier - a top-level window never met them, an overlay does.
+// The unfold walks the card back to the top of the sibling order; no
+// activation stolen, the MoveFocus below owns the keys.
+//
+// The walk lands on the card's OWN window, not a remembered handle: the
+// prewarm fires both seats' controller creations back to back, so both Chrome
+// windows usually exist before either completion runs - and the completion's
+// "newest child" diff then names the SAME (web seat's) window for both seats.
+// A raise of the wrong twin leaves the card under whatever the frame built
+// since: put_IsVisible renders it, the siblings paint over it, and the popup
+// "opens" without ever appearing. The bounds are applied just before a raise,
+// so the card's own surface is the Chrome window wearing exactly this seat's
+// rect - nothing else in the frame can wear it. Finding it here heals a stale
+// or swapped handle on every open, whichever order the completions ran in.
 static void SumRaiseSeat(int seat) {
-    if (seat < 0 || seat >= SUM_SEATS || !g_sumHwnd[seat] || !g.main) return;
+    if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
+    RECT s = g_sumRect[seat];
+    MapWindowPoints(g.main, nullptr, (POINT*)&s, 2);   // the card's rect on screen,
+    struct SumWant { HWND hit; RECT scr; };            // where the enum reads windows
+    SumWant w{ nullptr, s };
+    EnumChildWindows(g.main, [](HWND h, LPARAM lp) -> BOOL {
+        SumWant* p = (SumWant*)lp;
+        if (p->hit) return TRUE;
+        wchar_t cls[32]; GetClassNameW(h, cls, 32);
+        if (wcsncmp(cls, L"Chrome_", 7) != 0) return TRUE;
+        RECT r; GetWindowRect(h, &r);
+        if (abs(r.left - p->scr.left) <= 2 && abs(r.top - p->scr.top) <= 2 &&
+            abs(r.right - p->scr.right) <= 2 && abs(r.bottom - p->scr.bottom) <= 2)
+            p->hit = h;                           // the one surface wearing the
+        return TRUE;                              // card's own bounds
+    }, (LPARAM)&w);
+    if (w.hit) g_sumHwnd[seat] = w.hit;           // the catch-up heal: a handle the
+                                                  // completion race got wrong rights
+                                                  // itself here, once per raise
+    if (!g_sumHwnd[seat]) return;
     SetWindowPos(g_sumHwnd[seat], HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
