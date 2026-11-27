@@ -2017,31 +2017,45 @@ static void SumSavePlacementSeat(int seat) {
 static void SumOwnerMoved() {
     SumSyncVisible();
 }
-// the pump's verdict on the hook's outside click: every unfolded card whose
-// rect misses the point folds; a click on a card leaves all of them standing.
-// The tab strips are the exception: a click that swaps decks is the card's
-// own per-tab life - the stand follows the deck (SumTabStand) instead of
-// folding. The reader's band rides the top of g.view (face 3dp + 30dp); the
-// browser's whole chrome bar is g_wstrip.
+// the pump's verdict on the hook's outside click: the card yields only to the
+// page itself. A click on the reader's pages (g.view's own surface, under its
+// composited chrome) or in the web stage that rides g.view - the browser's
+// pages and the editor stage are pages of that one webview - folds every card
+// that misses the point. Everything else leaves the cards standing: rails and
+// thumbnails, the sidechat and notes, toolbars, strips and the omnibox, the
+// status bar, popups and bubbles, and a click on a card.
 static void SumOutsideClick(long sx, long sy) {
-    if (!g.main) return;
+    if (!g.main || !g.view) return;
     POINT o{ 0, 0 };
     ClientToScreen(g.main, &o);
     RECT cr; GetClientRect(g.main, &cr);
     POINT pt{ (int)sx - o.x, (int)sy - o.y };
     if (pt.x < cr.left || pt.x >= cr.right || pt.y < cr.top || pt.y >= cr.bottom) return;
-    if (g.view && !g_webOn) {
-        POINT vp{ pt.x, pt.y };
-        MapWindowPoints(g.main, g.view, &vp, 1);
-        RECT vr; GetClientRect(g.view, &vr);
-        if (vp.x >= 0 && vp.x < vr.right && vp.y >= 0 && vp.y < TABF(33)) return;
+    for (int s = 0; s < SUM_SEATS; s++)
+        if (g_sumShown[s] && PtInRect(&g_sumRect[s], pt)) return;   // a click on a
+                                                    // card leaves all of them standing
+    POINT sp{ (int)sx, (int)sy };
+    HWND w = WindowFromPoint(sp);
+    if (!w) return;
+    if (GetAncestor(w, GA_ROOT) != g.main) return;   // an owned popup or bubble
+    if (w == g.main) return;                         // caption and other non-client
+    HWND c = w;                                      // the frame child under the click
+    while (c && c != g.main && GetParent(c) != g.main) c = GetParent(c);
+    bool pages = c == g.view;                        // only the view and what rides it
+    if (pages && w != g.view) {                      // are pages: the web stage's
+        wchar_t cls[64];                             // Chrome windows are pages, any
+        GetClassNameW(w, cls, 64);                   // other child (the find bar's
+        pages = wcsncmp(cls, L"Chrome_", 7) == 0;    // query edit) is overlay chrome
     }
-    if (g_wstrip) {
-        POINT wp{ pt.x, pt.y };
-        MapWindowPoints(g.main, g_wstrip, &wp, 1);
-        RECT wr; GetClientRect(g_wstrip, &wr);
-        if (wp.x >= 0 && wp.x < wr.right && wp.y >= 0 && wp.y < wr.bottom) return;
+    if (pages && w == g.view) {                      // the view composites its own
+        POINT vp{ pt.x, pt.y };                      // chrome into the page buffer -
+        MapWindowPoints(g.main, g.view, &vp, 1);     // the deck's tab band, the find
+        if (!g_webOn && vp.y >= 0 && vp.y < TABF(33)) pages = false;   // bar and the
+        else if (g_fedit && FdOverBar(vp)) pages = false;   // annotation bar are not
+        else if (g.barOn && PtInRect(&AnnBarRect(), pt)) pages = false;   // pages
     }
+    if (!pages) return;                              // chrome - the stand follows the
+                                                     // deck (SumTabStand) instead
     for (int s = 0; s < SUM_SEATS; s++)
         if (g_sumShown[s] && !PtInRect(&g_sumRect[s], pt))
             SumHideSeat(s, true);
