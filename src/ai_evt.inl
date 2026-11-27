@@ -84,5 +84,10 @@ static void AiModeChanged();
 static void AiOverlayLayout();
 static void SumToggle(int mode);
 static void SumOwnerMoved();   // the frame moved: the summary popup rides along
+static void SumOutsideClick(long x, long y);   // the pump's verdict on an outside click
+static void SumDragTick(long x, long y);       // the popup's drag/resize, one tick per move
+static void SumDragEnd();                      // the drag's button-up: placement saved
+static void SumEnsureRetry();                  // the env's retry knock, served on the pump
+static void SumPrefetchKick();                 // the buffer's deferred kick, re-homed
 static void SumSyncVisible();  // the frame's minimize/restore drives the seat's
                                // render - the controller never follows its host

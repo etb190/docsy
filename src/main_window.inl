@@ -653,6 +653,15 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             SumPrewarm();                              // in - the navigator is built and
             return 0;                                  // loaded before anyone clicks it
         }
+        if (wp == 4722) {                              // the summary overlays' env knock:
+            SumEnsureRetry();                          // they ride THIS window now; one
+            return 0;                                  // timer answers for both seats
+        }
+        if (wp == 4737) {                              // the summary's buffer kick: the
+            KillTimer(h, 4737);                        // prefetch pump re-homed from the
+            SumPrefetchKick();                         // window era to the frame's timers
+            return 0;
+        }
         if (wp == 4723) {                              // the AI panel's cold-start knock:
             KillTimer(h, 4723);                        // the engine was still warming when
             AiPanelEnsure();                           // the panel first looked; the quiet
@@ -661,6 +670,11 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         break;                                 // (the find bar's pumps ride the view)
     case WM_DROPFILES: HandleDrop((HDROP)wp, h); return 0;   // the frame's drop: the focused pane
     case WM_APP + 71: AiHandleEvent((AiEv*)lp); return 0;   // the AI workers' event pump
+    case WM_APP + 61: SumOutsideClick(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+                      // the mouse watcher's verdict: the summary overlays' fold contract
+    case WM_APP + 62: SumDragTick(GET_X_LPARAM(lp), GET_Y_LPARAM(lp)); return 0;
+                      // a drag or grip-resize tick, applied where put_Bounds may speak
+    case WM_APP + 63: SumDragEnd(); return 0;   // the gesture's button-up: placement saved
     case WM_APP + 72: AiOcrArrive((AiOcrPayload*)lp); return 0;   // the OCR flight lands:
                                           // one page's text geometry, built on its own
                                           // async completion - the UI thread only stores

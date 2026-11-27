@@ -90,8 +90,15 @@ static std::wstring g_aiNotesDocPath;
 // runs: summarizing a web page never folds or overwrites the book's digest,
 // and both can stand open side by side.
 enum { SUM_DOC = 0, SUM_WEB = 1, SUM_SEATS = 2 };
-static HWND g_sumWnd[SUM_SEATS] = {};
-static int g_sumFrame[SUM_SEATS] = {};               // the OS border width NCCALCSIZE kept
+static bool g_sumShown[SUM_SEATS] = {};   // each seat's fold state - the popup is an
+                                          // overlay of the main frame, not a window
+                                          // of its own, so there is no HWND to ask
+static RECT g_sumRect[SUM_SEATS] = {};    // each seat's card in the frame's CLIENT
+                                          // coords (the overlay moves with the frame;
+                                          // a resize just clamps it back inside)
+static int g_sumDragMode[SUM_SEATS] = {}; // 0 still, 1 move, 2 resize - the low-level
+                                          // hook carries the gesture, the pump applies
+static POINT g_sumDragOff[SUM_SEATS] = {}; // the grab's cursor offset from the card
 static wrl::ComPtr<ICoreWebView2Controller> g_sumCtr[SUM_SEATS];
 static wrl::ComPtr<ICoreWebView2> g_sumWeb[SUM_SEATS];
 static bool g_sumBuilding[SUM_SEATS] = {}, g_sumReady[SUM_SEATS] = {};

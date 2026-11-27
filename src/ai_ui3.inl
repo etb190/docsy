@@ -735,7 +735,7 @@ static void AiHandleEvent(AiEv* e) {
         // one gets the native ear - PlaySound answers whether or not any
         // webview renders. The page learns which ear rang through "ping":
         // false mutes its own chime so the room never hears a double.
-        bool winVisible = g_sumWnd[owner] && IsWindowVisible(g_sumWnd[owner]) != FALSE;
+        bool winVisible = g_sumShown[owner];   // the overlay's fold state, straight from the seat
         bool currentRun = e->gen == g_sumGen[owner];   // a superseded run's chime
                                                        // belongs to no one alive
         if (!winVisible && currentRun &&
@@ -805,7 +805,7 @@ static void AiHandleEvent(AiEv* e) {
                                 // or found nothing - the page must hear that
                                 // too, or its chip hangs on "generating".
         int first = atoi(e->key.c_str());
-        bool winVisible = g_sumWnd[SUM_DOC] && IsWindowVisible(g_sumWnd[SUM_DOC]) != FALSE;
+        bool winVisible = g_sumShown[SUM_DOC]; // the overlay's fold state, straight from the seat
         if (!e->a.empty()) {
             if (!winVisible &&
                 AiGetSetting("summary.ping.enabled", "1") != "0")

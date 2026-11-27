@@ -210,6 +210,12 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     // right edge keeps the window gutter; pane A and the unsplit card sit at 0
     int cx = b ? (int)(4 * g.dpi) : 0;
     int cw = CardW(b);                       // the card's own width inside this pass
+    // the AI sidechat docked flush: the card that touches it grows its RIM 3px
+    // past the client - ring and shadow clip away, the canvas runs to the seam,
+    // and the chat's side wears nothing. Page layout keeps `cw`: the extension
+    // is the rim's alone, never the pages'.
+    bool rimRight = ((g.split != 0) == (b != 0)) && g_aiDockW > 0;
+    int cwRim = cw + (rimRight ? 3 * (int)g.dpi : 0);
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
     // the DIB's left edge sits at the pane's view x, so the grain phase shifts
@@ -220,13 +226,13 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     RECT fr{ 0, 0, w, h };                                // the window's grain phase,
     FillRect(bdc, &fr, GrainBrush(1));                    // like every sibling pane
     if (card) {
-        CardShadowStrip(bits, w, h, cx, cx + cw, rad, ty);
+        CardShadowStrip(bits, w, h, cx, cx + cwRim, rad, ty);
         Gdiplus::Graphics gs(bdc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         // the canvas interior, half a pixel in: GDI+ centers pixels on integer
         // coordinates, so the path edge must sit at the boundary between the
         // ring's outermost pixel and the canvas's first one to fill it whole
-        Gdiplus::GraphicsPath* inner = CardPath((float)cx + 0.5f, (float)ty + 0.5f, (float)cw - 1,
+        Gdiplus::GraphicsPath* inner = CardPath((float)cx + 0.5f, (float)ty + 0.5f, (float)cwRim - 1,
                                                 (float)h - 1 - ty, (float)rad - 1, 0);
         if (Gdiplus::TextureBrush* c = GrainTex(0)) {     // the canvas, phased like GDI's
             c->ResetTransform();
@@ -239,7 +245,7 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
             gs.FillPath(&cb, inner);
         }
         delete inner;
-        CardRingBake(bits, w, h, cw, rad, cx, ty);        // the #555 ring, exact per pixel
+        CardRingBake(bits, w, h, cwRim, rad, cx, ty);     // the #555 ring, exact per pixel
     }
     SelectObject(bdc, ob);
     DeleteDC(bdc);

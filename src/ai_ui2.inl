@@ -8,15 +8,17 @@ static void AiPanelMessage(const wchar_t* json);
 static void SumPanelMessage(const wchar_t* json, int seat);
 static void SumPostSeat(int seat, const std::string& j);
 static void SumPost(const std::string& j);
-static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp);
 static void SumHideSeat(int seat, bool fromOutside);   // the popup contract: a click
                                                        // outside its borders folds
                                                        // it, alive
 static void SumOpenSeat(int seat);
 static void SumEnsureSeat(int seat);
 static void SumSavePlacementSeat(int seat);
-static void SumPrewarm();        // the idle seats: window + webviews build hidden
-static void SumSavePlacement();  // one settings write per gesture, not per pixel
+static void SumPrewarm();        // the idle seats: overlays build hidden
+static void SumSavePlacementSeat(int seat);   // one settings write per gesture
+static void SumSeatBoundsRead(int seat);      // the overlay card's seat, read from
+                                              // settings and clamped - defined below,
+                                              // the controller's completion calls it
 
 #include <mmsystem.h>            // PlaySound - the fold's chime lives below
 
@@ -67,8 +69,6 @@ static void SumPingNative() {
 
 static DWORD g_sumHideTick[SUM_SEATS] = {};  // when an outside click folded a seat: the
                                              // toolbar's own click must not reopen
-static RECT g_sumOwnerPrev[SUM_SEATS]{};     // the frame's last screen rect: each popup
-                                             // rides its moves like a pane
 static HHOOK g_sumMouseHook = nullptr;       // the click-outside watcher, one hook
                                              // serving both seats while any is open
 static std::string g_sumInitDoc[SUM_SEATS];  // what each page's last init was built
@@ -313,9 +313,9 @@ static void AiRangeStart(const std::wstring& path, int first, int last, int what
 }
 static void AiRangeTick() {
     if (!g_range.active) { KillTimer(g.main, 4714); return; }
-    if ((g_range.what == 0 || g_range.what == 3) && !g_sumWnd[SUM_DOC]) return;
+    if ((g_range.what == 0 || g_range.what == 3) && !g_sumCtr[SUM_DOC]) return;
     if (g_range.what == 1 && !g_sideNotes) return;
-    if (g_range.what == 2 && !g_sumWnd[SUM_DOC]) return;   // the beaker's range test rides the summary window
+    if (g_range.what == 2 && !g_sumCtr[SUM_DOC]) return;   // the beaker's range test rides the summary overlay
     DocState& D = DVF();
     if (D.path.empty() || D.path != g_range.path) {
         g_range.active = false;
@@ -1751,23 +1751,24 @@ static void SumEnsureSeat(int seat) {
         // and the editor but never this seat - the popup's first open then
         // showed nothing but grain. A quiet knock retries until the env
         // answers, and stands down the moment the runtime is declared absent.
-        if (g_sumWnd[seat] && !g_webFail) SetTimer(g_sumWnd[seat], 4722, 250, nullptr);
+        if (g.main && !g_webFail) SetTimer(g.main, 4722, 250, nullptr);
         return;
     }
-    if (g_sumWnd[seat]) KillTimer(g_sumWnd[seat], 4722);
+    if (g.main) KillTimer(g.main, 4722);
     g_sumBuilding[seat] = true;
     g_wvEnv->CreateCoreWebView2Controller(
-        g_sumWnd[seat],
+        g.main,   // the popup is an OVERLAY of the frame, not a window: the
+                  // controller rides the frame and moves with it for free
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
             [seat](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
                 g_sumBuilding[seat] = false;
                 if (FAILED(hr) || !c || seat < 0 || seat >= SUM_SEATS) return S_OK;
                 g_sumCtr[seat] = c;
-                // born against a hidden window (the prewarm seat): the runtime
-                // hands the controller over not-rendered, and it stays that way
-                // even after the popup unfolds - the grain showed, the page
-                // never did. The one who shows the window says it may draw.
-                c->put_IsVisible(IsWindowVisible(g_sumWnd[seat]) ? TRUE : FALSE);
+                // born while folded (the prewarm seat): the runtime hands the
+                // controller over not-rendered, and it stays that way until
+                // the unfold says otherwise - the one who shows it says it
+                // may draw.
+                c->put_IsVisible(g_sumShown[seat] ? TRUE : FALSE);
                 c->get_CoreWebView2(&g_sumWeb[seat]);
                 wrl::ComPtr<ICoreWebView2Controller2> c2;
                 if (SUCCEEDED(c->QueryInterface(IID_PPV_ARGS(&c2))) && c2)
@@ -1788,10 +1789,60 @@ static void SumEnsureSeat(int seat) {
                         }).Get(), &tk);
                 std::wstring html = AiSumHtml();
                 if (!html.empty()) g_sumWeb[seat]->NavigateToString(html.c_str());
-                RECT r; GetClientRect(g_sumWnd[seat], &r);
-                c->put_Bounds(r);
+                SumSeatBoundsRead(seat);   // the saved card lands, clamped inside
+                c->put_Bounds(g_sumRect[seat]);
                 return S_OK;
             }).Get());
+}
+
+// ---- the overlay's own geometry ----
+// The popup's card lives in the frame's CLIENT coords: no window class, no
+// NCCALCSIZE, no ride-along - the frame moves and the card moves with it. Its
+// size and offset ride the same settings keys the window era saved, so an
+// upgrade keeps the seat the user had. The saved numbers are read once per
+// open (every read is a settings.json parse); a resize only clamps.
+static void SumSeatBoundsRead(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
+    RECT cr; GetClientRect(g.main, &cr);
+    double dpi = g.dpi > 0 ? g.dpi : 1.0;
+    const char* pre = seat == SUM_WEB ? "summary.win.web" : "summary.win";
+    std::string sW = AiGetSetting(std::string(pre) + ".w");
+    std::string sH = AiGetSetting(std::string(pre) + ".h");
+    int w = sW.empty() ? (int)(560 * dpi) : max((int)(320 * dpi), (int)(atof(sW.c_str()) * dpi));
+    int h = sH.empty() ? (int)(630 * dpi) : max((int)(220 * dpi), (int)(atof(sH.c_str()) * dpi));
+    w = min(w, max(1, cr.right));
+    h = min(h, max(1, cr.bottom));
+    std::string sRX = AiGetSetting(std::string(pre) + ".relx");
+    std::string sRY = AiGetSetting(std::string(pre) + ".rely");
+    int x, y;
+    if (!sRX.empty() && !sRY.empty()) {
+        x = (int)(atof(sRX.c_str()) * dpi);
+        y = (int)(atof(sRY.c_str()) * dpi);
+    } else {
+        // first open: the card floats at the frame's right, a step below the
+        // bands; the web seat stands a card-width to its left so the two can
+        // face each other
+        x = cr.right - w - (int)(12 * dpi);
+        y = (int)(64 * dpi);
+        if (seat == SUM_WEB && x - w - (int)(12 * dpi) >= 0) x -= w + (int)(12 * dpi);
+    }
+    x = max(0, min(x, max(0, cr.right - w)));
+    y = max(0, min(y, max(0, cr.bottom - h)));
+    g_sumRect[seat] = { x, y, x + w, y + h };
+}
+static void SumClampSeat(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
+    RECT cr; GetClientRect(g.main, &cr);
+    RECT r = g_sumRect[seat];
+    int w = (int)(r.right - r.left); if (w > cr.right) w = cr.right; if (w < 1) w = 1;
+    int hgt = (int)(r.bottom - r.top); if (hgt > cr.bottom) hgt = cr.bottom; if (hgt < 1) hgt = 1;
+    int x = max(0, min((int)r.left, cr.right - w));
+    int y = max(0, min((int)r.top, cr.bottom - hgt));
+    g_sumRect[seat] = { x, y, x + w, y + hgt };
+}
+static void SumApplyBounds(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || !g_sumCtr[seat] || !g.main) return;
+    g_sumCtr[seat]->put_Bounds(g_sumRect[seat]);
 }
 // ---- the popup contract's helpers ----
 // The navigator is a popup of the frame, not a free window: a MOUSE CLICK
@@ -1806,13 +1857,14 @@ static void SumEnsureSeat(int seat) {
 static void SumUnhookMouse() {
     // the hook watches for BOTH seats: it leaves only when no seat is unfolded
     for (int s = 0; s < SUM_SEATS; s++)
-        if (g_sumWnd[s] && IsWindowVisible(g_sumWnd[s])) return;
+        if (g_sumShown[s]) return;
     if (g_sumMouseHook) { UnhookWindowsHookEx(g_sumMouseHook); g_sumMouseHook = nullptr; }
 }
 static void SumHideSeat(int seat, bool fromOutside) {
-    if (seat < 0 || seat >= SUM_SEATS || !g_sumWnd[seat]) return;
+    if (seat < 0 || seat >= SUM_SEATS || !g_sumShown[seat]) return;
     if (g_sumWeb[seat])   // the digest's reader seat rides out before the fold
         g_sumWeb[seat]->ExecuteScript(L"window.__sumSaveScroll&&window.__sumSaveScroll();", nullptr);
+    g_sumShown[seat] = false;
     if (g_sumCtr[seat]) g_sumCtr[seat]->put_IsVisible(FALSE);   // folded = not rendered, not
                                                     // dead: the page keeps its
                                                     // DOM, a generation keeps
@@ -1820,77 +1872,145 @@ static void SumHideSeat(int seat, bool fromOutside) {
                                                     // compositor stops burning
                                                     // frames nobody can see
     SumSavePlacementSeat(seat);
-    ShowWindow(g_sumWnd[seat], SW_HIDE);
     SumUnhookMouse();
     if (fromOutside) g_sumHideTick[seat] = GetTickCount();
 }
-// The frame's folds drive the seat's render. A minimize is a fold SumHide
-// never sees: Windows hides an owned popup with its owner, the controller
-// keeps claiming visible, and the surface its composition rode on is thrown
-// away - the restore then re-shows the popup over a dead surface and the
-// webview paints the white card the user reported. The handback must be
-// explicit: FALSE on the way down, TRUE on the way back rebuilds the
-// composition fresh. Both calls no-op when nothing actually moved.
+// The frame's folds drive the seat's render. A minimize takes the whole frame
+// down with the overlays on it - the controller keeps claiming visible while
+// the surface is gone, so the handback stays explicit: FALSE on the way down,
+// TRUE on the way back, with the card's bounds re-clamped into whatever the
+// frame's client grew or shrank to. Both calls no-op when nothing moved.
 static void SumSyncVisible() {
     for (int s = 0; s < SUM_SEATS; s++) {
-        if (!g_sumCtr[s] || !g_sumWnd[s]) continue;
-        BOOL want = (IsWindowVisible(g_sumWnd[s]) && g.main && !IsIconic(g.main)) ? TRUE : FALSE;
+        if (!g_sumCtr[s]) continue;
+        BOOL want = (g_sumShown[s] && g.main && !IsIconic(g.main)) ? TRUE : FALSE;
         g_sumCtr[s]->put_IsVisible(want);
+        if (want) {
+            SumClampSeat(s);      // a resize keeps the card inside the frame
+            SumApplyBounds(s);
+        }
     }
 }
 static LRESULT CALLBACK SumMouseHookProc(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION) {
-        switch (wp) {
-        case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
-        case WM_XBUTTONDOWN: case WM_NCLBUTTONDOWN: case WM_NCRBUTTONDOWN: {
+        if (wp == WM_MOUSEMOVE) {
+            // a drag or resize in flight: one tick per move, applied on the pump
+            for (int s = 0; s < SUM_SEATS; s++)
+                if (g_sumDragMode[s] && g.main) {
+                    POINT pt = ((MSLLHOOKSTRUCT*)lp)->pt;
+                    PostMessageW(g.main, WM_APP + 62, 0, MAKELPARAM(pt.x, pt.y));
+                    break;
+                }
+        } else if (wp == WM_LBUTTONUP) {
+            for (int s = 0; s < SUM_SEATS; s++)
+                if (g_sumDragMode[s] && g.main) { PostMessageW(g.main, WM_APP + 63, 0, 0); break; }
+        } else if (wp == WM_LBUTTONDOWN || wp == WM_RBUTTONDOWN || wp == WM_MBUTTONDOWN ||
+                   wp == WM_XBUTTONDOWN || wp == WM_NCLBUTTONDOWN || wp == WM_NCRBUTTONDOWN) {
+            // a click inside the frame but outside every unfolded card folds
+            // them; the verdict runs on the pump, never the hook
             POINT pt = ((MSLLHOOKSTRUCT*)lp)->pt;
             HWND w = WindowFromPoint(pt);
             HWND root = w ? GetAncestor(w, GA_ROOT) : nullptr;
-            if (root && (root == g.main || IsChild(g.main, root))) {
-                for (int s = 0; s < SUM_SEATS; s++)   // every unfolded seat folds on the
-                    if (g_sumWnd[s] && IsWindowVisible(g_sumWnd[s]) && root != g_sumWnd[s])
-                        PostMessageW(g_sumWnd[s], WM_APP + 61, 0, 0);   // pump, never the hook
-            }
-            break; }
+            if (root && (root == g.main || IsChild(g.main, root)))
+                PostMessageW(g.main, WM_APP + 61, 0, MAKELPARAM(pt.x, pt.y));
         }
     }
     return CallNextHookEx(nullptr, code, wp, lp);
 }
-static void SumHookMouse() {
-    if (!g_sumMouseHook)
-        g_sumMouseHook = SetWindowsHookExW(WH_MOUSE_LL, SumMouseHookProc, g.hinst, 0);
-}
 static void SumSavePlacementSeat(int seat) {
-    if (seat < 0 || seat >= SUM_SEATS || !g_sumWnd[seat] || IsIconic(g_sumWnd[seat])) return;
-    RECT wr; GetWindowRect(g_sumWnd[seat], &wr);
+    if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
+    RECT r = g_sumRect[seat];
+    if (r.right <= r.left) return;   // never seated yet - nothing to save
     double dpi = g.dpi > 0 ? g.dpi : 1.0;
     const char* pre = seat == SUM_WEB ? "summary.win.web" : "summary.win";
-    AiSetSetting(std::string(pre) + ".w", std::to_string((int)((wr.right - wr.left) / dpi)));
-    AiSetSetting(std::string(pre) + ".h", std::to_string((int)((wr.bottom - wr.top) / dpi)));
-    if (g.main && !IsIconic(g.main)) {   // the popup's seat is relative to the
-        RECT mr; GetWindowRect(g.main, &mr);   // frame - it belongs to the app,
-        AiSetSetting(std::string(pre) + ".relx",   // not to the desktop
-                     std::to_string((int)((wr.left - mr.left) / dpi)));
-        AiSetSetting(std::string(pre) + ".rely",
-                     std::to_string((int)((wr.top - mr.top) / dpi)));
+    AiSetSetting(std::string(pre) + ".w", std::to_string((int)((r.right - r.left) / dpi)));
+    AiSetSetting(std::string(pre) + ".h", std::to_string((int)((r.bottom - r.top) / dpi)));
+    AiSetSetting(std::string(pre) + ".relx", std::to_string((int)(r.left / dpi)));
+    AiSetSetting(std::string(pre) + ".rely", std::to_string((int)(r.top / dpi)));
+}
+// the frame moved: an overlay rides its parent for free - the client coords
+// never change, so there is nothing to chase. The resize clamp is WM_SIZE's
+// SumSyncVisible call.
+static void SumOwnerMoved() {
+    SumSyncVisible();
+}
+// the pump's verdict on the hook's outside click: every unfolded card whose
+// rect misses the point folds; a click on a card leaves all of them standing
+static void SumOutsideClick(long sx, long sy) {
+    if (!g.main) return;
+    POINT o{ 0, 0 };
+    ClientToScreen(g.main, &o);
+    RECT cr; GetClientRect(g.main, &cr);
+    POINT pt{ (int)sx - o.x, (int)sy - o.y };
+    if (pt.x < cr.left || pt.x >= cr.right || pt.y < cr.top || pt.y >= cr.bottom) return;
+    for (int s = 0; s < SUM_SEATS; s++)
+        if (g_sumShown[s] && !PtInRect(&g_sumRect[s], pt))
+            SumHideSeat(s, true);
+}
+// one tick of a drag or a grip resize: the card follows the cursor, never
+// leaving the frame's client, never under its mins
+static void SumDragTick(long sx, long sy) {
+    if (!g.main) return;
+    POINT o{ 0, 0 };
+    ClientToScreen(g.main, &o);
+    RECT cr; GetClientRect(g.main, &cr);
+    double dpi = g.dpi > 0 ? g.dpi : 1.0;
+    for (int s = 0; s < SUM_SEATS; s++) {
+        if (!g_sumDragMode[s] || !g_sumShown[s]) continue;
+        RECT r = g_sumRect[s];
+        int px = (int)sx - o.x, py = (int)sy - o.y;
+        int w = (int)(r.right - r.left), hgt = (int)(r.bottom - r.top);
+        if (g_sumDragMode[s] == 1) {
+            r.left = px - g_sumDragOff[s].x;
+            r.top = py - g_sumDragOff[s].y;
+            // the card may tuck most of the way out, but its edge stays
+            // grabbable: 60dp of it always remains inside
+            r.left = max(cr.right - (int)(60 * dpi) - w,
+                         min((int)r.left, cr.right - (int)(60 * dpi)));
+            r.top = max(cr.bottom - (int)(40 * dpi) - hgt,
+                        min((int)r.top, cr.bottom - (int)(40 * dpi)));
+            r.right = r.left + w; r.bottom = r.top + hgt;
+        } else {
+            w = max((int)(320 * dpi), min(px + g_sumDragOff[s].x - (int)r.left, cr.right - (int)r.left));
+            hgt = max((int)(220 * dpi), min(py + g_sumDragOff[s].y - (int)r.top, cr.bottom - (int)r.top));
+            r.right = (int)r.left + w; r.bottom = (int)r.top + hgt;
+        }
+        g_sumRect[s] = r;
+        SumApplyBounds(s);
     }
 }
-// the frame moved: the popups ride along like any docked pane, and the
-// WINDOWPOSCHANGING clamp below keeps each inside the frame while it goes
-static void SumOwnerMoved() {
-    if (!g.main || IsIconic(g.main)) return;
-    RECT mr; GetWindowRect(g.main, &mr);
-    for (int s = 0; s < SUM_SEATS; s++) {
-        if (g_sumOwnerPrev[s].right > g_sumOwnerPrev[s].left && g_sumWnd[s]
-            && IsWindowVisible(g_sumWnd[s])) {
-            int dx = mr.left - g_sumOwnerPrev[s].left, dy = mr.top - g_sumOwnerPrev[s].top;
-            if (dx || dy) {
-                RECT wr; GetWindowRect(g_sumWnd[s], &wr);
-                SetWindowPos(g_sumWnd[s], nullptr, wr.left + dx, wr.top + dy, 0, 0,
-                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-            }
+// the gesture's button-up: the placement rides out once, not per pixel
+static void SumDragEnd() {
+    for (int s = 0; s < SUM_SEATS; s++)
+        if (g_sumDragMode[s]) {
+            g_sumDragMode[s] = 0;
+            SumSavePlacementSeat(s);
         }
-        g_sumOwnerPrev[s] = mr;
+}
+// the seats' knock on the engine's door, served on the pump: one timer on the
+// frame answers for both overlays, and stands down when nobody is waiting
+static void SumEnsureRetry() {
+    bool pending = false;
+    for (int s = 0; s < SUM_SEATS; s++) {
+        SumEnsureSeat(s);
+        pending = pending || (!g_webFail && !g_sumCtr[s] && !g_sumBuilding[s]);
+    }
+    if (!pending && g.main) KillTimer(g.main, 4722);
+}
+// the buffer's deferred kick (the window era's 4723, re-homed to the frame):
+// the open's paint has landed; if the pump is free, the background reader
+// starts turning pages for the next stretch
+static void SumPrefetchKick() {
+    g_sumPf.on = false;
+    if (!g_range.active) {
+        DocState& D = DVF();
+        if (!D.path.empty() && g_sumPf.first >= 1 && g_sumPf.first <= D.n) {
+            g_range.words = g_sumPf.words;   // the cache key and the
+            g_range.lang = g_sumPf.lang;     // prompt ride the job, set
+            g_range.genre = g_sumPf.genre;   // at fire time, not request
+            int last = min(g_sumPf.first + g_sumPf.pages - 1, D.n);
+            AiRangeStart(D.path, g_sumPf.first, last, 3, 0);
+        }
     }
 }
 // the toolbar's toggle: each surface opens its own seat and folds it again
@@ -1900,7 +2020,7 @@ static void SumToggle(int seat) {
         g_sumHideTick[seat] = 0;   // this button click IS the outside click that just
         return;                    // folded it - a toggle-off, not an invitation back
     }
-    if (g_sumWnd[seat] && IsWindowVisible(g_sumWnd[seat])) {
+    if (g_sumShown[seat]) {
         SumHideSeat(seat, false);   // the toolbar button is a toggle: open again rolls it up
         return;
     }
@@ -1914,117 +2034,30 @@ static bool SumInitStale(int seat) {
     std::string key = (seat == SUM_DOC) ? AiDocSessionKey(DVF().path) : SumWebDocKey();
     return key != g_sumInitDoc[seat];
 }
-// the frame moved while a popup was folded: a reopen re-seats it inside the
-// frame (the WM_WINDOWPOSCHANGING clamp only rides real moves, and a bare
-// ShowWindow carries none)
-static void SumClampIntoFrame(int seat) {
-    if (!g_sumWnd[seat] || !g.main || IsIconic(g.main)) return;
-    RECT mr; GetWindowRect(g.main, &mr);
-    if (mr.right <= mr.left || mr.bottom <= mr.top) return;
-    RECT wr; GetWindowRect(g_sumWnd[seat], &wr);
-    int w = wr.right - wr.left, hgt = wr.bottom - wr.top;
-    int x = max(mr.left, min(wr.left, mr.right - w));
-    int y = max(mr.top, min(wr.top, mr.bottom - hgt));
-    if (x != wr.left || y != wr.top)
-        SetWindowPos(g_sumWnd[seat], nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-}
-// the windows themselves, born hidden: SumPrewarm builds both seats at idle
-// and the first open just unfolds the one the surface asked for
-static void SumCreateWindowSeat(int seat) {
-    if (seat < 0 || seat >= SUM_SEATS || g_sumWnd[seat]) return;
-    static bool cls = false;
-    if (!cls) {
-        cls = true;
-        WNDCLASSEXW wc{ sizeof wc };
-        wc.hInstance = g.hinst;
-        wc.lpfnWndProc = SumWndProc;
-        wc.lpszClassName = L"docsy_sum";
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = CreateSolidBrush(RGB(0x1c, 0x1c, 0x1c));
-        RegisterClassExW(&wc);
-    }
-    double dpi = g.dpi > 0 ? g.dpi : 1.0;
-    const char* pre = seat == SUM_WEB ? "summary.win.web" : "summary.win";
-    int defW = (int)(560 * dpi), defH = (int)(630 * dpi);
-    std::string sW = AiGetSetting(std::string(pre) + ".w");
-    std::string sH = AiGetSetting(std::string(pre) + ".h");
-    int w = sW.empty() ? defW : max((int)(460 * dpi), (int)(atof(sW.c_str()) * dpi));
-    int h = sH.empty() ? defH : max((int)(390 * dpi), (int)(atof(sH.c_str()) * dpi));
-    // the popup's seat is the frame's seat: centered over the app on first
-    // open, then the saved offset from the frame's corner (a plain absolute
-    // restore put it wherever the desktop last saw it - the old windows-own-
-    // desktop behavior the popup is here to bury). The web seat sits a step
-    // to the side of the reader's, so the two can stand open together.
-    RECT mr{ 0, 0, 0, 0 };
-    if (g.main) GetWindowRect(g.main, &mr);
-    int x = mr.left + max(0, (int)(((mr.right - mr.left) - w) / 2));
-    int y = mr.top + max(0, (int)(((mr.bottom - mr.top) - h) / 3));
-    std::string sRX = AiGetSetting(std::string(pre) + ".relx");
-    std::string sRY = AiGetSetting(std::string(pre) + ".rely");
-    if (!sRX.empty() && !sRY.empty()) {
-        x = mr.left + (int)(atof(sRX.c_str()) * dpi);
-        y = mr.top + (int)(atof(sRY.c_str()) * dpi);
-    }
-    if (seat == SUM_WEB && sRX.empty()) x = mr.left + max(0, (int)(((mr.right - mr.left) - w) / 5 * 4));
-    if (mr.right > mr.left) {   // never even propose a seat outside the frame
-        int maxX = max(mr.left, mr.right - w);
-        int maxY = max(mr.top, mr.bottom - h);
-        if (x < mr.left) x = mr.left;
-        if (x > maxX) x = maxX;
-        if (y < mr.top) y = mr.top;
-        if (y > maxY) y = maxY;
-    }
-    // The main frame's own birth - OVERLAPPEDWINDOW minus CAPTION - with the
-    // resize bands kept. WS_POPUP + THICKFRAME was tried first and Windows 11
-    // punished it: DWM paints a popup's top frame strip in the system's light
-    // theme colors and no NCCALCSIZE can claim it away - the white band that
-    // rode the card's top edge. The main-family style is claimable; the main
-    // frame has worn it captionless its whole life with no such band. No
-    // caption boxes, so the HTML bar's drag handle can't maximize it by
-    // accident. TOOLWINDOW keeps it out of Alt-Tab - it is a pane that
-    // floats, not a window that lives on its own. Born HIDDEN: the prewarm
-    // seat is built before anyone looks at it.
-    DWORD style = (WS_OVERLAPPEDWINDOW & ~WS_CAPTION) | WS_CLIPCHILDREN;
-    RECT rc{ 0, 0, w, h };
-    AdjustWindowRect(&rc, style, FALSE);
-    g_sumWnd[seat] = CreateWindowExW(WS_EX_TOOLWINDOW, L"docsy_sum",
-                               seat == SUM_WEB ? L"Web Summary" : L"Page Summary",
-                               style,
-                               x, y,
-                               rc.right - rc.left, rc.bottom - rc.top,
-                               g.main, nullptr, g.hinst, nullptr);
-    if (g_sumWnd[seat]) {
-        SetWindowLongPtrW(g_sumWnd[seat], GWLP_USERDATA, (LONG_PTR)seat);   // the proc's
-        SetWindowPos(g_sumWnd[seat], nullptr, 0, 0, 0, 0,   // way home to its own state
-                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        DwmApply(g_sumWnd[seat]);    // the card's rounded corners + tinted border
-        g_sumOwnerPrev[seat] = RECT{};
-        if (g.main) GetWindowRect(g.main, &g_sumOwnerPrev[seat]);
-    }
-}
-// the idle seat: two and a half seconds after launch the frame builds its
-// navigators hidden - window, controller, page and all - so the first click on
-// either toolbar unfolds a living popup instead of a construction site
+// the idle seats: two and a half seconds after launch the frame builds its
+// overlays hidden - controller, page and all - so the first click on either
+// toolbar unfolds a living popup instead of a construction site
 static void SumPrewarm() {
-    for (int s = 0; s < SUM_SEATS; s++) {
-        SumCreateWindowSeat(s);
+    for (int s = 0; s < SUM_SEATS; s++)
         SumEnsureSeat(s);
-    }
 }
 static void SumOpenSeat(int seat) {
-    if (seat < 0 || seat >= SUM_SEATS) return;
-    SumCreateWindowSeat(seat);
-    if (!g_sumWnd[seat]) return;
-    ShowWindow(g_sumWnd[seat], SW_SHOWNOACTIVATE);
-    if (g_sumCtr[seat]) g_sumCtr[seat]->put_IsVisible(TRUE);   // the fold took the render
-                                                   // away; the unfold hands it
-                                                   // back (the webview was born
-                                                   // hidden and never auto-follows
-                                                   // its parent's visibility)
-    SetForegroundWindow(g_sumWnd[seat]);
+    if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
+    g_sumShown[seat] = true;
+    SumSeatBoundsRead(seat);        // the saved card lands (clamped) before the render
+    SumEnsureSeat(seat);            // no-ops while the webview lives; re-arms it after
+                                    // a rebuild
+    if (g_sumCtr[seat]) {
+        g_sumCtr[seat]->put_IsVisible(TRUE);   // the fold took the render away; the
+                                               // unfold hands it back (the webview
+                                               // was born folded and never
+                                               // auto-follows anything)
+        SumApplyBounds(seat);
+        // the page hears keys - Esc, the word plate's Shift - without a click
+        // first: a window era's SetForegroundWindow, in overlay terms
+        g_sumCtr[seat]->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    }
     if (!g_sumMouseHook) g_sumMouseHook = SetWindowsHookExW(WH_MOUSE_LL, SumMouseHookProc, g.hinst, 0);
-    SumEnsureSeat(seat);   // no-ops while the webview lives; re-arms it after a rebuild
-    SumClampIntoFrame(seat);
     if (g_sumReady[seat] && SumInitStale(seat)) SumSendInitSeat(seat);
 }
 
@@ -2282,11 +2315,26 @@ static void SumPanelMessage(const wchar_t* json, int seat) {
         // all keep breathing behind it
         SumHideSeat(seat, false);
     } else if (t == "drag") {
-        // the HTML title bar's drag handle: hand the move to the OS caption
-        // loop - ReleaseCapture is what lets the mouse leave the WebView2
-        if (g_sumWnd[seat]) {
-            ReleaseCapture();
-            SendMessageW(g_sumWnd[seat], WM_NCLBUTTONDOWN, HTCAPTION, 0);
+        // the HTML title bar's drag handle: the popup is an overlay of the
+        // frame - the low-level hook carries the gesture, the pump applies it
+        if (seat >= 0 && seat < SUM_SEATS && g_sumShown[seat] && g.main) {
+            g_sumDragMode[seat] = 1;
+            POINT pt; GetCursorPos(&pt);
+            POINT o{ 0, 0 };
+            ClientToScreen(g.main, &o);
+            g_sumDragOff[seat] = { pt.x - o.x - (int)g_sumRect[seat].left,
+                                   pt.y - o.y - (int)g_sumRect[seat].top };
+        }
+    } else if (t == "resize-start") {
+        // the corner grip: the same road as the drag, anchored at the card's
+        // bottom-right corner
+        if (seat >= 0 && seat < SUM_SEATS && g_sumShown[seat] && g.main) {
+            g_sumDragMode[seat] = 2;
+            POINT pt; GetCursorPos(&pt);
+            POINT o{ 0, 0 };
+            ClientToScreen(g.main, &o);
+            g_sumDragOff[seat] = { (int)g_sumRect[seat].right - (pt.x - o.x),
+                                   (int)g_sumRect[seat].bottom - (pt.y - o.y) };
         }
     } else if (t == "word-action") {
         // the word plate's Define and Explain (Avalanche's popup actions): a
@@ -2449,166 +2497,11 @@ static void SumPanelMessage(const wchar_t* json, int seat) {
                 g_sumPf.words = words;
                 g_sumPf.lang = lang;
                 g_sumPf.genre = genre;
-                if (g_sumWnd[SUM_DOC]) SetTimer(g_sumWnd[SUM_DOC], 4723, 1200, nullptr);
+                if (g.main) SetTimer(g.main, 4737, 1200, nullptr);
             }
         }
     }
 }
-static LRESULT CALLBACK SumWndProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
-    // the seat this window serves: stamped into GWLP_USERDATA at birth (0 reads
-    // as the document seat, the safe default for the class's earliest messages)
-    int seat = (int)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (seat < 0 || seat >= SUM_SEATS) seat = SUM_DOC;
-    switch (m) {
-    case WM_NCCALCSIZE: {   // DialogChrome: the caption row joins the client; the
-                            // OS side/bottom borders stay for the resize bands.
-                            // Maximized clamps to the work area like the main frame.
-        if (!wp || IsIconic(h)) break;
-        NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lp;
-        RECT orig = p->rgrc[0];
-        if (IsZoomed(h)) {
-            HMONITOR mon = MonitorFromRect(&orig, MONITOR_DEFAULTTONEAREST);
-            MONITORINFO mi{ sizeof mi };
-            if (!mon || !GetMonitorInfoW(mon, &mi)) break;
-            p->rgrc[0].left   = max(orig.left,   mi.rcWork.left);
-            p->rgrc[0].top    = max(orig.top,    mi.rcWork.top);
-            p->rgrc[0].right  = min(orig.right,  mi.rcWork.right);
-            p->rgrc[0].bottom = min(orig.bottom, mi.rcWork.bottom);
-            return 0;
-        }
-        DefWindowProcW(h, m, wp, lp);          // the OS lays out its full frame...
-        g_sumFrame[seat] = p->rgrc[0].left - orig.left;
-        p->rgrc[0].top = orig.top;             // ...and only the caption is dropped
-        return 0;
-    }
-    case WM_NCHITTEST: {   // the top resize grip replaces the stripped OS border;
-                           // side/bottom grips come from DefWindowProc, and the
-                           // HTML bar drags itself through the "drag" message
-        POINT s{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        RECT rc; GetWindowRect(h, &rc);
-        if (!IsZoomed(h) && g_sumFrame[seat] > 0 && s.y < rc.top + g_sumFrame[seat]) {
-            if (s.x <  rc.left + g_sumFrame[seat]) return HTTOPLEFT;
-            if (s.x >= rc.right - g_sumFrame[seat]) return HTTOPRIGHT;
-            return HTTOP;
-        }
-        break;
-    }
-    case WM_WINDOWPOSCHANGING: {   // the popup is part of the app: no drag, no
-                                   // restore, no ride-along may carry it past
-                                   // the frame that owns it
-        WINDOWPOS* p = (WINDOWPOS*)lp;
-        if (p && g.main && !(p->flags & SWP_NOMOVE)) {
-            RECT mr;
-            GetWindowRect(g.main, &mr);
-            int w = p->cx, hgt = p->cy;
-            if ((p->flags & SWP_NOSIZE) || w <= 0 || hgt <= 0) {
-                RECT wr; GetWindowRect(h, &wr);
-                w = wr.right - wr.left; hgt = wr.bottom - wr.top;
-            }
-            int maxX = max(mr.left, mr.right - w);
-            int maxY = max(mr.top, mr.bottom - hgt);
-            if (p->x < mr.left) p->x = mr.left;
-            if (p->x > maxX) p->x = maxX;
-            if (p->y < mr.top) p->y = mr.top;
-            if (p->y > maxY) p->y = maxY;
-        }
-        break;
-    }
-    case WM_ERASEBKGND: {   // the family noise: one grain tile, phased to the
-                            // frame the way every pane's fill phases (the ask
-                            // dialog's SetBrushOrgEx recipe)
-        HDC dc = (HDC)wp;
-        RECT rc; GetClientRect(h, &rc);
-        if (g.main) {
-            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
-            SetBrushOrgEx(dc, -po.x, -po.y, nullptr);
-        }
-        FillRect(dc, &rc, GrainBrush(1));
-        return 1;
-    }
-    case WM_PAINT: {   // the transparent webview lets the grain through - the
-                       // window itself lays the tile down on every expose, and
-                       // every expose also re-arms the render: the frame's
-                       // minimize folded this window without a SumHide (owned
-                       // windows hide with their owner) and its restore re-shows
-                       // it over a composition the surface threw away - the
-                       // white card. The handback below rebuilds it fresh; on a
-                       // living controller it is a no-op.
-        PAINTSTRUCT ps; HDC dc = BeginPaint(h, &ps);
-        RECT rc; GetClientRect(h, &rc);
-        if (g.main) {
-            POINT po{ 0, 0 }; MapWindowPoints(h, g.main, &po, 1);
-            SetBrushOrgEx(dc, -po.x, -po.y, nullptr);
-        }
-        FillRect(dc, &rc, GrainBrush(1));
-        EndPaint(h, &ps);
-        SumSyncVisible();
-        return 0;
-    }
-    case WM_GETMINMAXINFO: {   // SummaryWindow: MinWidth 460, MinHeight 390
-        DefWindowProcW(h, m, wp, lp);
-        MINMAXINFO* mmi = (MINMAXINFO*)lp;
-        mmi->ptMinTrackSize.x = (int)(460 * g.dpi);
-        mmi->ptMinTrackSize.y = (int)(390 * g.dpi);
-        return 0;
-    }
-    case WM_APP + 61:   // the mouse watcher's verdict, run on the pump: a click
-        SumHideSeat(seat, true);  // inside the frame folded this seat from outside
-        return 0;
-    case WM_TIMER:
-        if (wp == 4722) {   // the seat's knock on the engine's door: the env was
-            KillTimer(h, 4722);   // still warming when SumEnsureSeat last looked;
-            SumEnsureSeat(seat);  // it re-arms the knock itself until the runtime
-            return 0;             // answers or is declared absent
-        }
-        if (wp == 4723) {   // the buffer's deferred kick: the open's paint has
-            KillTimer(h, 4723);   // landed; if the pump is free, the background
-            g_sumPf.on = false;   // reader starts turning pages for the next
-            if (!g_range.active) {   // stretch
-                DocState& D = DVF();
-                if (!D.path.empty() && g_sumPf.first >= 1 && g_sumPf.first <= D.n) {
-                    g_range.words = g_sumPf.words;   // the cache key and the
-                    g_range.lang = g_sumPf.lang;     // prompt ride the job, set
-                    g_range.genre = g_sumPf.genre;   // at fire time, not request
-                    int last = min(g_sumPf.first + g_sumPf.pages - 1, D.n);
-                    AiRangeStart(D.path, g_sumPf.first, last, 3, 0);
-                }
-            }
-            return 0;
-        }
-        break;
-    case WM_SIZE: {
-        if (g_sumCtr[seat]) {
-            RECT r; GetClientRect(h, &r);
-            g_sumCtr[seat]->put_Bounds(r);
-        }
-        DwmApply(h);       // corner rounding flips when the window maximizes
-        return 0;
-    }
-    case WM_EXITSIZEMOVE:   // one settings write per gesture, not per pixel -
-                            // the old WM_MOVE save rewrote settings.json four
-                            // times a pixel while the window dragged
-        SumSavePlacementSeat(seat);
-        return 0;
-    case WM_DESTROY: {   // the one true teardown: the frame died (owned popups
-                         // go with it) - only here does a seat really stop:
-                         // hook out, placement saved, generation cancelled
-        SumSavePlacementSeat(seat);
-        SumUnhookMouse();
-        g_sumHideTick[seat] = 0;
-        if (g_sumCancel[seat]) *g_sumCancel[seat] = true;
-        if (seat == SUM_DOC) g_range.active = false;
-        g_sumWnd[seat] = nullptr;
-        g_sumCtr[seat] = nullptr; g_sumWeb[seat] = nullptr; g_sumReady[seat] = false;
-        return 0;
-    }
-    case WM_CLOSE:
-        DestroyWindow(h);
-        return 0;
-    }
-    return DefWindowProcW(h, m, wp, lp);
-}
-
 // ---- the session: the view, the document, the open panels ride settings.json ----
 // Every mode switch saves where the reader is (app.* keys), and a launch with
 // no file on the command line puts it all back: same view, same document, the

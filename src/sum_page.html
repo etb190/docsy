@@ -178,6 +178,15 @@ select option{background-color:#242424; color:#e0e0e0;}
   white-space:pre-wrap; word-break:break-word; max-height:220px; overflow-y:auto;
   -webkit-user-select:text; user-select:text; cursor:auto;}
 
+/* The card is an overlay of the main frame, not a window: it rounds, shades
+   and borders itself, and the frame's grain shows around the card. */
+html,body{background:transparent !important;}
+#app{position:relative; background:var(--bg); border:1px solid #3a3a3a;
+  border-radius:10px; overflow:hidden; box-shadow:0 12px 44px rgba(0,0,0,.55);}
+#grip{position:absolute; right:2px; bottom:2px; width:18px; height:18px; z-index:99;
+  cursor:nwse-resize; border-radius:0 0 9px 0;
+  background:linear-gradient(135deg, transparent 0 50%, rgba(160,160,160,.45) 50%);}
+
 /* Empty State */
 #emptyState{position:absolute; inset:0; display:none; flex-direction:column;
   align-items:center; justify-content:center; text-align:center; pointer-events:none;}
@@ -210,6 +219,7 @@ select option{background-color:#242424; color:#e0e0e0;}
 </head>
 <body>
 <div id="app">
+      <div id="grip" title="Drag the corner to resize"></div>
   <div id="titlebar">
     <div id="mark"><b>docsy</b><span> - Page Summary</span></div>
     <div id="tbtns">
@@ -543,8 +553,8 @@ function paintAll(){
 
 /* ---- Digest Word Hover Plate (DigestWordHighlightAdorner) + the word popup ---- */
 var plate=$("wordPlate"), pop=$("wordPop"), popAns=$("wordAns");
-var S.pin=null;        // the popup's word: the plate holds there while it stands
-var S.lastHover=null;  // {r, word, ctx} - the word the pointer last rested on
+S.pin=null;            // the popup's word: the plate holds there while it stands
+S.lastHover=null;      // {r, word, ctx} - the word the pointer last rested on
 function hideWordPlate(){ if(S.pin) return; plate.style.display="none"; }   // the pin owns it
 function closeWordPop(){
   pop.style.display="none"; popAns.style.display="none"; popAns.textContent="";
@@ -580,6 +590,10 @@ $("wpSearch").addEventListener("click", function(){
   if(!S.pin) return;
   post({type:"word-search", word:S.pin.word});
   closeWordPop();
+});
+$("grip").addEventListener("mousedown", function(e){
+  e.preventDefault();
+  post({type:"resize-start"});
 });
 function updateWordHighlight(e){
   if(S.pin) return;                                // the popup's word owns the plate
@@ -647,8 +661,15 @@ function updateWordHighlight(e){
   if(ctx.length>300) ctx=ctx.slice(0,300);
   S.lastHover={r:{left:r.left,top:r.top,bottom:r.bottom,right:r.right,width:r.width,height:r.height},
                word:str.slice(wStart,wEnd), ctx:ctx};
+  if(e.shiftKey) showWordPop(S.lastHover.r, S.lastHover.word, S.lastHover.ctx);
 }
 $("digest").addEventListener("mousemove", updateWordHighlight);
+$("digest").addEventListener("click", function(e){
+  // Shift+click anchors the popup over the clicked word, whichever order the
+  // Shift came in
+  if(e.shiftKey && S.lastHover && !S.generating && !S.busy && !S.pin)
+    showWordPop(S.lastHover.r, S.lastHover.word, S.lastHover.ctx);
+});
 $("digest").addEventListener("mouseleave", hideWordPlate);
 $("digest").addEventListener("scroll", function(){ closeWordPop(); requestScrollSave(); });
 

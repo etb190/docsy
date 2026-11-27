@@ -171,8 +171,8 @@ static void WebStripPaint(HDC dc, int w, int h) {
     SetBkMode(dc, TRANSPARENT);
     HFONT gf = WebGlyphFont(16);
     static const wchar_t* const gl[WB_COUNT] = {
-        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr, L"\uE81C", L"\uE8F1", L"\uE8BD"
-    };                                                 // reload and star ride beside the field; hist, the
+        L"\uE8A5", L"\uE76B", L"\uE76C", nullptr, L"\uE8A5", L"\uE710", L"\uE712", nullptr, L"\uE7B8", nullptr, L"\uE81C", L"\uE8F1", L"\uE8BD"
+    };                                                 // reload and star ride beside the field; the reader hand, hist, the
                                                        // summary navigator and the AI robot at far right
     for (int i = 0; i < WB_COUNT; i++) {
         if (g_wbR[i].right <= g_wbR[i].left) continue;
@@ -505,6 +505,9 @@ static void WebBarLayout() {
     mx -= pitch;
     g_wbR[WB_NEWTAB] = { mx - d, cy, mx, cy + d }; // the + and, left of it, each extension's icon
     mx -= pitch;
+    g_wbR[WB_PDF] = { mx - d, cy, mx, cy + d };    // the worst-case road: a page sitting in the
+                                                   // engine's own pdf viewer goes to the reader by hand
+    mx -= pitch;
     g_wbR[WB_READER] = { 0, 0, 0, 0 };             // the PDF button lives on the top toolbar now
     int leftEdge = (int)g_wbR[WB_NEWTAB].left;
     g_wbR[WB_EXT] = { 0, 0, 0, 0 };                // the puzzle button is gone too - extensions
@@ -692,10 +695,28 @@ static void WebBarDraw(HDC dc, int w, int h) {
     if (g_wtCur >= G.start && g_wtCur < G.start + G.vis) drawTab(g_wtCur);             // the open tab last
 }
 
+// the worst-case road: a document that slipped past every capture and now sits
+// in the engine's own pdf viewer - or any address the reader should own - goes
+// to the reader BY HAND: the same credentialed fetch the automatic roads use,
+// the same endgame, the same hand-off and step-back home
+static void WebPdfFetch(const std::wstring& url, const std::wstring& alt, int ix);
+static int WebTabIdx(unsigned long long id);
+static void WebForceReaderOpen() {
+    WebTab* t = WebCur();
+    if (!t || t->url.empty()) return;
+    WxLogf(L"pdf: the hand road takes the page to the reader - %s", t->url.c_str());
+    g_webNote = L"Fetching the PDF for the reader...";
+    g_webNoteUntil = GetTickCount64() + 150000;        // the fetch's own timeouts bound the wait
+    WebPdfFetch(t->url, t->url, WebTabIdx(t.id));
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+}
+
 static void WebBarClick(int id) {
     WebTab* t = WebCur();
     switch (id) {
     case WB_READER: WebToggle(false); return;
+    case WB_PDF: WebForceReaderOpen(); return;    // the hand road, for the page the
+                                                  // automatic capture never caught
     case WB_EXT: { POINT z{ g_wbR[WB_EXT].left, g_wbR[WB_EXT].bottom }; WxMenu(z); } return;
     case WB_SIDE:
         g_webSide = !g_webSide;
