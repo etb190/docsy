@@ -813,6 +813,8 @@ static std::wstring g_webNote;
 static unsigned long long g_webNoteUntil = 0;
 
 // the hand road itself: the toolbar's WB_PDF
+static void WebPdfFetch(const std::wstring& url, const std::wstring& alt, int ix);
+static int WebTabIdx(unsigned long long id);
 static void WebForceReaderOpen() {
     WebTab* t = WebCur();
     if (!t || t->url.empty()) return;
