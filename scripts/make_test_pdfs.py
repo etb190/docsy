@@ -249,6 +249,10 @@ MAKERS = [
     ("timestest.pdf", make_times),
 ]
 
+
+from make_test_pdfs_extra import EXTRA_MAKERS
+MAKERS += EXTRA_MAKERS
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     for name, maker in MAKERS:

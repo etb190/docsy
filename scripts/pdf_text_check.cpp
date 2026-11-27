@@ -194,6 +194,20 @@ int main(int argc, char** argv) {
     TestFile(dir, "timestest.pdf", L"TheQuickBrown",
              "TJ positioning and two fonts on one page");
 
+    // Real-world recovery regressions: the shapes actual Arabic files carry.
+    TestFile(dir, "hybrid_xref.pdf", L"\u0627\u0644\u0645\u0643",
+             "hybrid xref: CRLF classic table + XRefStm + ObjStm-resident page");
+    TestFile(dir, "arabic_recovery.pdf", L"\u0627\u0644\u0645\u0640\u0640",
+             "recovery: dict chatter, wrong count, malformed range, mapped code space");
+    TestFile(dir, "arabic_usecmap.pdf", L"\u0627\u0644\u0645\u0643",
+             "ToUnicode /UseCMap stream inheritance merges the parent's mappings");
+    TestFile(dir, "arabic_embedded_cmap.pdf", L"\u0627\u0644\u0645\u0643",
+             "embedded CID encoding CMap maps codes to CIDs, ToUnicode keys by CID");
+    TestFile(dir, "arabic_embedded_font.pdf", L"\u0627\u0644\u0645\u0643",
+             "no ToUnicode: the embedded TrueType cmap names the glyphs");
+    TestFile(dir, "broken_code_recovery.pdf", L"AB\xFFFD" L"C",
+             "an unmapped code rides through one byte; the letters around it survive");
+
     printf("- rotated.pdf\n");
     {
         FILE* f = fopen((dir + "/rotated.pdf").c_str(), "rb");

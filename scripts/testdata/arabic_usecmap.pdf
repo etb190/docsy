@@ -1,0 +1,60 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /Ar /Encoding /Identity-H /DescendantFonts [<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Ar /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>] /ToUnicode 7 0 R >>
+endobj
+5 0 obj
+<< /Length 48  >>
+stream
+BT /F1 18 Tf 72 720 Td <0001000200030004> Tj ET
+
+endstream
+endobj
+6 0 obj
+<< /Length 111  >>
+stream
+/CIDInit /ProcSet findresource begin
+begincmap
+2 beginbfchar
+<0001> <0627>
+<0002> <0644>
+endbfchar
+endcmap
+end
+
+endstream
+endobj
+7 0 obj
+<< /Length 52 /UseCMap 6 0 R >>
+stream
+2 beginbfchar
+<0003> <0645>
+<0004> <0643>
+endbfchar
+
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000497 00000 n 
+0000000596 00000 n 
+0000000759 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+876
+%%EOF

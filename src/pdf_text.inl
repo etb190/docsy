@@ -346,15 +346,19 @@ struct PdfFile {
             const PdfObj* t = ReadXrefAt((size_t)at, found);
             if (!t) break;
             if (!trailer) trailer = t;
+            // Hybrid files (the common "incremental update moved objects into
+            // object streams" shape): this section's /XRefStm supplements the
+            // classic table and is read BEFORE the /Prev chain, so its entries
+            // win over the older revisions' offsets - the update's locations
+            // are the current ones. First-wins recording does the rest.
+            const PdfObj* xs = ResolveIn(t, "XRefStm");
+            if (xs && xs->t == PdfObj::INT && xs->i > 0 && (size_t)xs->i < bytes.size())
+                ReadXrefAt((size_t)xs->i, found);
             const PdfObj* prev = ResolveIn(t, "Prev");
             if (!prev || prev->t != PdfObj::INT || prev->i <= 0) break;
             at = prev->i;
         }
         if (!trailer) return false;
-        // Hybrid files: a cross-reference stream behind the classic table wins.
-        const PdfObj* xs = ResolveIn(trailer, "XRefStm");
-        if (xs && xs->t == PdfObj::INT && xs->i > 0 && (size_t)xs->i < bytes.size())
-            ReadXrefAt((size_t)xs->i, found);
         offsets = std::move(found);
         if (!encrypted) {
             const PdfObj* enc = ResolveIn(trailer, "Encrypt");
@@ -389,16 +393,22 @@ struct PdfFile {
                 PdfObj first, count;
                 if (!lx.Token(first) || first.t != PdfObj::INT) return nullptr;
                 if (!lx.Token(count) || count.t != PdfObj::INT) return nullptr;
-                if (lx.p < lx.end && IsWhite(*lx.p)) lx.p++;   // one EOL, then 20-byte entries
-                for (long long k = 0; k < count.i && lx.p + 20 <= lx.end; k++) {
-                    const uint8_t* e = lx.p;
-                    lx.p += 20;
-                    if (e[17] != 'n') continue;                 // 'f' = free
-                    long long off = 0, num = first.i + k;
-                    for (int d = 0; d < 10; d++) if (IsDigit(e[d])) off = off * 10 + (e[d] - '0');
+                // Entries read as tokens, not fixed 20-byte rows: the spec pins
+                // the width, but real producers end the header line with \r\n,
+                // \n or " \n", and a fixed walk that skips only one whitespace
+                // byte shifts every entry and loses the whole table (seen on a
+                // real government file). Token parsing survives every EOL.
+                for (long long k = 0; k < count.i; k++) {
+                    lx.SkipWhite();
+                    PdfObj off, gen, type;
+                    if (!lx.Token(off) || off.t != PdfObj::INT) return nullptr;
+                    if (!lx.Token(gen) || gen.t != PdfObj::INT) return nullptr;
+                    if (!lx.Token(type) || type.t != PdfObj::KEYWORD) return nullptr;
+                    if (type.name != "n") continue;             // 'f' = free
+                    long long num = first.i + k;
                     if (num >= 0 && num < 100000000 && !found.count((int)num) &&
-                        off > 0 && (size_t)off < bytes.size())
-                        found[(int)num] = (size_t)off;
+                        off.i > 0 && (size_t)off.i < bytes.size())
+                        found[(int)num] = (size_t)off.i;
                 }
             }
             lx.SkipWhite();
@@ -463,26 +473,33 @@ struct PdfFile {
         size_t n = bytes.size();
         for (size_t i = 0; i + 4 < n; i++) {
             if (memcmp(s + i, " obj", 4) != 0) continue;
+            // The header is "N G obj": the digits before " obj" are the
+            // GENERATION, the number lives before that. Registering the
+            // generation would collapse every object into object 0.
             size_t a = i;
-            while (a > 0 && IsDigit((uint8_t)s[a - 1])) a--;
-            if (a == i) continue;
-            long long num = strtoll(s + a, nullptr, 10);
-            size_t b = a;
-            while (b < i && IsDigit((uint8_t)s[b])) b++;
-            while (b < i && IsWhite((uint8_t)s[b])) b++;
-            size_t c = b;
-            while (c < i && IsDigit((uint8_t)s[c])) c++;
-            if (c == b) continue;
-            if (num >= 0 && num < 100000000 && !offsets.count((int)num)) offsets[(int)num] = a;
+            while (a > 0 && IsDigit((uint8_t)s[a - 1])) a--;         // generation digits
+            if (a == i) continue;                                    // "N obj": no generation
+            while (a > 0 && IsWhite((uint8_t)s[a - 1])) a--;         // the separator
+            size_t numStart = a;
+            while (numStart > 0 && IsDigit((uint8_t)s[numStart - 1])) numStart--;   // object number
+            if (numStart == a) continue;
+            long long num = strtoll(s + numStart, nullptr, 10);
+            if (num >= 0 && num < 100000000 && !offsets.count((int)num)) offsets[(int)num] = numStart;
         }
         for (size_t i = 0; i + 15 < n; i++) {    // the catalog: first /Type/Catalog
             if (memcmp(s + i, "/Type/Catalog", 13) == 0 || memcmp(s + i, "/Type /Catalog", 14) == 0) {
                 for (size_t k = i + 1; k-- > 0;) {
                     if (i - k > 4096) break;
                     if (k + 4 <= n && memcmp(s + k, " obj", 4) == 0) {
-                        size_t aa = k;
+                        size_t aa = k;                       // "N G obj": skip the generation
                         while (aa > 0 && IsDigit((uint8_t)s[aa - 1])) aa--;
-                        if (aa < k) { root = ObjByNum((int)strtoll(s + aa, nullptr, 10)); return; }
+                        while (aa > 0 && IsWhite((uint8_t)s[aa - 1])) aa--;
+                        size_t nn = aa;                      // then the object number
+                        while (nn > 0 && IsDigit((uint8_t)s[nn - 1])) nn--;
+                        if (nn < aa) {
+                            root = ObjByNum((int)strtoll(s + nn, nullptr, 10));
+                            if (root) return;
+                        }
                     }
                 }
             }
@@ -898,7 +915,7 @@ struct InstReader {
             PdfObj tok;
             if (!lx.Token(tok)) return false;
             if (tok.t != PdfObj::KEYWORD) {
-                if ((int)operands.size() >= MaximumOperands) throw PdfError();
+if ((int)operands.size() >= MaximumOperands) throw PdfError();
                 operands.push_back(std::move(tok));
                 continue;
             }
@@ -908,38 +925,59 @@ struct InstReader {
     }
 };
 
+// KillerPDF's PdfToUnicodeMap.Unicode under compatibility recovery: an empty
+// destination maps to U+FFFD and an odd trailing byte reads as U+FFFD instead
+// of invalidating the whole mapping - real producers emit both.
 static std::wstring Utf16Destination(const std::vector<uint8_t>& b) {
     if (b.size() == 2 && b[0] == 0xFF && b[1] == 0xFD) return std::wstring(1, (wchar_t)0xFFFD);
-    if (b.empty()) throw PdfError();
-    if (b.size() % 2) throw PdfError();
-    return Utf16be(b.data(), b.size());
+    if (b.empty()) return std::wstring(1, (wchar_t)0xFFFD);
+    std::wstring out;
+    for (size_t k = 0; k + 1 < b.size(); k += 2) out += (wchar_t)((b[k] << 8) | b[k + 1]);
+    if (b.size() % 2) out += (wchar_t)0xFFFD;        // the odd trailing byte
+    return out;
 }
 static void IncrementBytes(std::vector<uint8_t>& b) {
     for (size_t k = b.size(); k-- > 0;)
         if (++b[k] != 0) return;
-    throw PdfError();                                // range overflow
+throw PdfError(); // range overflow
 }
 
-// Parses decoded CMap bytes: codespacerange, bfchar, bfrange, usecmap.
+// Parses decoded CMap bytes: codespacerange, bfchar, bfrange, usecmap. Runs
+// under KillerPDF's compatibility recovery: metadata dictionaries and other
+// PostScript chatter are skipped, malformed entries are dropped (not fatal),
+// a declared block count that disagrees with its entries still parses when the
+// stride fits, and mappings that fall outside the declared code spaces extend
+// the spaces (IncludeMappedCodeSpaces) instead of dying.
 static UnicodeMap ParseUnicodeMap(const std::vector<uint8_t>& src, bool simpleFont,
-                                  bool identityFont, int depth) {
-    if (depth > 32) throw PdfError();
+                                  bool identityFont, const UnicodeMap* inherited) {
     UnicodeMap map;
+    if (inherited) {
+        map.map = inherited->map;
+        map.spaces = inherited->spaces;
+    }
     InstReader rd{ Lexer{ src.data(), src.data() + src.size() } };
     std::string op;
     std::vector<PdfObj> args;
     std::string block;
     int blockCount = 0;
     while (rd.Next(op, args)) {
+            // CMap metadata dictionaries (/CIDSystemInfo << ... >> def and
+            // friends) are PostScript, not mappings - KillerPDF strips them
+            // from the source before parsing (PdfCMapMetadata).
+            if (!args.empty()) {
+                auto drop = [](const PdfObj& o) { return o.t == PdfObj::DICT || o.t == PdfObj::NIL; };
+                args.erase(std::remove_if(args.begin(), args.end(), drop), args.end());
+            }
             if (op == "usecmap") {
-                // Only the Identity family can be inherited without the engine's
-                // predefined CMap data; anything else lands above the U+FFFD gate.
+                // A named parent needs the engine's predefined CMap data, which
+                // this port does not carry; the Identity family is handled by
+                // the normalization below, anything else keeps what it has.
                 continue;
             }
             if (op == "begincodespacerange" || op == "beginbfchar" || op == "beginbfrange") {
                 if (!block.empty() || args.size() != 1 || args[0].t != PdfObj::INT ||
                     args[0].i < 0 || args[0].i > MaximumMappings)
-                    throw PdfError();
+throw PdfError();
                 block = op;
                 blockCount = (int)args[0].i;
                 continue;
@@ -947,39 +985,49 @@ static UnicodeMap ParseUnicodeMap(const std::vector<uint8_t>& src, bool simpleFo
             std::string want = block.empty() ? std::string() : "end" + block.substr(5);
             if (!block.empty() && op == want) {
                 int stride = block == "beginbfrange" ? 3 : 2;
-                if ((long long)blockCount * stride != (long long)args.size()) throw PdfError();
+                // The declared count is advisory under recovery: the entries
+                // are trusted when the stride fits them.
+                if (args.size() % stride || args.size() / stride > (size_t)MaximumMappings)
+throw PdfError();
                 for (size_t k = 0; k + stride <= args.size(); k += stride) {
                     PdfObj& lowObj = args[k];
                     if (lowObj.t != PdfObj::STR || lowObj.bytes.empty() || lowObj.bytes.size() > 4)
-                        throw PdfError();
+                        continue;                            // malformed entry: dropped
                     uint32_t low = 0;
                     for (uint8_t c : lowObj.bytes) low = (low << 8) | c;
                     int len = (int)lowObj.bytes.size();
                     if (block == "beginbfchar") {
-                        map.map[{low, len}] = Utf16Destination(args[k + 1].bytes);
+                        if (args[k + 1].t == PdfObj::STR)
+                            map.map[{low, len}] = Utf16Destination(args[k + 1].bytes);
                         continue;
                     }
                     PdfObj& highObj = args[k + 1];
                     if (highObj.t != PdfObj::STR || highObj.bytes.size() != lowObj.bytes.size())
-                        throw PdfError();
+                        continue;                            // malformed entry: dropped
                     uint32_t high = 0;
                     for (uint8_t c : highObj.bytes) high = (high << 8) | c;
                     if (block == "begincodespacerange") {
-                        if (map.spaces.size() >= 256) throw PdfError();
-                        map.spaces.push_back({ low, high, len });
+if (map.spaces.size() >= 256) throw PdfError();
+                        if (high >= low) {
+                            CodeSpace space{ low, high, len };
+                            bool seen = false;
+                            for (const CodeSpace& s : map.spaces)
+                                if (s.low == space.low && s.high == space.high && s.len == space.len)
+                                    { seen = true; break; }
+                            if (!seen) map.spaces.push_back(space);
+                        }
                         continue;
                     }
+                    if (high < low) continue;                // malformed range: dropped
                     unsigned long long count = (unsigned long long)(high - low) + 1;
-                    if (count > (unsigned long long)MaximumMappings) throw PdfError();
+if (count > (unsigned long long)MaximumMappings) throw PdfError();
                     if (args[k + 2].t == PdfObj::ARR) {
                         const PdfObj& dests = args[k + 2];
                         unsigned long long take = std::min<unsigned long long>(dests.arr.size(), count);
-                        for (unsigned long long j = 0; j < take; j++) {
-                            if (dests.arr[j].t != PdfObj::STR) throw PdfError();
-                            map.map[{low + (uint32_t)j, len}] = Utf16Destination(dests.arr[j].bytes);
-                        }
-                    } else {
-                        if (args[k + 2].t != PdfObj::STR) throw PdfError();
+                        for (unsigned long long j = 0; j < take; j++)
+                            if (dests.arr[j].t == PdfObj::STR)
+                                map.map[{low + (uint32_t)j, len}] = Utf16Destination(dests.arr[j].bytes);
+                    } else if (args[k + 2].t == PdfObj::STR) {
                         std::vector<uint8_t> dest = args[k + 2].bytes;
                         for (unsigned long long j = 0; j < count; j++) {
                             map.map[{low + (uint32_t)j, len}] = Utf16Destination(dest);
@@ -990,14 +1038,33 @@ static UnicodeMap ParseUnicodeMap(const std::vector<uint8_t>& src, bool simpleFo
                 block.clear();
                 continue;
             }
-            if (!block.empty() && op.rfind("end", 0) == 0) throw PdfError();  // wrong end
+if (!block.empty() && op.rfind("end", 0) == 0) throw PdfError();  // wrong end
             if (op.rfind("begin", 0) == 0 && op != "begincodespacerange" &&
                 op != "beginbfchar" && op != "beginbfrange")
                 continue;                            // registry chatter the map ignores
     }
-    if (!block.empty()) throw PdfError();            // an unterminated block
+if (!block.empty()) throw PdfError(); // an unterminated block
     if (simpleFont) map.NormalizeSimple();
     else if (identityFont) map.NormalizeIdentity();
+    {
+        // IncludeMappedCodeSpaces, always: mappings outside every declared
+        // space join the space table, grouped by their code length - without
+        // this, a codespacerange that disagrees with its own bfchar entries
+        // (a real producer habit) decodes nothing but U+FFFD.
+        std::map<int, std::pair<uint32_t, uint32_t>> byLen;
+        for (auto& kv : map.map) {
+            bool covered = false;
+            for (const CodeSpace& s : map.spaces)
+                if (s.len == kv.first.second && kv.first.first >= s.low && kv.first.first <= s.high)
+                    { covered = true; break; }
+            if (covered) continue;
+            auto& span = byLen[kv.first.second];
+            span.first = std::min<uint32_t>(span.first ? span.first : kv.first.first, kv.first.first);
+            span.second = std::max(span.second, kv.first.first);
+        }
+        for (auto& kv : byLen) map.spaces.push_back({ kv.second.first, kv.second.second, kv.first });
+if (map.spaces.size() > 256) throw PdfError();
+    }
     if (map.spaces.empty()) throw PdfError();
     return map;
 }
@@ -1010,7 +1077,7 @@ struct CidMap {
     bool ucs2Base = false;                           // a predefined UCS2-family parent
 };
 static CidMap ParseCidMap(const std::vector<uint8_t>& src, const CidMap* inherited, int depth) {
-    if (depth > 32) throw PdfError();
+if (depth > 32) throw PdfError();
     CidMap out;
     if (inherited) {
         out.map = inherited->map;
@@ -1023,6 +1090,11 @@ static CidMap ParseCidMap(const std::vector<uint8_t>& src, const CidMap* inherit
     std::vector<PdfObj> args;
     long long expanded = 0;
     while (rd.Next(op, args)) {
+        // metadata dictionaries are PostScript chatter, not mappings
+        if (!args.empty()) {
+            auto drop = [](const PdfObj& o) { return o.t == PdfObj::DICT || o.t == PdfObj::NIL; };
+            args.erase(std::remove_if(args.begin(), args.end(), drop), args.end());
+        }
         if (op == "usecmap") {
             if (args.size() == 1 && args[0].t == PdfObj::NAME) {
                 if (args[0].name.find("UCS2") != std::string::npos) out.ucs2Base = true;
@@ -1035,42 +1107,42 @@ static CidMap ParseCidMap(const std::vector<uint8_t>& src, const CidMap* inherit
             args[0].name == "WMode" && args[1].t == PdfObj::INT)
             out.vertical = args[1].i == 1;
         if (op == "endcodespacerange") {
-            if (args.size() % 2 || args.size() > 512) throw PdfError();
+if (args.size() % 2 || args.size() > 512) throw PdfError();
             for (size_t k = 0; k + 1 < args.size(); k += 2) {
                 if (args[k].t != PdfObj::STR || args[k + 1].t != PdfObj::STR ||
                     args[k].bytes.empty() || args[k].bytes.size() > 4 ||
                     args[k].bytes.size() != args[k + 1].bytes.size())
-                    throw PdfError();
+throw PdfError();
                 uint32_t low = 0, high = 0;
                 for (uint8_t c : args[k].bytes) low = (low << 8) | c;
                 for (uint8_t c : args[k + 1].bytes) high = (high << 8) | c;
-                if (high < low) throw PdfError();
+if (high < low) throw PdfError();
                 out.spaces.push_back({ low, high, (int)args[k].bytes.size() });
             }
             continue;
         }
         if (op != "endcidchar" && op != "endcidrange") continue;
         int stride = op == "endcidchar" ? 2 : 3;
-        if (args.size() % stride) throw PdfError();
+if (args.size() % stride) throw PdfError();
         for (size_t k = 0; k + stride <= args.size(); k += stride) {
             if (args[k].t != PdfObj::STR || args[k].bytes.empty() || args[k].bytes.size() > 4)
-                throw PdfError();
+throw PdfError();
             uint32_t first = 0;
             for (uint8_t c : args[k].bytes) first = (first << 8) | c;
             uint32_t last = first;
             if (stride == 3) {
                 if (args[k + 1].t != PdfObj::STR || args[k + 1].bytes.size() != args[k].bytes.size())
-                    throw PdfError();
+throw PdfError();
                 last = 0;
                 for (uint8_t c : args[k + 1].bytes) last = (last << 8) | c;
             }
-            if (args[k + stride - 1].t != PdfObj::INT) throw PdfError();
+if (args[k + stride - 1].t != PdfObj::INT) throw PdfError();
             uint32_t cid = (uint32_t)args[k + stride - 1].i;
-            if (last < first) throw PdfError();
-            if ((unsigned long long)(last - first) + cid > 65535) throw PdfError();
-            if ((expanded += (long long)(last - first) + 1) > 1000000) throw PdfError();
+if (last < first) throw PdfError();
+if ((unsigned long long)(last - first) + cid > 65535) throw PdfError();
+if ((expanded += (long long)(last - first) + 1) > 1000000) throw PdfError();
             for (uint32_t offset = 0; offset <= last - first; offset++) {
-                if (out.map.size() >= 65536) throw PdfError();
+if (out.map.size() >= 65536) throw PdfError();
                 out.map[first + offset] = cid + offset;
             }
         }
@@ -1089,6 +1161,7 @@ struct PdfFont {
     std::vector<CodeSpace> spaces;                   // decode spaces
     std::map<uint32_t, std::wstring> simpleText;     // encoding names per code
     std::map<uint32_t, uint32_t> cidMap;             // code -> CID (CMap stream)
+    std::unordered_map<uint32_t, std::wstring> gidUni;   // embedded cmap reverse map
     std::map<uint32_t, double> widths;
     double defaultWidth = 0;
     double ascent = DefaultAscent, descent = DefaultDescent;
@@ -1105,6 +1178,11 @@ struct PdfFont {
         auto hit = cidMap.find(code);
         return hit == cidMap.end() ? 0 : hit->second;
     }
+    // KillerPDF's extraction Fallback: the encoding's own text for a simple
+    // font; for a composite, the UCS2 families read the code as Unicode and
+    // otherwise the embedded font program's cmap names the glyph's Unicode
+    // (ReverseUnicode) - the path real-world fonts without a usable ToUnicode
+    // still take.
     std::wstring Fallback(uint32_t code) const {
         if (!composite) {
             auto hit = simpleText.find(code);
@@ -1112,10 +1190,21 @@ struct PdfFont {
         }
         if (ucs2Direct && code <= 0xFFFF && !(code >= 0xD800 && code <= 0xDFFF))
             return std::wstring(1, (wchar_t)code);   // the UCS2 CMaps: code IS Unicode
+        if (!gidUni.empty()) {
+            uint32_t cid = CidOf(code);
+            if (cid <= 0xFFFF) {
+                auto hit = gidUni.find(cid);
+                if (hit != gidUni.end()) return hit->second;
+            }
+        }
         return std::wstring(1, (wchar_t)0xFFFD);
     }
-    // KillerPDF's PdfToUnicodeMap.DecodeCore: one to four byte codes walked
-    // against the code spaces, missing mappings fall back, invalid ones throw.
+    // KillerPDF's PdfToUnicodeMap.DecodeCore under compatibility recovery
+    // (DecodeWithCompatibilityRecovery): one to four byte codes walked against
+    // the code spaces; a missing mapping falls back, and an incomplete or
+    // invalid code consumes one byte and emits the fallback text instead of
+    // invalidating the rest of the string - one broken glyph never costs the
+    // line (or the page) its remaining letters.
     std::vector<DecChar> Decode(const uint8_t* s, size_t n) const {
         std::vector<DecChar> out;
         size_t pos = 0;
@@ -1131,18 +1220,16 @@ struct PdfFont {
                     for (int other = 1; other <= 4 && !hit; other++)
                         hit = other == len ? nullptr : uni.Lookup(code, other);
                 if (hit) text = *hit;
-                else {
-                    text = Fallback(code);
-                    if (text[0] == (wchar_t)0xFFFD && !composite) {
-                        // the encoding table had nothing either: the code is a hole
-                    }
-                }
+                else text = Fallback(code);
                 out.push_back({ code, len, std::move(text) });
                 pos += (size_t)len;
                 matched = true;
                 break;
             }
-            if (!matched) throw PdfError();              // incomplete or invalid code
+            if (!matched) {                               // recovery: one byte, one placeholder
+                code = s[pos++];
+                out.push_back({ code, 1, Fallback(code) });
+            }
         }
         return out;
     }
@@ -1163,6 +1250,182 @@ static double MetricNum(const PdfObj* o, double fallback) {
 static void ReadCidWidths(PdfFile& F, const PdfObj* array, std::map<uint32_t, double>& widths);
 static const PdfObj* ResolveInF(PdfFile& F, const PdfObj* dict, const char* key);
 
+// The ToUnicode stream with its /UseCMap chain, the way KillerPDF's
+// ReadToUnicode follows one: a stream parent's mappings sit under the child's,
+// and a named parent (predefined CMap data the port does not carry) is ignored.
+static UnicodeMap ReadUnicodeMapStream(PdfFile& F, const PdfObj* stream,
+                                       bool simpleFont, bool identityFont, int depth) {
+if (depth > 32 || !stream || stream->t != PdfObj::STREAM) throw PdfError();
+    UnicodeMap inherited;
+    bool haveParent = false;
+    if (const PdfObj* useCmap = stream->Get("UseCMap")) {
+        const PdfObj* parent = F.Resolve(useCmap);
+        if (parent && parent->t == PdfObj::STREAM && parent != stream) {
+            inherited = ReadUnicodeMapStream(F, parent, simpleFont, identityFont, depth + 1);
+            haveParent = true;
+        }
+    }
+    std::vector<uint8_t> bytes;
+if (!F.StreamData(stream, bytes)) throw PdfError();
+    return ParseUnicodeMap(bytes, simpleFont, identityFont, haveParent ? &inherited : nullptr);
+}
+
+// The composite-font /Encoding CMap stream with its /UseCMap chain (KillerPDF's
+// ReadCidMap): producers embed a small override CMap on top of a base one.
+static CidMap ReadCidMapStream(PdfFile& F, const PdfObj* stream, int depth) {
+if (depth > 32 || !stream || stream->t != PdfObj::STREAM) throw PdfError();
+    CidMap base;
+    bool haveBase = false;
+    if (const PdfObj* useCmap = stream->Get("UseCMap")) {
+        const PdfObj* parent = F.Resolve(useCmap);
+        if (parent && parent->t == PdfObj::STREAM && parent != stream) {
+            base = ReadCidMapStream(F, parent, depth + 1);
+            haveBase = true;
+        }
+    }
+    std::vector<uint8_t> bytes;
+if (!F.StreamData(stream, bytes)) throw PdfError();
+    return ParseCidMap(bytes, haveBase ? &base : nullptr, depth);
+}
+
+// The embedded TrueType program's cmap, read straight out of /FontFile2 - the
+// same source KillerPDF's ReverseUnicode names glyph Unicode from when the PDF
+// carries no usable ToUnicode (real-world fonts ship like that). The subtable
+// scores are TrueTypeFont.ReadCmap's; formats 0, 4, 6 and 12 cover what PDF
+// subsets embed in practice. CFF-based /FontFile3 programs carry no sfnt cmap
+// and are skipped, exactly like KillerPDF's TrueTypeFont.LoadForExtraction.
+static void BuildReverseCmap(PdfFile& F, const PdfObj* descriptor,
+                             std::unordered_map<uint32_t, std::wstring>& out) {
+    if (!descriptor || !out.empty()) return;
+    const PdfObj* file = ResolveInF(F, descriptor, "FontFile2");
+    if (!file || file->t != PdfObj::STREAM) return;
+    std::vector<uint8_t> data;
+    if (!F.StreamData(file, data) || data.size() < 12) return;
+    auto U16 = [&](size_t at) -> uint32_t {
+        return at + 2 <= data.size() ? (uint32_t)((data[at] << 8) | data[at + 1]) : 0;
+    };
+    auto U32 = [&](size_t at) -> uint32_t {
+        return at + 4 <= data.size()
+            ? (uint32_t)(((uint32_t)data[at] << 24) | ((uint32_t)data[at + 1] << 16) |
+                         ((uint32_t)data[at + 2] << 8) | data[at + 3]) : 0;
+    };
+    size_t face = 0;
+    if (U32(0) == 0x74746366) {                      // 'ttcf': the first face
+        size_t off = U32(12);
+        if (off + 12 > data.size()) return;
+        face = off;
+    }
+    uint32_t version = U32(face);
+    if (version != 0x00010000 && version != 0x74727565) return;   // sfnt or 'true'
+    uint32_t numTables = U16(face + 4);
+    if (numTables > 512) return;
+    size_t cmapAt = 0, cmapLen = 0;
+    for (uint32_t k = 0; k < numTables; k++) {
+        size_t rec = face + 12 + (size_t)k * 16;
+        if (rec + 16 > data.size()) return;
+        if (memcmp(data.data() + rec, "cmap", 4) == 0) {
+            cmapAt = U32(rec + 8);
+            cmapLen = U32(rec + 12);
+            break;
+        }
+    }
+    if (!cmapAt || cmapAt + 4 > data.size() || cmapLen < 4) return;
+    uint32_t count = U16(cmapAt + 2);
+    if (count > 64 || 4ull + (unsigned long long)count * 8 > cmapLen) return;
+    int best = 0;
+    size_t bestAt = 0;
+    for (uint32_t k = 0; k < count; k++) {
+        size_t rec = cmapAt + 4 + (size_t)k * 8;
+        uint32_t platform = U16(rec), encoding = U16(rec + 2);
+        uint32_t relative = U32(rec + 4);
+        if (relative > cmapLen - 2) continue;
+        size_t sub = cmapAt + relative;
+        if (sub + 2 > data.size()) continue;
+        uint32_t format = U16(sub);
+        int score = 0;                               // TrueTypeFont.ReadCmap's scores
+        if (platform == 3 && encoding == 10 && format == 12) score = 500;
+        else if (platform == 3 && encoding == 10 && format == 13) score = 490;
+        else if (platform == 3 && encoding == 10 && format == 10) score = 480;
+        else if (platform == 3 && encoding == 10 && format == 8) score = 470;
+        else if (platform == 0 && format == 12) score = 450;
+        else if (platform == 0 && format == 13) score = 440;
+        else if (platform == 0 && format == 10) score = 430;
+        else if (platform == 0 && format == 8) score = 420;
+        else if (platform == 3 && encoding == 1 && format == 4) score = 400;
+        else if (platform == 3 && encoding == 1 && format == 12) score = 395;
+        else if (platform == 0 && format == 4) score = 350;
+        else if (platform == 3 && encoding == 1 && format == 6) score = 340;
+        else if (platform == 0 && format == 6) score = 330;
+        else if (platform == 0 && format == 0) score = 320;
+        else if (platform == 0 && format == 2) score = 310;
+        else if (platform == 3 && encoding == 0 && format == 4) score = 200;
+        else if (platform == 1 && encoding == 0 && (format == 0 || format == 6)) score = 100;
+        if (score > best) { best = score; bestAt = sub; }
+    }
+    if (!bestAt) return;
+    uint32_t format = U16(bestAt);
+    std::unordered_map<uint32_t, uint32_t> uniToGid;
+    if (format == 0) {                               // byte glyph indices
+        for (uint32_t c = 0; c < 256 && bestAt + 6 + c < data.size(); c++) {
+            uint32_t gid = data[bestAt + 6 + c];
+            if (gid) uniToGid[c] = gid;
+        }
+    } else if (format == 4) {                        // the BMP segments
+        uint32_t segX2 = U16(bestAt + 6);
+        uint32_t segCount = segX2 / 2;
+        if (!segCount || segCount > 8192) return;
+        size_t endAt = bestAt + 14;
+        size_t startAt = endAt + (size_t)segCount * 2 + 2;
+        size_t deltaAt = startAt + (size_t)segCount * 2;
+        size_t rangeAt = deltaAt + (size_t)segCount * 2;
+        for (uint32_t s = 0; s < segCount; s++) {
+            uint32_t end = U16(endAt + (size_t)s * 2);
+            uint32_t start = U16(startAt + (size_t)s * 2);
+            if (start > end || start == 0xFFFF) continue;
+            int delta = (int)(short)(uint16_t)U16(deltaAt + (size_t)s * 2);
+            uint32_t rangeOff = U16(rangeAt + (size_t)s * 2);
+            for (uint32_t c = start; c <= end; c++) {
+                uint32_t gid = 0;
+                if (rangeOff == 0) {
+                    gid = (uint32_t)((c + delta) & 0xFFFF);
+                } else {
+                    size_t at = rangeAt + (size_t)s * 2 + (size_t)rangeOff + (size_t)(c - start) * 2;
+                    gid = U16(at);
+                    if (gid) gid = (uint32_t)((gid + delta) & 0xFFFF);
+                }
+                if (gid) uniToGid[c] = gid;
+            }
+        }
+    } else if (format == 6) {                        // a trimmed run
+        uint32_t first = U16(bestAt + 6), entries = U16(bestAt + 8);
+        for (uint32_t k = 0; k < entries; k++) {
+            uint32_t gid = U16(bestAt + 10 + (size_t)k * 2);
+            if (gid) uniToGid[first + k] = gid;
+        }
+    } else if (format == 12 || format == 13) {       // the full-repertoire groups
+        uint32_t groups = U32(bestAt + 12);
+        if (groups > 200000) return;
+        for (uint32_t g = 0; g < groups; g++) {
+            size_t at = bestAt + 16 + (size_t)g * 12;
+            if (at + 12 > data.size()) return;
+            uint32_t start = U32(at), end = U32(at + 4), gid0 = U32(at + 8);
+            if (start > end || end - start > 65535) continue;
+            for (uint32_t c = start; c <= end; c++) {
+                if (c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) continue;
+                uniToGid[c] = gid0 + (c - start);    // format 13: same glyph, one entry is enough
+                if (format == 13) break;
+            }
+        }
+    } else return;
+    // ReverseUnicode: the lowest scalar wins each glyph (the walk is ascending).
+    for (uint32_t scalar = 0; scalar <= 0xFFFF; scalar++) {
+        if (scalar >= 0xD800 && scalar <= 0xDFFF) continue;
+        auto hit = uniToGid.find(scalar);
+        if (hit == uniToGid.end()) continue;
+        out.emplace(hit->second, std::wstring(1, (wchar_t)scalar));
+    }
+}
+
 // Reads one font resource dictionary (already resolved) the way
 // PdfFontResourceReader.Read does, minus the outline machinery docsy's
 // extraction subset does not need.
@@ -1175,9 +1438,20 @@ static PdfFont ReadFont(PdfFile& F, const PdfObj* font) {
     const PdfObj* metrics = font;
     if (composite) {
         const PdfObj* descendants = ResolveInF(F, font, "DescendantFonts");
-        if (descendants && descendants->t == PdfObj::ARR && !descendants->arr.empty())
-            metrics = F.Resolve(&descendants->arr[0]);
-        if (!metrics || metrics->t != PdfObj::DICT) throw PdfError();
+        if (descendants && descendants->t == PdfObj::ARR && !descendants->arr.empty()) {
+            const PdfObj* d0 = F.Resolve(&descendants->arr[0]);
+            if (d0 && d0->t == PdfObj::DICT) metrics = d0;
+        }
+        if (metrics == font) {
+            // KillerPDF's recovery: an Identity composite whose ToUnicode is
+            // present reads with an empty metrics dictionary - the W and DW
+            // lookups simply miss and the default width carries the boxes.
+            std::string enc0;
+            const PdfObj* enc = font->Get("Encoding");
+            if (enc && enc->t == PdfObj::NAME) enc0 = enc->name;
+            if (enc0 == "Identity-H" || enc0 == "Identity-V") metrics = font;
+else throw PdfError();
+        }
     }
     const PdfObj* descriptor = ResolveInF(F, metrics, "FontDescriptor");
 
@@ -1206,25 +1480,34 @@ static PdfFont ReadFont(PdfFile& F, const PdfObj* font) {
         const PdfObj* dw = ResolveInF(F, metrics, "DW");
         out.defaultWidth = dw ? MetricNum(dw, 1000) : 1000;
         if (encoding && encoding->t == PdfObj::STREAM) {
-            std::vector<uint8_t> bytes;
-            if (!F.StreamData(encoding, bytes)) throw PdfError();
-            CidMap map = ParseCidMap(bytes, nullptr, 0);
-            out.cidMap = std::move(map.map);
-            out.spaces = std::move(map.spaces);
-            out.ucs2Direct = map.ucs2Base;
+            try {
+                CidMap map = ReadCidMapStream(F, encoding, 0);
+                out.cidMap = std::move(map.map);
+                out.spaces = std::move(map.spaces);
+                out.ucs2Direct = map.ucs2Base;
+            } catch (PdfError&) {
+                // KillerPDF's "an unreadable map was ignored" path: the font's
+                // own cmap still names the glyphs below, so keep an Identity-
+                // shaped space instead of costing the page its remaining text.
+                out.spaces.push_back({ 0, 65535, 2 });
+            }
         } else if (encodingName == "Identity-H" || encodingName == "Identity-V") {
             // code == CID, two bytes
         } else if (encodingName.find("UCS2") != std::string::npos) {
             out.ucs2Direct = true;                   // predefined UCS2: code IS Unicode
         } else {
-            throw PdfError();                        // shift-CID data stays behind the gate
+throw PdfError(); // shift-CID data stays behind the gate
         }
+        BuildReverseCmap(F, descriptor, out.gidUni);
         if (out.spaces.empty()) out.spaces.push_back({ 0, 65535, 2 });
     } else {
         out.defaultWidth = 0;                        // MissingWidth's slot
+        // KillerPDF's recovery: the WinAnsi typo producers emit, and an
+        // unrecognized encoding name carries no mapping - the font's metrics
+        // name picks the standard encoding, exactly like an absent one.
+        if (encodingName == "WinAnsiEcoding") encodingName = "WinAnsiEncoding";
+        if (!encodingName.empty() && !EncodingNames(encodingName)) encodingName.clear();
         if (encodingName.empty()) {
-            const PdfObj* encNames = nullptr;
-            (void)encNames;
             encodingName = metricsName == "Symbol" ? "SymbolEncoding"
                          : metricsName == "ZapfDingbats" ? "ZapfDingbatsEncoding"
                          : "StandardEncoding";
@@ -1271,12 +1554,15 @@ static PdfFont ReadFont(PdfFile& F, const PdfObj* font) {
 
     const PdfObj* uniStream = ResolveInF(F, font, "ToUnicode");
     if (uniStream && uniStream->t == PdfObj::STREAM) {
-        std::vector<uint8_t> bytes;
-        if (F.StreamData(uniStream, bytes)) {
-            out.uni = ParseUnicodeMap(bytes, !composite, composite &&
-                                      (encodingName == "Identity-H" || encodingName == "Identity-V"), 0);
+        try {
+            out.uni = ReadUnicodeMapStream(F, uniStream, !composite, composite &&
+                                           (encodingName == "Identity-H" || encodingName == "Identity-V"), 0);
             out.hasUni = true;
             if (!out.uni.spaces.empty()) out.spaces = out.uni.spaces;
+        } catch (PdfError&) {
+            // "An unreadable ToUnicode map was ignored": the embedded font's
+            // own cmap (read above) still names the glyphs, so extraction
+            // continues through the fallback instead of losing the page.
         }
     }
     if (out.spaces.empty()) out.spaces.push_back({ 0, composite ? 65535u : 255u, composite ? 2 : 1 });
@@ -1309,21 +1595,21 @@ static void ReadCidWidths(PdfFile& F, const PdfObj* array, std::map<uint32_t, do
     long long expanded = 0;
     for (size_t k = 0; k < array->arr.size();) {
         const PdfObj* first = F.Resolve(&array->arr[k++]);
-        if (!first || first->t != PdfObj::INT || first->i < 0) throw PdfError();
-        if (k >= array->arr.size()) throw PdfError();
+if (!first || first->t != PdfObj::INT || first->i < 0) throw PdfError();
+if (k >= array->arr.size()) throw PdfError();
         const PdfObj* second = F.Resolve(&array->arr[k++]);
         if (second && second->t == PdfObj::ARR) {
-            if (first->i + (long long)second->arr.size() > 65536) throw PdfError();
-            if ((expanded += (long long)second->arr.size()) > 1000000) throw PdfError();
+if (first->i + (long long)second->arr.size() > 65536) throw PdfError();
+if ((expanded += (long long)second->arr.size()) > 1000000) throw PdfError();
             for (size_t j = 0; j < second->arr.size(); j++) {
                 const PdfObj* w = F.Resolve(&second->arr[j]);
                 widths[(uint32_t)first->i + (uint32_t)j] = w ? MetricNum(w, 1000) : 1000;
             }
         } else {
-            if (!second || second->t != PdfObj::INT || second->i < first->i) throw PdfError();
-            if (k >= array->arr.size()) throw PdfError();
+if (!second || second->t != PdfObj::INT || second->i < first->i) throw PdfError();
+if (k >= array->arr.size()) throw PdfError();
             const PdfObj* w = F.Resolve(&array->arr[k++]);
-            if ((expanded += second->i - first->i + 1) > 1000000) throw PdfError();
+if ((expanded += second->i - first->i + 1) > 1000000) throw PdfError();
             for (uint32_t cid = (uint32_t)first->i; cid <= (uint32_t)second->i; cid++)
                 widths[cid] = w ? MetricNum(w, 1000) : 1000;
         }
@@ -1380,12 +1666,12 @@ struct Interp {
     PdfFont& Font(const PdfObj* resources, const std::string& key, int depth);
 
     void Show(const PdfObj& str, Matrix& text, St& st, const PdfObj* resources, int depth) {
-        if (st.font.empty()) throw PdfError();
+if (st.font.empty()) throw PdfError();
         PdfFont& font = Font(resources, st.font, depth);
-        if (str.t != PdfObj::STR) throw PdfError();
+if (str.t != PdfObj::STR) throw PdfError();
         std::vector<DecChar> chars = font.Decode(str.bytes.data(), str.bytes.size());
         for (const DecChar& ch : chars) {
-            if ((int)out.size() >= MaximumLetters) throw PdfError();
+if ((int)out.size() >= MaximumLetters) throw PdfError();
             double size = std::max(st.size, 0.000001);
             // KillerPDF's Show: the box is the advance box (no outline reader
             // here), corners pushed through text x CTM and min/maxed.
@@ -1418,7 +1704,7 @@ struct Interp {
     }
 
     void Run(const std::vector<uint8_t>& src, const PdfObj* resources, Matrix ctm0, int depth) {
-        if (depth > MaximumFormDepth) throw PdfError();
+if (depth > MaximumFormDepth) throw PdfError();
         St st;
         st.ctm = ctm0;
         Matrix text = Matrix(), line = Matrix();
@@ -1435,10 +1721,10 @@ struct Interp {
             // every viewer accepts them - KillerPDF's compat path does too.
             auto Num = [&](int k) -> double {              // k counts from the end, 0 = last
                 int idx = (int)args.size() - 1 - k;
-                if (idx < 0) throw PdfError();
+if (idx < 0) throw PdfError();
                 if (args[idx].t == PdfObj::INT) return (double)args[idx].i;
                 if (args[idx].t == PdfObj::REAL) return args[idx].d;
-                throw PdfError();
+throw PdfError();
             };
             auto RequireText = [&]() { if (!insideText) throw PdfError(); };
             auto MoveLine = [&](double x, double y) {
@@ -1446,24 +1732,24 @@ struct Interp {
                 text = line = line.Move(x, y);
             };
             if (op == "q") {
-                if ((int)stack.size() >= MaximumStateStack) throw PdfError();
+if ((int)stack.size() >= MaximumStateStack) throw PdfError();
                 stack.push_back(st);
             } else if (op == "Q") {
-                if (stack.empty()) throw PdfError();
+if (stack.empty()) throw PdfError();
                 st = stack.back(); stack.pop_back();
             } else if (op == "cm") {
-                if (args.size() < 6) throw PdfError();
+if (args.size() < 6) throw PdfError();
                 Matrix m{ Num(5), Num(4), Num(3), Num(2), Num(1), Num(0) };
                 st.ctm = m.Then(st.ctm);
             } else if (op == "BT") {
-                if (insideText) throw PdfError();
+if (insideText) throw PdfError();
                 insideText = true;
                 text = line = Matrix();
             } else if (op == "ET") {
                 RequireText();
                 insideText = false;
             } else if (op == "Tf") {
-                if (args.size() < 2 || args[(int)args.size() - 2].t != PdfObj::NAME) throw PdfError();
+if (args.size() < 2 || args[(int)args.size() - 2].t != PdfObj::NAME) throw PdfError();
                 st.font = args[(int)args.size() - 2].name;
                 st.size = Num(0);
             } else if (op == "Tc") { st.charSp = Num(0);
@@ -1473,10 +1759,10 @@ struct Interp {
             } else if (op == "Ts") { st.rise = Num(0);
             } else if (op == "Tr") {
                 if (args.empty() || args.back().t != PdfObj::INT || args.back().i < 0 || args.back().i > 7)
-                    throw PdfError();
+throw PdfError();
             } else if (op == "Tm") {
                 RequireText();
-                if (args.size() < 6) throw PdfError();
+if (args.size() < 6) throw PdfError();
                 text = line = Matrix{ Num(5), Num(4), Num(3), Num(2), Num(1), Num(0) };
             } else if (op == "Td") { MoveLine(Num(1), Num(0));
             } else if (op == "TD") { st.leading = -Num(1); MoveLine(Num(1), Num(0));
@@ -1486,30 +1772,30 @@ struct Interp {
                 bool any = false;
                 for (const PdfObj& item : args)
                     if (item.t == PdfObj::STR) { Show(item, text, st, resources, depth); any = true; }
-                if (!any) throw PdfError();
+if (!any) throw PdfError();
             } else if (op == "'") {
                 MoveLine(0, -st.leading);
                 bool any = false;
                 for (const PdfObj& item : args)
                     if (item.t == PdfObj::STR) { Show(item, text, st, resources, depth); any = true; }
-                if (!any) throw PdfError();
+if (!any) throw PdfError();
             } else if (op == "\"") {
-                if (args.size() < 3) throw PdfError();
+if (args.size() < 3) throw PdfError();
                 st.wordSp = Num(2); st.charSp = Num(1);
                 MoveLine(0, -st.leading);
                 Show(args.back(), text, st, resources, depth);
             } else if (op == "TJ") {
                 RequireText();
-                if (args.empty() || args.back().t != PdfObj::ARR) throw PdfError();
+if (args.empty() || args.back().t != PdfObj::ARR) throw PdfError();
                 for (const PdfObj& item : args.back().arr) {
                     if (item.t == PdfObj::STR || item.t == PdfObj::ARR) Show(item, text, st, resources, depth);
                     else if (item.t == PdfObj::INT || item.t == PdfObj::REAL) {
                         double adj = item.t == PdfObj::INT ? (double)item.i : item.d;
                         text = text.Move(-adj / 1000 * st.size * st.scale, 0);
-                    } else throw PdfError();
+} else throw PdfError();
                 }
             } else if (op == "BMC" || op == "BDC") {
-                if ((int)marked.size() >= MaximumStateStack) throw PdfError();
+if ((int)marked.size() >= MaximumStateStack) throw PdfError();
                 std::vector<uint8_t> actual;
                 int mcid = -1;
                 if (op == "BDC" && !args.empty() && args.back().t == PdfObj::DICT) {
@@ -1521,7 +1807,7 @@ struct Interp {
                 marked.push_back({ out.size(), std::move(actual), mcid });
                 if (mcid >= 0) markedId = mcid;
             } else if (op == "EMC") {
-                if (marked.empty()) throw PdfError();
+if (marked.empty()) throw PdfError();
                 auto section = marked.back(); marked.pop_back();
                 if (std::get<2>(section) >= 0) {
                     markedId = -1;
@@ -1548,16 +1834,16 @@ struct Interp {
                     }
                 }
             } else if (op == "Do") {
-                if (args.size() != 1 || args[0].t != PdfObj::NAME) throw PdfError();
+if (args.size() != 1 || args[0].t != PdfObj::NAME) throw PdfError();
                 const PdfObj* xobjs = ResolveInF(*file, resources, "XObject");
                 const PdfObj* entry = xobjs && xobjs->t == PdfObj::DICT ? xobjs->Get(args[0].name.c_str()) : nullptr;
                 const PdfObj* xo = entry ? file->Resolve(entry) : nullptr;
-                if (!xo || xo->t != PdfObj::STREAM) throw PdfError();
+if (!xo || xo->t != PdfObj::STREAM) throw PdfError();
                 const PdfObj* sub = ResolveInF(*file, xo, "Subtype");
                 if (sub && sub->t == PdfObj::NAME && sub->name == "Form") {
-                    if (++expansions > MaximumFormExpansions) throw PdfError();
+if (++expansions > MaximumFormExpansions) throw PdfError();
                     std::vector<uint8_t> bytes;
-                    if (!file->StreamData(xo, bytes)) throw PdfError();
+if (!file->StreamData(xo, bytes)) throw PdfError();
                     const PdfObj* own = ResolveInF(*file, xo, "Resources");
                     const PdfObj* formRes = own ? own : resources;
                     Matrix form = Matrix();
@@ -1594,7 +1880,7 @@ struct Interp {
             // skipped, which is what KillerPDF's compatibility sections do with
             // the ones it does not interpret.
         }
-        if (insideText || !stack.empty() || !marked.empty()) throw PdfError();
+if (insideText || !stack.empty() || !marked.empty()) throw PdfError();
     }
 };
 
@@ -1635,10 +1921,22 @@ PdfFont& Interp::Font(const PdfObj* resources, const std::string& key, int depth
     const PdfObj* fontsDict = ResolveInF(*file, resources, "Font");
     const PdfObj* entry = fontsDict && fontsDict->t == PdfObj::DICT ? fontsDict->Get(key.c_str()) : nullptr;
     const PdfObj* fontDict = entry ? file->Resolve(entry) : nullptr;
-    if (!fontDict || fontDict->t != PdfObj::DICT) throw PdfError();
+if (!fontDict || fontDict->t != PdfObj::DICT) throw PdfError();
     auto hit = fontIds->find(fontDict);
     if (hit != fontIds->end()) return (*fonts)[hit->second];
-    PdfFont f = ReadFont(*file, fontDict);
+    PdfFont f;
+    try {
+        f = ReadFont(*file, fontDict);
+    } catch (PdfError&) {
+        // A font resource that cannot be read must not cost the page the text
+        // drawn after it. KillerPDF's reader reaches the same page through its
+        // recovery without ever failing here; the extraction keeps flowing
+        // with placeholder glyphs on a default-advance box so the line (and
+        // everything after it) stays selectable.
+        f = PdfFont{};
+        f.spaces.push_back({ 0, 255, 1 });
+        f.defaultWidth = 556;
+    }
     (*fontIds)[fontDict] = (int)fonts->size();
     fonts->push_back(std::move(f));
     return fonts->back();
@@ -1678,9 +1976,9 @@ struct Session {
     // KillerPDF PdfPageTree walk, with the same cycle cap.
     void Walk(const PdfObj* node, const PdfObj* res, std::vector<double> media,
               std::vector<double> crop, long long rotate, int depth) {
-        if (depth > MaximumTreeDepth || pages.size() > 65536) throw PdfError();
+if (depth > MaximumTreeDepth || pages.size() > 65536) throw PdfError();
         node = file.Resolve(node);
-        if (!node || node->t != PdfObj::DICT) throw PdfError();
+if (!node || node->t != PdfObj::DICT) throw PdfError();
         const PdfObj* ownRes = ResolveInF(file, node, "Resources");
         if (ownRes) res = ownRes;
         const PdfObj* m = ResolveInF(file, node, "MediaBox");
@@ -1701,7 +1999,7 @@ struct Session {
         std::vector<double> v;
         for (const PdfObj& item : box->arr) {
             const PdfObj* n = item.t == PdfObj::REF ? file.Resolve(&item) : &item;
-            if (!n || n->t != PdfObj::INT && n->t != PdfObj::REAL) throw PdfError();
+if (!n || n->t != PdfObj::INT && n->t != PdfObj::REAL) throw PdfError();
             v.push_back(MetricNum(n, 0));
         }
         return v;
@@ -1737,7 +2035,7 @@ struct Session {
         if (hit != built.end()) return hit->second;
         PageText pg;
         try {
-            if (!opened || index < 0 || index >= (int)pages.size()) throw PdfError();
+if (!opened || index < 0 || index >= (int)pages.size()) throw PdfError();
         } catch (PdfError&) {
             built[index] = std::move(pg);
             return built[index];
