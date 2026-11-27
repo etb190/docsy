@@ -348,6 +348,9 @@ static bool CloseTabAt(bool b, int idx) {
     g.annSelPage = -1; g.annSelIdx = -1;
     LayoutMain();
     TabChrome(b);
+    SumTabStand(0);      // SUM_DOC: the neighbor (or the blank) took the front
+                         // without a SwitchTab - the card answers to it, open
+                         // or folded, like any other deck move
     SetStatusHold(L"Document closed");
     return true;
 }

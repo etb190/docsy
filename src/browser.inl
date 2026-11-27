@@ -1965,6 +1965,9 @@ static void WebNewTab(std::wstring url, bool makeCurrent) {
     WebSideLayout();
     WebRepaintChrome();
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+    SumTabStand(1);                  // the deck's seat moved to the fresh tab: a new
+                                     // tab never stood, so a standing card folds
+                                     // with the move, like any tab switch
     WebSessionSave();                // the deck remembers the tab the moment it exists
 }
 
@@ -1985,6 +1988,9 @@ static void WebCloseTabAt(int i) {
     WebBarLayout();
     WebSideLayout(); WebSideSync();
     WebRepaintChrome();
+    SumTabStand(1);                  // the neighbor took the seat without a
+                                     // WebSwitchTo - the card answers to it,
+                                     // open or folded, like any other deck move
     WebSessionSave();                // the closed tab is gone from the deck the moment it dies
 }
 
@@ -2043,6 +2049,9 @@ static void WebWordLookup(const std::wstring& word) {
     g_wtCur = hit;                               // the seat lands before the stage shows
     if (!g_webOn) WebToggle(true);
     else { WebShowCurrent(); WebBarLayout(); WebSwitchSyncSoon(); WebRepaintChrome(); AiModeChanged(); }
+    SumTabStand(1);                  // the lookup tab owns the seat now: the word-search
+                                     // road already folds the issuing card, and this
+                                     // tab never stood - the fold stays, like a switch
 }
 
 // the page: the reader's own container, edge to edge. The webview rides in
