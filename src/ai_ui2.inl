@@ -1764,7 +1764,7 @@ static void SumEnsureSeat(int seat) {
         g.main,   // the popup is an OVERLAY of the frame, not a window: the
                   // controller rides the frame and moves with it for free
         Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
-            [seat](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
+            [seat, &pre](HRESULT hr, ICoreWebView2Controller* c) -> HRESULT {
                 g_sumBuilding[seat] = false;
                 if (FAILED(hr) || !c || seat < 0 || seat >= SUM_SEATS) return S_OK;
                 g_sumCtr[seat] = c;
