@@ -1941,8 +1941,6 @@ static void SumHideSeat(int seat, bool fromOutside) {
                                                     // streaming into it, and the
                                                     // compositor stops burning
                                                     // frames nobody can see
-    if (seat == SUM_DOC)   // the doc card's stand rides out with the fold: the
-        AiSetSetting("summary.open", "0");   // session restarts it folded then
     SumSavePlacementSeat(seat);
     SumUnhookMouse();
     if (fromOutside) g_sumHideTick[seat] = GetTickCount();
@@ -2200,8 +2198,6 @@ static void SumPrewarm() {
 }
 static void SumOpenSeat(int seat) {
     if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
-    if (seat == SUM_DOC)   // the session remembers the doc card's stand: the app
-        AiSetSetting("summary.open", "1");   // restarts the navigator standing again
     g_sumShown[seat] = true;
     SumSeatBoundsRead(seat);        // the saved card lands (clamped) before the render
     SumEnsureSeat(seat);            // no-ops while the webview lives; re-arms it after
@@ -2702,6 +2698,17 @@ static void SessionSaveAll() {
     AiSetSetting("app.notes", g_sideNotes ? "1" : "0");
     AiSetSetting("app.sideon", g.sideOn ? "1" : "0");
     AiSetSetting("app.webside", g_webSide ? "1" : "0");
+    // the navigator's stand rides out with the session - written HERE, at the
+    // door, not on every open and fold. The click that closes the app is
+    // itself an outside click: it folds the card a heartbeat before WM_CLOSE
+    // arrives, and a fold-time write would always land on "0". The hide
+    // tick's own grace (the toggle's 400ms rule, widened to 600) reads
+    // through it: a card standing when the X was clicked still counts as
+    // standing. A card folded earlier - by an outside click, by its own
+    // close chip, by the toggle - was truly folded, and stays folded.
+    bool stood = g_sumShown[SUM_DOC] ||
+                 (g_sumHideTick[SUM_DOC] && GetTickCount() - g_sumHideTick[SUM_DOC] < 600);
+    AiSetSetting("summary.open", stood ? "1" : "0");
 }
 static void SessionRestore() {
     std::string view = AiGetSetting("app.view", "pdf");

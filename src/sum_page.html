@@ -152,10 +152,10 @@ select option{background-color:#242424; color:#e0e0e0;}
   font-size:var(--digest); padding-right:4px;}
 #digest p{text-align:justify; margin:0 0 8px;}
 /* Every chrome button answers the hover with a hand - the word popup's three
-   included. And while Shift is down the whole digest reads as grabbable: the
-   hand replaces the I-beam, saying click+Shift opens the popup here. */
+   included. And while Ctrl is down the whole digest reads as grabbable: the
+   hand replaces the I-beam, saying click+Ctrl opens the popup here. */
 button{cursor:pointer;}
-body.shifthover #digest{cursor:pointer;}
+body.ctrlhover #digest{cursor:pointer;}
 #digest h1,#digest h2,#digest h3{color:var(--primary); font-weight:600; margin:10px 0 4px;}
 #digest h1{font-size:1.23em;} #digest h2{font-size:1.12em;} #digest h3{font-size:1.04em;}
 #digest code{font-family:Consolas,monospace; font-size:.92em; background:var(--rowhover);
@@ -172,7 +172,7 @@ body.shifthover #digest{cursor:pointer;}
   border:1px solid var(--plateedge); border-radius:3px; display:none; z-index:10;
   box-sizing:border-box;}
 
-/* The word plate's action popup (Avalanche's Shift-over-a-word popup): three
+/* The word plate's action popup (Avalanche's Ctrl-over-a-word popup): three
    buttons - Define, Explain, Search - and an answer that unfolds inside the
    card. The pinned word keeps its plate while the popup stands. */
 #wordPop{position:absolute; display:none; flex-direction:column; z-index:20;
@@ -636,7 +636,7 @@ function paintAll(){
 /* ---- Digest Word Hover Plate (DigestWordHighlightAdorner) + the word popup ---- */
 var plate=$("wordPlate"), pop=$("wordPop"), popAns=$("wordAns");
 S.pin=null;            // the popup's payload {word, ctx}: it stands until a click
-                       // outside folds it or Shift lands somewhere new
+                       // outside folds it or Ctrl lands somewhere new
 S.lastHover=null;      // {r, word, ctx} - the word the pointer last rested on
 S.selHold=null;        // {r, word, ctx} - the selection the last mousedown snapshotted
 function hideWordPlate(){ plate.style.display="none"; }   // hover owns the plate,
@@ -667,7 +667,7 @@ function showWordPop(r, word, ctx){
   plate.style.display="block";
 }
 /* The whole selection is a payload too: a live digest selection stands in for
-   the hovered word, and Shift+click opens the popup for every word the user
+   the hovered word, and Ctrl+click opens the popup for every word the user
    marked. The browser's own selection highlight stands in for the plate. */
 function selPayload(sel){
   if(!sel || sel.isCollapsed || !sel.rangeCount) return null;
@@ -681,19 +681,19 @@ function selPayload(sel){
 }
 window.addEventListener("keydown", function(e){
   if(e.key==="Escape"){ closeWordPop(); return; }
-  if(e.key==="Shift")
-    document.body.classList.add("shifthover");   // the hand: Shift makes the digest
+  if(e.key==="Control")
+    document.body.classList.add("ctrlhover");    // the hand: Ctrl makes the digest
                                                  // read as grabbable - the popup
-                                                 // itself waits for Shift+click
+                                                 // itself waits for Ctrl+click
 });
 window.addEventListener("keyup", function(e){
-  if(e.key==="Shift") document.body.classList.remove("shifthover");
+  if(e.key==="Control") document.body.classList.remove("ctrlhover");
 });
-window.addEventListener("blur", function(){ document.body.classList.remove("shifthover"); });
+window.addEventListener("blur", function(){ document.body.classList.remove("ctrlhover"); });
 /* A mousedown outside the popup cancels it - the pin and the plate go with
    it (Esc already did this; now any click does). The same mousedown
    snapshots a live digest selection BEFORE the browser collapses it under
-   the click, so Shift+click opens the popup for the whole selection, not
+   the click, so Ctrl+click opens the popup for the whole selection, not
    just the word the click landed on. */
 document.addEventListener("mousedown", function(e){
   S.selHold=selPayload(window.getSelection());
@@ -740,7 +740,7 @@ function updateWordHighlight(e){
   var sel=window.getSelection();
   if(sel && !sel.isCollapsed && sel.rangeCount && $("digest").contains(sel.anchorNode)){
     // the selection is the payload: the plate stands down (the browser's own
-    // highlight shows what is marked) and Shift+click offers the popup for it
+    // highlight shows what is marked) and Ctrl+click offers the popup for it
     hideWordPlate();
     var p=selPayload(sel);
     if(p) S.lastHover=p;
@@ -810,10 +810,10 @@ function updateWordHighlight(e){
 }
 $("digest").addEventListener("mousemove", updateWordHighlight);
 $("digest").addEventListener("click", function(e){
-  // Shift+click (and only that) re-pins the popup: over the clicked word, or
+  // Ctrl+click (and only that) re-pins the popup: over the clicked word, or
   // over the whole selection the mousedown snapshotted before the click
-  // collapsed it - and it moves wherever Shift lands next
-  if(e.shiftKey && !S.generating && !S.busy){
+  // collapsed it - and it moves wherever Ctrl lands next
+  if(e.ctrlKey && !S.generating && !S.busy){
     var p=S.selHold||S.lastHover;
     if(p) showWordPop(p.r, p.word, p.ctx);
   }

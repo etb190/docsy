@@ -1619,8 +1619,11 @@ static LRESULT CALLBACK BarProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
 
 // ---- browser mode's top toolbar: the reader's own toolbar row (same grain,
 // same button face, same glyph-over-caption layout, same height) carrying
-// buttons that switch back to PDF reader or to the Text Editor ----
+// buttons that switch back to PDF reader, to the Text Editor, or toggle the
+// web page's summary card ----
 static int g_wtoolHot = -1, g_wtoolDown = -1;
+static const wchar_t* const WebToolCap[3] = { L"PDF", L"Editor", L"Summary" };
+static const wchar_t* const WebToolGlyph[3] = { L"\uE8F1", L"\uE70B", L"\uE8A5" };
 
 static RECT WebToolBtn(int idx) {
     int bw = (int)(54 * g.dpi);
@@ -1637,7 +1640,7 @@ static void WebToolDraw(HDC dc, int w, int h) {
     RECT bar{ 0, 0, w, h };
     FillRect(dc, &bar, GrainBrush(1));
 
-    for (int idx = 0; idx < 2; idx++) {
+    for (int idx = 0; idx < 3; idx++) {
         RECT b = WebToolBtn(idx);
         bool hot = (g_wtoolHot == idx);
         bool pr = (g_wtoolDown == idx && hot);
@@ -1661,7 +1664,7 @@ static void WebToolDraw(HDC dc, int w, int h) {
         {
             RECT mc{ 0, 0, 0, 0 };
             HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
-            DrawTextW(dc, idx == 0 ? L"PDF" : L"Editor", -1, &mc, DT_CALCRECT | DT_SINGLELINE);
+            DrawTextW(dc, WebToolCap[idx], -1, &mc, DT_CALCRECT | DT_SINGLELINE);
             SelectObject(dc, of);
             capH = mc.bottom - mc.top;
         }
@@ -1672,7 +1675,7 @@ static void WebToolDraw(HDC dc, int w, int h) {
         RECT gr{ b.left, y0, b.right, y0 + gh };
         RECT cr{ b.left, y0 + gh + gap, b.right, y0 + gh + gap + capH };
         SetBkMode(dc, TRANSPARENT);
-        const wchar_t* glyph = (idx == 0) ? L"\uE8F1" : L"\uE70B";
+        const wchar_t* glyph = WebToolGlyph[idx];
         SelectObject(dc, CaptionFont(g_tbglyph, 20, false, L"Segoe MDL2 Assets"));
         SetTextColor(dc, RGB(16, 16, 16));
         RECT gs1{ gr.left + 1, gr.top + 1, gr.right + 1, gr.bottom + 1 };
@@ -1682,9 +1685,9 @@ static void WebToolDraw(HDC dc, int w, int h) {
         SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
         SetTextColor(dc, RGB(16, 16, 16));
         RECT cs1{ cr.left + 1, cr.top + 1, cr.right + 1, cr.bottom + 1 };
-        DrawTextW(dc, idx == 0 ? L"PDF" : L"Editor", -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(dc, WebToolCap[idx], -1, &cs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SetTextColor(dc, RGB(0xe0, 0xe0, 0xe0));
-        DrawTextW(dc, idx == 0 ? L"PDF" : L"Editor", -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(dc, WebToolCap[idx], -1, &cr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 }
 
@@ -1728,7 +1731,7 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         int hot = -1;
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) {
             RECT b = WebToolBtn(i);
             if (PtInRect(&b, p)) { hot = i; break; }
         }
@@ -1747,7 +1750,7 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < 3; i++) {
             RECT b = WebToolBtn(i);
             if (PtInRect(&b, p)) {
                 SetCapture(h);
@@ -1771,6 +1774,9 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             if (inside) {
                 if (down == 0) WebToggle(false);                       // back to PDF reader
                 else if (down == 1) { WebToggle(false); EditorToggle(true); } // to Text Editor!
+                else if (down == 2) SumToggle(1);   // the web page's summary card -
+                                                    // the same door the browser bar's
+                                                    // own summary button knocks on
             }
         }
         return 0;
@@ -1783,7 +1789,7 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < 3; i++) {
                 RECT b = WebToolBtn(i);
                 if (PtInRect(&b, p)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
