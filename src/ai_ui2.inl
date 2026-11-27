@@ -1866,6 +1866,34 @@ static void SumApplyBounds(int seat) {
     if (seat < 0 || seat >= SUM_SEATS || !g_sumCtr[seat] || !g.main) return;
     g_sumCtr[seat]->put_Bounds(g_sumRect[seat]);
 }
+// the trail's cure: put_Bounds moves the webview's window without giving the
+// panes under it a repaint - the ghost of the card's last position stays
+// stamped on the document until their queued paint lands, and at one tick per
+// mousemove the ghosts stack up as a trail of glitching behind the card.
+// Every bounds tick therefore repaints the union of the card's old and new
+// footprint SYNCHRONOUSLY: each pane under the card redraws its one atomic
+// frame before the next tick can stamp another ghost. Each window composes
+// its own redirection surface, so the panes painting under the card never
+// scratch it - DWM lays the card back on top.
+static void SumRepaintUnder(int seat, RECT u) {
+    if (!g.main) return;
+    for (HWND c = GetWindow(g.main, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) {
+        if (c == g_sumHwnd[seat] || (g_sumHwnd[seat] && IsChild(g_sumHwnd[seat], c))) continue;
+        if (!IsWindowVisible(c)) continue;
+        RECT wr; GetWindowRect(c, &wr);
+        MapWindowPoints(nullptr, g.main, (POINT*)&wr, 2);   // the pane's rect in the frame's
+        RECT ix;                                            // client, where the card lives
+        if (!IntersectRect(&ix, &u, &wr)) continue;
+        RECT cr = ix;
+        MapWindowPoints(g.main, c, (POINT*)&cr, 2);         // the band in the pane's own client
+        RECT pc; GetClientRect(c, &pc);
+        RECT px;
+        if (!IntersectRect(&px, &cr, &pc)) continue;
+        InvalidateRect(c, &px, FALSE);
+        UpdateWindow(c);                                    // now, not when the queue gets to it
+    }
+    InvalidateRect(g.main, &u, FALSE);   // the strips no child covers (gaps between panes)
+}
 // the overlay's z-order: the frame's later-built webviews (a tab's page, the
 // editor's scroller) are full-cover siblings stacked ABOVE a surface born
 // earlier - a top-level window never met them, an overlay does. The unfold
@@ -1992,19 +2020,23 @@ static void SumDragTick(long sx, long sy) {
     double dpi = g.dpi > 0 ? g.dpi : 1.0;
     for (int s = 0; s < SUM_SEATS; s++) {
         if (!g_sumDragMode[s] || !g_sumShown[s]) continue;
-        RECT r = g_sumRect[s];
+        RECT pre = g_sumRect[s];
+        RECT r = pre;
         int px = (int)sx - o.x, py = (int)sy - o.y;
         int w = (int)(r.right - r.left), hgt = (int)(r.bottom - r.top);
         if (g_sumDragMode[s] == 1) {
             r.left = px - g_sumDragOff[s].x;
             r.top = py - g_sumDragOff[s].y;
-            // the card may tuck most of the way out, but its edge stays
-            // grabbable: 60dp of it always remains inside
+            // the card rides anywhere over the frame's client: the only wall
+            // is the client itself, and the card never leaves it - the same
+            // contract SumClampSeat enforces on a reopen, so a parked card is
+            // never pulled out from under the user. (The old sandwich clamped
+            // the left/top against the frame's right/bottom instead of the
+            // client's origin: the card could only live in a one-card-wide
+            // strip at the bottom-right - a wall at a quarter of the app.)
             int cwR = (int)cr.right, cbB = (int)cr.bottom;
-            r.left = max(cwR - (int)(60 * dpi) - w,
-                         min((int)r.left, cwR - (int)(60 * dpi)));
-            r.top = max(cbB - (int)(40 * dpi) - hgt,
-                        min((int)r.top, cbB - (int)(40 * dpi)));
+            r.left = max(0, min((int)r.left, cwR - w));
+            r.top = max(0, min((int)r.top, cbB - hgt));
             r.right = r.left + w; r.bottom = r.top + hgt;
         } else {
             // a directional resize: the page's rim strip names the edge(s) it
@@ -2026,6 +2058,9 @@ static void SumDragTick(long sx, long sy) {
         }
         g_sumRect[s] = r;
         SumApplyBounds(s);
+        RECT u{ min(pre.left, r.left), min(pre.top, r.top),
+                max(pre.right, r.right), max(pre.bottom, r.bottom) };
+        SumRepaintUnder(s, u);   // the vacated and newly covered bands, repainted now
     }
 }
 // the gesture's button-up: the placement rides out once, not per pixel
