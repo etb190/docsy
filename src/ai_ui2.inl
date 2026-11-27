@@ -2052,7 +2052,10 @@ static void SumOutsideClick(long sx, long sy) {
         MapWindowPoints(g.main, g.view, &vp, 1);     // the deck's tab band, the find
         if (!g_webOn && vp.y >= 0 && vp.y < TABF(33)) pages = false;   // bar and the
         else if (g_fedit && FdOverBar(vp)) pages = false;   // annotation bar are not
-        else if (g.barOn && PtInRect(&AnnBarRect(), pt)) pages = false;   // pages
+        else if (g.barOn) {                            // pages
+            RECT ar = AnnBarRect();
+            if (PtInRect(&ar, pt)) pages = false;
+        }
     }
     if (!pages) return;                              // chrome - the stand follows the
                                                      // deck (SumTabStand) instead
