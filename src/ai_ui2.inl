@@ -1810,8 +1810,8 @@ static void SumSeatBoundsRead(int seat) {
     std::string sH = AiGetSetting(std::string(pre) + ".h");
     int w = sW.empty() ? (int)(560 * dpi) : max((int)(320 * dpi), (int)(atof(sW.c_str()) * dpi));
     int h = sH.empty() ? (int)(630 * dpi) : max((int)(220 * dpi), (int)(atof(sH.c_str()) * dpi));
-    w = min(w, max(1, cr.right));
-    h = min(h, max(1, cr.bottom));
+    w = min(w, max(1, (int)cr.right));
+    h = min(h, max(1, (int)cr.bottom));
     std::string sRX = AiGetSetting(std::string(pre) + ".relx");
     std::string sRY = AiGetSetting(std::string(pre) + ".rely");
     int x, y;
@@ -1826,18 +1826,19 @@ static void SumSeatBoundsRead(int seat) {
         y = (int)(64 * dpi);
         if (seat == SUM_WEB && x - w - (int)(12 * dpi) >= 0) x -= w + (int)(12 * dpi);
     }
-    x = max(0, min(x, max(0, cr.right - w)));
-    y = max(0, min(y, max(0, cr.bottom - h)));
+    x = max(0, min(x, max(0, (int)cr.right - w)));
+    y = max(0, min(y, max(0, (int)cr.bottom - h)));
     g_sumRect[seat] = { x, y, x + w, y + h };
 }
 static void SumClampSeat(int seat) {
     if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
     RECT cr; GetClientRect(g.main, &cr);
     RECT r = g_sumRect[seat];
-    int w = (int)(r.right - r.left); if (w > cr.right) w = cr.right; if (w < 1) w = 1;
-    int hgt = (int)(r.bottom - r.top); if (hgt > cr.bottom) hgt = cr.bottom; if (hgt < 1) hgt = 1;
-    int x = max(0, min((int)r.left, cr.right - w));
-    int y = max(0, min((int)r.top, cr.bottom - hgt));
+    int cw = (int)cr.right, ch = (int)cr.bottom;
+    int w = (int)(r.right - r.left); if (w > cw) w = cw; if (w < 1) w = 1;
+    int hgt = (int)(r.bottom - r.top); if (hgt > ch) hgt = ch; if (hgt < 1) hgt = 1;
+    int x = max(0, min((int)r.left, cw - w));
+    int y = max(0, min((int)r.top, ch - hgt));
     g_sumRect[seat] = { x, y, x + w, y + hgt };
 }
 static void SumApplyBounds(int seat) {
@@ -1965,14 +1966,15 @@ static void SumDragTick(long sx, long sy) {
             r.top = py - g_sumDragOff[s].y;
             // the card may tuck most of the way out, but its edge stays
             // grabbable: 60dp of it always remains inside
-            r.left = max(cr.right - (int)(60 * dpi) - w,
-                         min((int)r.left, cr.right - (int)(60 * dpi)));
-            r.top = max(cr.bottom - (int)(40 * dpi) - hgt,
-                        min((int)r.top, cr.bottom - (int)(40 * dpi)));
+            int cwR = (int)cr.right, cbB = (int)cr.bottom;
+            r.left = max(cwR - (int)(60 * dpi) - w,
+                         min((int)r.left, cwR - (int)(60 * dpi)));
+            r.top = max(cbB - (int)(40 * dpi) - hgt,
+                        min((int)r.top, cbB - (int)(40 * dpi)));
             r.right = r.left + w; r.bottom = r.top + hgt;
         } else {
-            w = max((int)(320 * dpi), min(px + g_sumDragOff[s].x - (int)r.left, cr.right - (int)r.left));
-            hgt = max((int)(220 * dpi), min(py + g_sumDragOff[s].y - (int)r.top, cr.bottom - (int)r.top));
+            w = max((int)(320 * dpi), min(px + g_sumDragOff[s].x - (int)r.left, (int)cr.right - (int)r.left));
+            hgt = max((int)(220 * dpi), min(py + g_sumDragOff[s].y - (int)r.top, (int)cr.bottom - (int)r.top));
             r.right = (int)r.left + w; r.bottom = (int)r.top + hgt;
         }
         g_sumRect[s] = r;
