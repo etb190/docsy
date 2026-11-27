@@ -640,8 +640,10 @@ static void SumToggle(int mode);        // the Page Summary navigator (defined i
 static void SumPrewarm();               // its idle seat: window + webview build hidden (ai_ui2.inl)
 static void SumSearchReveal();          // the stage's return unfolds a card a word-search
                                         // folded (defined in ai_ui2.inl)
-static void SumRestoreOpen();           // the session left the navigator standing: it comes
-                                        // back standing (defined in ai_ui2.inl)
+static void SumRestoreOpen();           // the session left the navigator standing: it arms
+                                        // the comeback (defined in ai_ui2.inl)
+static void SumRestoreTick();           // the comeback's tick: waits out the prewarm build,
+                                        // then opens through the usual door (ai_ui2.inl)
 static int g_aiDockW = 0;               // the AI panel's docked strip width this pass:
                                         // LayoutMain reserves it right of the view, the
                                         // panel's bounds read it back (ai_ui.inl)
