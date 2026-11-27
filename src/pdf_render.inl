@@ -496,14 +496,35 @@ static int PageAt(const DocState& D, int y) {        // primary page at a viewpo
 // Everything in this block is pure std:: - the same functions are compiled by
 // scripts/text_check.cpp on Linux against synthetic pages.
 
+// KillerPDF's IsRightToLeftText, over one line's cells: every Hebrew/Arabic/
+// Syriac-range code point (U+0590-08FF, the presentation forms) counts right,
+// every other letter counts left, and the majority sets the line's direction.
+// The engine's rule is a count, not UAX #9's first-strong - a mixed line
+// follows its letters.
+static bool TtBandIsRtl(const TxtPage& pt, const std::vector<int>& idx) {
+    int rtl = 0, ltr = 0;
+    for (int i : idx)
+        for (wchar_t c : pt.cells[i].text) {
+            if ((c >= 0x0590 && c <= 0x08FF) ||
+                (c >= 0xFB1D && c <= 0xFDFF) ||
+                (c >= 0xFE70 && c <= 0xFEFF)) rtl++;
+            else if (iswalpha(c) ||
+                     (c >= 0x0370 && c <= 0x1FFF) ||          // Greek, Cyrillic...
+                     (c >= 0x3040 && c <= 0x9FFF) ||          // kana, ideographs
+                     (c >= 0xAC00 && c <= 0xD7FF) ||          // Hangul
+                     (c >= 0xF900 && c <= 0xFAFF)) ltr++;
+        }
+    return rtl > ltr;
+}
+
 // Group cells into visual lines: a cell joins a line when its vertical band overlaps
 // the line's band by at least half the smaller height, and bands grow as members join.
 // Then KillerPDF's #185 column-aware reading order: each band is split at gutter-sized
 // gaps into segments; narrow segments cluster into columns by X-interval overlap and
 // whole columns emit left-to-right (top-to-bottom inside each), while wide segments -
-// titles and footers spanning the text width - flush the open column first. Windows.Data.Pdf
-// exposes no writing directions, so the original's vertical-text ordering and RTL mirroring
-// have nothing to key on and are not ported; lines read left-to-right.
+// titles and footers spanning the text width - flush the open column first. Each
+// line's own direction comes from TtBandIsRtl: an RTL line's words and letters both
+// stream right-to-left, so the flattened cells read in logical order.
 static void TtLines(TxtPage& pt) {
     if (pt.cells.empty()) return;
     struct Band { std::vector<int> idx; float top, bottom; };
@@ -586,30 +607,54 @@ static void TtLines(TxtPage& pt) {
     }
     flush();
 
-    // flatten in reading order; cells inside a line read left-to-right, word ordinals
-    // restart where a space sits on either side of a join or the gap is a real word
-    // space (a narrow gap with no spaces is one word split across range boxes)
+    // flatten in reading order. KillerPDF's Build: the line's WORDS sort by the
+    // line's own direction - an RTL line by Right descending, an LTR line by
+    // Left ascending - each word's letters sort the same way, and word ordinals
+    // renumber in that order. The word groups themselves arrive from the
+    // engine's GroupWords (pdf_text.inl) on native pages and from the OCR word
+    // boxes on scans, so the flatten never re-decides what a word is; it only
+    // orders and numbers them. (The old gap heuristic here - and the space
+    // glyphs it kept as cells - is exactly what tripled the Arabic gaps and
+    // swallowed the ones around parentheses.)
     std::vector<TxtCell> flat; flat.reserve(pt.cells.size());
     int lineNo = 0, wordNo = 0;
     for (const Band& band : ordered) {
-        std::vector<int> mem = band.idx;
-        std::sort(mem.begin(), mem.end(), [&](int a, int b) { return pt.cells[a].l < pt.cells[b].l; });
-        float bandH = max(1.0f, band.bottom - band.top);
-        TxtLine ln; ln.start = (int)flat.size();
+        bool rtl = TtBandIsRtl(pt, band.idx);
+        // the band's cells grouped by their word id, in first-appearance order
+        struct Grp { std::vector<int> idx; float l = FLT_MAX, r = -FLT_MAX; };
+        std::vector<Grp> groups;
+        std::unordered_map<int, int> gidx;
+        for (int i : band.idx) {
+            auto ins = gidx.emplace(pt.cells[i].word, (int)groups.size());
+            if (ins.second) groups.push_back(Grp{});
+            Grp& g = groups[ins.first->second];
+            g.idx.push_back(i);
+            g.l = min(g.l, pt.cells[i].l); g.r = max(g.r, pt.cells[i].r);
+        }
+        std::vector<int> gorder(groups.size());
+        for (int g = 0; g < (int)groups.size(); g++) gorder[g] = g;
+        std::sort(gorder.begin(), gorder.end(), [&](int a, int b) {
+            if (rtl ? groups[a].r != groups[b].r : groups[a].l != groups[b].l)
+                return rtl ? groups[a].r > groups[b].r : groups[a].l < groups[b].l;
+            return a < b;                      // deterministic on equal boxes
+        });
+        TxtLine ln; ln.start = (int)flat.size(); ln.rtl = rtl;
         float lt = FLT_MAX, lb = -FLT_MAX, ll = FLT_MAX, lr = -FLT_MAX;
-        for (int i : mem) {
-            TxtCell f = pt.cells[i];
-            if (ln.count == 0) f.word = wordNo++;                    // a new line starts a word
-            else {
-                const TxtCell& p = flat.back();
-                bool sp = (!p.text.empty() && p.text.back() == L' ') || (!f.text.empty() && f.text.front() == L' ');
-                if (!sp && f.l - p.r <= bandH * 0.3f) f.word = p.word;
-                else f.word = wordNo++;
+        for (int g : gorder) {
+            std::vector<int>& mem = groups[g].idx;
+            std::sort(mem.begin(), mem.end(), [&](int a, int b) {
+                if (rtl ? pt.cells[a].r != pt.cells[b].r : pt.cells[a].l != pt.cells[b].l)
+                    return rtl ? pt.cells[a].r > pt.cells[b].r : pt.cells[a].l < pt.cells[b].l;
+                return a < b;
+            });
+            int wno = wordNo++;                // KillerPDF's per-word ordinal
+            for (int i : mem) {
+                TxtCell f = pt.cells[i];
+                f.word = wno; f.line = lineNo;
+                lt = min(lt, f.t); lb = max(lb, f.b); ll = min(ll, f.l); lr = max(lr, f.r);
+                flat.push_back(std::move(f));
+                ln.count++;
             }
-            f.line = lineNo;
-            lt = min(lt, f.t); lb = max(lb, f.b); ll = min(ll, f.l); lr = max(lr, f.r);
-            flat.push_back(std::move(f));
-            ln.count++;
         }
         ln.top = lt; ln.bottom = lb; ln.left = ll; ln.right = lr;
         pt.lines.push_back(ln);
@@ -624,6 +669,9 @@ static void TtLines(TxtPage& pt) {
 // drags move character by character instead of snapping whole words, exactly at
 // KillerPDF's granularity. Every character keeps the word's ordinal, so the space
 // between words, the double-click word range and the copied text are unchanged.
+// An RTL line's word text arrives in logical order, so character j lands on the
+// tile counted from the RIGHT (the logical first letter is the rightmost glyph)
+// and the cells push in logical order - the line keeps streaming right-to-left.
 static void TtSplitChars(TxtPage& pt) {
     if (pt.cells.empty() || pt.lines.empty()) return;
     std::vector<TxtCell> out; out.reserve(pt.cells.size() * 4);
@@ -635,9 +683,10 @@ static void TtSplitChars(TxtPage& pt) {
             int n = max(1, (int)w.text.size());
             float wl = (w.r - w.l) / n;
             for (int j = 0; j < n; j++) {
+                int tile = ln.rtl ? (n - 1 - j) : j;
                 TxtCell c;
                 c.text.assign(1, w.text[j]);
-                c.l = w.l + wl * j; c.r = w.l + wl * (j + 1);
+                c.l = w.l + wl * tile; c.r = w.l + wl * (tile + 1);
                 c.t = w.t; c.b = w.b;
                 c.word = w.word; c.line = (int)lines.size();
                 out.push_back(std::move(c));
@@ -689,6 +738,20 @@ static int TtCaret(const TxtPage& pt, float x, float y) {
     const TxtLine& last = pt.lines.back();
     if (y < first.top && target == &first && x < first.left) return 0;
     if (y > last.bottom && target == &last && x > last.right) return (int)pt.cells.size();
+    // RTL lines stream right-to-left (their cells are already in logical
+    // order), so the caret clamps mirrored: past the right edge is the line's
+    // START, past the left edge its END, and the mid-point scan follows the
+    // cells' right-to-left march. Missing this branch is what pinned every
+    // Arabic drag to the line's first cell - the whole-word-or-nothing feel.
+    if (target->rtl) {
+        if (x >= target->right) return target->start;
+        if (x <= target->left) return target->end();
+        for (int i = target->start; i < target->end(); i++) {
+            const TxtCell& c = pt.cells[i];
+            if (x > (c.l + c.r) * 0.5f) return i;
+        }
+        return target->end();
+    }
     if (x <= target->left) return target->start;
     if (x >= target->right) return target->end();
     for (int i = target->start; i < target->end(); i++) {
@@ -844,44 +907,12 @@ static void TtTrim(DocState& D, int keepIdx) {
 
 // ---------------- KillerPDF's engine text layer (pdf_text.inl) ----------------
 
-// One line's first strong directional character decides how its cells stream:
-// KillerPDF's engine text arrives in content order, which for a right-to-left
-// run reads correctly only when the cells are taken right-to-left - the same
-// reorder BidiLine's VisualRuns applies in reverse (UAX #9's paragraph rule,
-// first strong character). The boxes stay on their own cells, so highlights
-// and carets never move; only the reading order flips.
-static bool TtCharStrongRtl(wchar_t c) {
-    return (c >= 0x0590 && c <= 0x05FF)          // Hebrew
-        || (c >= 0x0600 && c <= 0x06FF)          // Arabic
-        || (c >= 0x0700 && c <= 0x074F)          // Syriac
-        || (c >= 0xFB1D && c <= 0xFDFF)          // Hebrew + Arabic presentation forms
-        || (c >= 0xFE70 && c <= 0xFEFF)
-        || c == 0x200F;                          // RLM
-}
-static bool TtCharStrongLtr(wchar_t c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-        || (c >= 0x00C0 && c <= 0x02AF)          // Latin fullwidth + extended
-        || (c >= 0x0370 && c <= 0x052F)          // Greek, Cyrillic, Armenian
-        || (c >= 0x0530 && c <= 0x058F)
-        || (c >= 0x1E00 && c <= 0x1FFF)          // Vietnamese, Greek extended
-        || (c >= 0x3040 && c <= 0x9FFF)          // kana + ideographs
-        || (c >= 0xAC00 && c <= 0xD7FF)          // Hangul
-        || (c >= 0xF900 && c <= 0xFAFF)
-        || (c >= 0xD800 && c <= 0xDBFF);         // supplementary planes: assume L
-}
-static bool TtLineIsRtl(const TxtPage& pt, const TxtLine& ln) {
-    for (int i = ln.start; i < ln.end(); i++)
-        for (wchar_t ch : pt.cells[i].text) {
-            if (TtCharStrongRtl(ch)) return true;
-            if (TtCharStrongLtr(ch)) return false;
-        }
-    return false;
-}
-static void TtReorderRtl(TxtPage& pt) {
-    for (const TxtLine& ln : pt.lines)
-        if (TtLineIsRtl(pt, ln))
-            std::reverse(pt.cells.begin() + ln.start, pt.cells.begin() + ln.end());
-}
+// Line direction is decided inside TtLines now (TtBandIsRtl, KillerPDF's
+// IsRightToLeftText) and every RTL line's words and letters are SORTED into
+// their reading order there - the old whole-line reversal after the fact is
+// gone: it pinned every Arabic drag to the line's first cell (TtCaret had no
+// RTL branch to mirror it) and scrambled word-internal order wherever glyph
+// boxes overlap, which on Arabic ligatures read as gibberish.
 
 // The engine text layer's cells for one page, or false when the page takes the
 // OCR fallback: the file could not be parsed (or is encrypted), the page has
@@ -904,6 +935,12 @@ static bool TtNativeBuild(DocState& D, int i, TxtPage& pt) {
     float ky = (std::fabs((double)D.ph[i] - rh) <= 1.0 || rh <= 0) ? 1.0f : D.ph[i] / (float)rh;
     pt.cells.reserve(pg->letters.size());
     for (const pdftext::Letter& L : pg->letters) {
+        if (L.word == 0) continue;   // a whitespace letter: KillerPDF's GroupWords
+                                     // flushed it out of every word - it is not a
+                                     // selectable cell, and TextForRange's
+                                     // word-ordinal rule owns the spaces between
+                                     // words (cells carrying " " is what tripled
+                                     // every Arabic gap)
         double rx1, ry1, rx2, ry2;
         pdftext::RotateToRender(rot, pg->boxW, pg->boxH, L.l, L.b, rx1, ry1);
         pdftext::RotateToRender(rot, pg->boxW, pg->boxH, L.r, L.t, rx2, ry2);
@@ -913,6 +950,7 @@ static bool TtNativeBuild(DocState& D, int i, TxtPage& pt) {
         c.r = (float)(std::max(rx1, rx2) * kx);
         c.t = (float)(std::min(ry1, ry2) * ky);
         c.b = (float)(std::max(ry1, ry2) * ky);
+        c.word = L.word;             // the engine's own content-order word group
         pt.cells.push_back(std::move(c));
     }
     return !pt.cells.empty();
@@ -931,8 +969,7 @@ static TxtPage* TtFor(DocState& D, int i) {
     bool native = false;
     try { native = TtNativeBuild(D, i, pt); } catch (...) { native = false; }
     if (native) {
-        TtLines(pt);
-        TtReorderRtl(pt);   // RTL lines stream right-to-left, so the text reads logically
+        TtLines(pt);        // TtLines sorts every RTL line into reading order itself
     } else {
         pt.cells.clear();
         pt.lines.clear();
@@ -959,14 +996,16 @@ static TxtPage* TtFor(DocState& D, int i) {
                             c.text = std::wstring(wd.Text());
                             c.l = r.X * kx; c.t = r.Y * ky;
                             c.r = c.l + r.Width * kx; c.b = c.t + r.Height * ky;
+                            c.word = (int)pt.cells.size();   // one OCR box = one word,
+                                                             // GroupWords' role here
                             pt.cells.push_back(std::move(c));
                         }
                 }
             }
         } catch (...) { /* no OCR pack / render failure: selection is just not offered here */ }
         TtLines(pt);
-        TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
-        TtReorderRtl(pt);   // OCR boxes need the same logical-order fix
+        TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells (RTL
+                            // lines tile their chars right-to-left, in logical order)
     }
     pt.tick = ++D.tick;
     D.txt[i] = std::move(pt);

@@ -1644,6 +1644,15 @@ struct Letter {
     double l = 0, r = 0, b = 0, t = 0;               // cropbox-relative points, y-up
     double point = 0;
     std::string fontName;
+    // KillerPDF's StartBaseLine / AdvanceEnd (PdfTextPlacement.Origin/AdvanceEnd):
+    // where this glyph's baseline starts and ends - the advance width, not the
+    // outline. GroupWords measures word gaps along this vector, so the rule is
+    // the engine's own and RTL runs written with mirrored advances split right.
+    double sbx = 0, sby = 0, ebx = 0, eby = 0;
+    // the word this letter belongs to (GroupWords below): 1-based content-order
+    // groups, 0 = a whitespace letter that belongs to no word and is not
+    // selectable - KillerPDF's GroupWords flushes on them and skips them
+    int word = 0;
 };
 
 struct Session;
@@ -1695,6 +1704,11 @@ if ((int)out.size() >= MaximumLetters) throw PdfError();
             transform.Point(0, 0, sx, sy);
             transform.Point(0, size, ex, ey);
             L.point = std::sqrt((ex - sx) * (ex - sx) + (ey - sy) * (ey - sy));
+            // the baseline endpoints KillerPDF's GroupWords measures along:
+            // start at the glyph origin, end one advance width along the line
+            double ax, ay;
+            transform.Point(right, 0, ax, ay);
+            L.sbx = sx; L.sby = sy; L.ebx = ax; L.eby = ay;
             L.fontName = font.fontName;
             out.push_back(std::move(L));
             double spacing = st.charSp;
@@ -1824,12 +1838,20 @@ if (marked.empty()) throw PdfError();
                         l = std::min(l, out[k].l); r = std::max(r, out[k].r);
                         b = std::min(b, out[k].b); t = std::max(t, out[k].t);
                     }
+                    // the replacement rides the span's baseline like KillerPDF's
+                    // "first with { AdvanceEnd = last.AdvanceEnd }": the first
+                    // letter's origin and size, the last letter's advance end, so
+                    // GroupWords keeps it glued to the neighbours it replaced
+                    double fpx = out[std::get<0>(section)].point;
+                    double fsx = out[std::get<0>(section)].sbx, fsy = out[std::get<0>(section)].sby;
+                    double lex = out.back().ebx, ley = out.back().eby;
                     out.resize(std::get<0>(section));
                     if (!text2.empty()) {
                         Letter L = out.empty() ? Letter() : Letter();
                         L.text = text2;
                         L.l = l; L.r = r; L.b = b; L.t = t;
-                        L.point = 0;
+                        L.point = fpx;
+                        L.sbx = fsx; L.sby = fsy; L.ebx = lex; L.eby = ley;
                         out.push_back(std::move(L));
                     }
                 }
@@ -1914,6 +1936,55 @@ static void RotateToRender(int rotation, double boxW, double boxH,
 static const PdfObj* ResolveInF(PdfFile& F, const PdfObj* dict, const char* key) {
     const PdfObj* v = dict ? dict->Get(key) : nullptr;
     return v ? F.Resolve(v) : nullptr;
+}
+
+// .NET's char.IsWhiteSpace, the set KillerPDF's GroupWords flushes on: the
+// ASCII spaces plus the Unicode separators a PDF's ToUnicode can decode to.
+static bool LetterIsWhite(const std::wstring& s) {
+    if (s.empty()) return true;
+    for (wchar_t c : s) {
+        if (c == L' ' || (c >= 0x09 && c <= 0x0D)) continue;
+        if (c == 0xA0 || c == 0x1680 || (c >= 0x2000 && c <= 0x200A) ||
+            c == 0x2028 || c == 0x2029 || c == 0x202F || c == 0x205F || c == 0x3000)
+            continue;
+        return false;
+    }
+    return true;
+}
+
+// KillerPDF's PdfPageContent.GroupWords, letter for letter: words group letters
+// in CONTENT order; a whitespace letter flushes the open word and joins none
+// (it is not selectable and never copied - the space between words comes from
+// TextForRange's word-ordinal rule, which is why docsy's old space cells
+// tripled every gap); a word also breaks when the gap along the baseline
+// exceeds 0.22 em (TeX and table cells separate words by position alone), the
+// perpendicular offset exceeds 0.35 em (a new line or a superscript), or the
+// advance backtracks past half an em (a separate positioning op). Measuring
+// along each letter's own baseline vector makes the rule direction-blind, so
+// an RTL run written with mirrored advances splits exactly where it should.
+static void GroupWords(std::vector<Letter>& letters) {
+    int word = 0;
+    const Letter* prev = nullptr;
+    for (Letter& L : letters) {
+        if (LetterIsWhite(L.text)) { prev = nullptr; L.word = 0; continue; }
+        if (prev) {
+            double dx = prev->ebx - prev->sbx, dy = prev->eby - prev->sby;
+            double length = std::sqrt(dx * dx + dy * dy);
+            double ux = length > 0.001 ? dx / length : 1.0;
+            double uy = length > 0.001 ? dy / length : 0.0;
+            double gapX = L.sbx - prev->ebx, gapY = L.sby - prev->eby;
+            double gap = gapX * ux + gapY * uy;
+            double across = std::fabs(gapY * ux - gapX * uy);
+            double em = std::max(1.0, std::min(prev->point, L.point));
+            if (across > em * 0.35 || gap > em * 0.22 ||
+                gap < -std::max(length, em * 0.5))
+                word++;                        // flush: a new word starts here
+        } else {
+            word++;                            // open the first word after a space
+        }
+        L.word = word;
+        prev = &L;
+    }
 }
 
 PdfFont& Interp::Font(const PdfObj* resources, const std::string& key, int depth) {
@@ -2089,6 +2160,7 @@ if (!opened || index < 0 || index >= (int)pages.size()) throw PdfError();
             }
             pg.letters = std::move(interp.out);
         }
+        GroupWords(pg.letters);
         pg.fffd = 0;
         for (const Letter& L : pg.letters)
             if (L.text.size() == 1 && L.text[0] == (wchar_t)0xFFFD) pg.fffd++;

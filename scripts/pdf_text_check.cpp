@@ -270,6 +270,71 @@ int main(int argc, char** argv) {
         }
     }
 
+    printf("- GroupWords (KillerPDF's word segmentation)\n");
+    {
+        // A letter with its baseline running from (sx,700) to (ex,700): the
+        // shape Show() records. em drives the 0.22/0.35 thresholds.
+        auto mk = [](std::wstring t, double sx, double ex, double point, double y = 700) {
+            pdftext::Letter L;
+            L.text = std::move(t);
+            L.sbx = sx; L.sby = y; L.ebx = ex; L.eby = y;
+            L.point = point;
+            return L;
+        };
+        // a word, a real space glyph, another word: three groups, the space in none
+        std::vector<pdftext::Letter> letters;
+        double x = 100;
+        for (wchar_t c : std::wstring(L"kitten")) {
+            letters.push_back(mk(std::wstring(1, c), x, x + 5.5, 11));
+            x += 5.5;
+        }
+        letters.push_back(mk(L" ", x, x + 3, 11));
+        x += 3;
+        for (wchar_t c : std::wstring(L"sleeping")) {
+            letters.push_back(mk(std::wstring(1, c), x, x + 5.5, 11));
+            x += 5.5;
+        }
+        pdftext::GroupWords(letters);
+        Expect(letters.size() == 15, "the run keeps every letter");
+        int w1 = letters[0].word;
+        bool one = true, spaceOut = letters[6].word == 0, w2new = letters[7].word != w1;
+        for (int i = 1; i <= 5; i++) if (letters[i].word != w1) one = false;
+        for (int i = 8; i < 15; i++) if (letters[i].word != letters[7].word) one = false;
+        Expect(w1 != 0 && one, "touching glyphs share one word id");
+        Expect(spaceOut, "a whitespace letter joins no word");
+        Expect(w2new, "the space glyph starts the next word");
+        // a gap past 0.22 em breaks the word even with no space glyph (TeX,
+        // table cells): 11pt em -> 2.42pt threshold
+        std::vector<pdftext::Letter> gapped;
+        gapped.push_back(mk(L"a", 100, 105.5, 11));
+        gapped.push_back(mk(L"b", 108.2, 113.7, 11));   // 2.7pt gap: breaks
+        gapped.push_back(mk(L"c", 113.7, 119.2, 11));   // 0pt gap: stays
+        pdftext::GroupWords(gapped);
+        Expect(gapped[0].word != gapped[1].word, "a 0.22+ em gap starts a new word");
+        Expect(gapped[1].word == gapped[2].word, "touching letters stay one word");
+        // direction-blind: an RTL run written with mirrored advances (baseline
+        // vectors pointing -x) groups the same way
+        std::vector<pdftext::Letter> rtlrun;
+        rtlrun.push_back(mk(L"\u0627", 111.0, 105.5, 11));
+        rtlrun.push_back(mk(L"\u0644", 105.5, 100.0, 11));   // touching: same word
+        rtlrun.push_back(mk(L"\u0645", 96.0, 90.5, 11));     // 4pt gap: breaks
+        pdftext::GroupWords(rtlrun);
+        Expect(rtlrun[0].word == rtlrun[1].word, "mirrored advances: touching glyphs group");
+        Expect(rtlrun[1].word != rtlrun[2].word, "mirrored advances: the gap still breaks");
+        // a perpendicular offset past 0.35 em breaks (superscript, new line)
+        std::vector<pdftext::Letter> raised;
+        raised.push_back(mk(L"x", 100, 105.5, 11));
+        raised.push_back(mk(L"1", 105.5, 109.0, 11, 703.9)); // 3.9pt up: breaks
+        pdftext::GroupWords(raised);
+        Expect(raised[0].word != raised[1].word, "a 0.35+ em baseline jump breaks");
+        // a backtrack past half an em breaks (a separate positioning op)
+        std::vector<pdftext::Letter> back;
+        back.push_back(mk(L"a", 200, 205.5, 11));
+        back.push_back(mk(L"b", 194.0, 199.5, 11));          // starts behind by 11.5pt
+        pdftext::GroupWords(back);
+        Expect(back[0].word != back[1].word, "a backtrack past 0.5 em breaks");
+    }
+
     printf("%d checks, %d failed\n", g_total, g_failed);
     return g_failed ? 1 : 0;
 }

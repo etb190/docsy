@@ -283,6 +283,9 @@ static void AiOcrArrive(AiOcrPayload* pl) {
                 TxtCell s;
                 s.text = std::move(c.text);
                 s.l = c.l * kx; s.t = c.t * ky; s.r = c.r * kx; s.b = c.b * ky;
+                s.word = (int)pt.cells.size();   // one OCR box = one word: TtLines
+                                                 // groups cells by this id, and the
+                                                 // space between words rides it
                 pt.cells.push_back(std::move(s));
             }
             TtLines(pt);
