@@ -698,20 +698,9 @@ static void WebBarDraw(HDC dc, int w, int h) {
 // the worst-case road: a document that slipped past every capture and now sits
 // in the engine's own pdf viewer - or any address the reader should own - goes
 // to the reader BY HAND: the same credentialed fetch the automatic roads use,
-// the same endgame, the same hand-off and step-back home
-static void WebPdfFetch(const std::wstring& url, const std::wstring& alt, int ix);
-static int WebTabIdx(unsigned long long id);
-static std::wstring g_webNote;             // the note's word and its take-down beat,
-static unsigned long long g_webNoteUntil;  // defined below - the hand road needs them
-static void WebForceReaderOpen() {
-    WebTab* t = WebCur();
-    if (!t || t->url.empty()) return;
-    WxLogf(L"pdf: the hand road takes the page to the reader - %s", t->url.c_str());
-    g_webNote = L"Fetching the PDF for the reader...";
-    g_webNoteUntil = GetTickCount64() + 150000;        // the fetch's own timeouts bound the wait
-    WebPdfFetch(t->url, t->url, WebTabIdx(t.id));
-    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
-}
+// the same endgame, the same hand-off and step-back home (the definition rides
+// below the note globals it words)
+static void WebForceReaderOpen();
 
 static void WebBarClick(int id) {
     WebTab* t = WebCur();
@@ -822,6 +811,17 @@ static void WebGo(const std::wstring& what) {
 // itself): a fetch in flight, a site that refused, a link that never was one
 static std::wstring g_webNote;
 static unsigned long long g_webNoteUntil = 0;
+
+// the hand road itself: the toolbar's WB_PDF
+static void WebForceReaderOpen() {
+    WebTab* t = WebCur();
+    if (!t || t->url.empty()) return;
+    WxLogf(L"pdf: the hand road takes the page to the reader - %s", t->url.c_str());
+    g_webNote = L"Fetching the PDF for the reader...";
+    g_webNoteUntil = GetTickCount64() + 150000;        // the fetch's own timeouts bound the wait
+    WebPdfFetch(t->url, t->url, WebTabIdx(t->id));
+    if (g.view) InvalidateRect(g.view, nullptr, FALSE);
+}
 
 static void WebEnsurePump() {
     if (!g.main) return;
