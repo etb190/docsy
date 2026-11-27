@@ -147,10 +147,10 @@ static void FindRun() {
 }
 
 // The pump: scan pages until a small time budget is spent, then hand control
-// back - a fresh OCR page costs tens of milliseconds, so the budget only trims
+// back - a fresh text page costs tens of milliseconds, so the budget only trims
 // the cheap pages; the heavy ones land one per tick and the window keeps its
 // pulse. The run starts at the page you are ON (the anchor) and walks forward,
-// wrapping to the pages before it last: the first OCR tick already covers what
+// wrapping to the pages before it last: the first text tick already covers what
 // the user is looking at, and the counter climbs from that first tick instead
 // of arriving only after the whole book. Every edit bumps gen, and a stale
 // pump (this gen is no longer the state's) drops everything it has gathered.
@@ -397,7 +397,7 @@ static void FindDraw(HDC dc, int ox, int oy) {
     // running the counter already shows the hits so far - the cursor follows
     // the start rule (first match at or after your page) on the partial list -
     // because the numbers are the answer to "is it finding anything" and they
-    // land one OCR tick after typing stops, not after a whole-book crawl.
+    // land one text tick after typing stops, not after a whole-book crawl.
     std::wstring st;
     if (!fd.query.empty() && fd.query.size() >= 2) {
         if (fd.done) {

@@ -841,50 +841,140 @@ static void TtTrim(DocState& D, int keepIdx) {
         D.txt.erase(oldest);
     }
 }
-// Per-page text geometry, built lazily on first touch (cursor, press or a selection
-// slice) and LRU-capped at 48 pages, so a 2,000-page book never pre-extracts.
+
+// ---------------- KillerPDF's engine text layer (pdf_text.inl) ----------------
+
+// One line's first strong directional character decides how its cells stream:
+// KillerPDF's engine text arrives in content order, which for a right-to-left
+// run reads correctly only when the cells are taken right-to-left - the same
+// reorder BidiLine's VisualRuns applies in reverse (UAX #9's paragraph rule,
+// first strong character). The boxes stay on their own cells, so highlights
+// and carets never move; only the reading order flips.
+static bool TtCharStrongRtl(wchar_t c) {
+    return (c >= 0x0590 && c <= 0x05FF)          // Hebrew
+        || (c >= 0x0600 && c <= 0x06FF)          // Arabic
+        || (c >= 0x0700 && c <= 0x074F)          // Syriac
+        || (c >= 0xFB1D && c <= 0xFDFF)          // Hebrew + Arabic presentation forms
+        || (c >= 0xFE70 && c <= 0xFEFF)
+        || c == 0x200F;                          // RLM
+}
+static bool TtCharStrongLtr(wchar_t c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+        || (c >= 0x00C0 && c <= 0x02AF)          // Latin fullwidth + extended
+        || (c >= 0x0370 && c <= 0x052F)          // Greek, Cyrillic, Armenian
+        || (c >= 0x0530 && c <= 0x058F)
+        || (c >= 0x1E00 && c <= 0x1FFF)          // Vietnamese, Greek extended
+        || (c >= 0x3040 && c <= 0x9FFF)          // kana + ideographs
+        || (c >= 0xAC00 && c <= 0xD7FF)          // Hangul
+        || (c >= 0xF900 && c <= 0xFAFF)
+        || (c >= 0xD800 && c <= 0xDBFF);         // supplementary planes: assume L
+}
+static bool TtLineIsRtl(const TxtPage& pt, const TxtLine& ln) {
+    for (int i = ln.start; i < ln.end(); i++)
+        for (wchar_t ch : pt.cells[i].text) {
+            if (TtCharStrongRtl(ch)) return true;
+            if (TtCharStrongLtr(ch)) return false;
+        }
+    return false;
+}
+static void TtReorderRtl(TxtPage& pt) {
+    for (const TxtLine& ln : pt.lines)
+        if (TtLineIsRtl(pt, ln))
+            std::reverse(pt.cells.begin() + ln.start, pt.cells.begin() + ln.end());
+}
+
+// The engine text layer's cells for one page, or false when the page takes the
+// OCR fallback: the file could not be parsed (or is encrypted), the page has
+// no text (a scan), or the extraction produced mostly U+FFFD (an encoding the
+// port does not carry - KillerPDF's predefined shift-CID CMap data). The
+// letters land in page-DIP space the way KillerPDF's ReadTextPage does:
+// cropbox-relative points, the page's /Rotate quarter-turns applied, y down.
+static bool TtNativeBuild(DocState& D, int i, TxtPage& pt) {
+    pdftext::PageText* pg = TtPdfPage(D, i);
+    if (!pg || pg->letters.empty()) return false;
+    if (pg->fffd * 5 > (int)pg->letters.size()) return false;   // >20% unmapped
+    int rot = ((pg->rotation % 360) + 360) % 360;
+    if (rot % 90) rot = (int)(((rot + 45) / 90) * 90) % 360;
+    double rw = (rot % 2 == 0) ? pg->boxW : pg->boxH;
+    double rh = (rot % 2 == 0) ? pg->boxH : pg->boxW;
+    // The rendered size Windows reports (D.pw/ph) and the rotated cropbox
+    // agree within a point for every well-formed file; if they ever disagree,
+    // scale to the render so the boxes still sit on the right pixels.
+    float kx = (std::fabs((double)D.pw[i] - rw) <= 1.0 || rw <= 0) ? 1.0f : D.pw[i] / (float)rw;
+    float ky = (std::fabs((double)D.ph[i] - rh) <= 1.0 || rh <= 0) ? 1.0f : D.ph[i] / (float)rh;
+    pt.cells.reserve(pg->letters.size());
+    for (const pdftext::Letter& L : pg->letters) {
+        double rx1, ry1, rx2, ry2;
+        pdftext::RotateToRender(rot, pg->boxW, pg->boxH, L.l, L.b, rx1, ry1);
+        pdftext::RotateToRender(rot, pg->boxW, pg->boxH, L.r, L.t, rx2, ry2);
+        TxtCell c;
+        c.text = L.text;
+        c.l = (float)(std::min(rx1, rx2) * kx);
+        c.r = (float)(std::max(rx1, rx2) * kx);
+        c.t = (float)(std::min(ry1, ry2) * ky);
+        c.b = (float)(std::max(ry1, ry2) * ky);
+        pt.cells.push_back(std::move(c));
+    }
+    return !pt.cells.empty();
+}
+// Per-page text geometry, built lazily on first touch (cursor, press or a
+// selection slice) and LRU-capped at 48 pages, so a 2,000-page book never
+// pre-extracts.
 static TxtPage* TtFor(DocState& D, int i) {
     if (!D.n || i < 0 || i >= D.n) return nullptr;
     auto it = D.txt.find(i);
     if (it != D.txt.end()) { it->second.tick = ++D.tick; return &it->second; }
     TxtPage pt; pt.w = D.pw[i]; pt.h = D.ph[i];
-    try {
-        // Windows.Data.Pdf exposes no text layer, so the selectable cells come from the
-        // built-in OCR pass (Windows.Media.Ocr) over a fresh 2x render: one box per
-        // recognized word, scaled back to page DIPs, feeding KillerPDF's exact cell
-        // pipeline below. Built lazily on first touch and LRU-capped, so a 2,000-page
-        // book never OCRs what you never touch; no OCR language pack means selection
-        // is quietly off and the page keeps its pan gesture.
-        auto s_ocr = OcrEngineGet();
-        if (s_ocr) {
-            int ow = std::clamp((int)std::lround(D.pw[i] * 2), 800, 1600);
-            int oh = max(1, (int)std::lround(ow * D.ph[i] / max(1.f, D.pw[i])));
-            auto soft = RenderSoft(D, i, ow, oh);
-            if (soft) {
-                auto res = s_ocr.RecognizeAsync(soft).get();
-                float kx = pt.w / ow, ky = pt.h / oh;
-                for (winrt::Windows::Media::Ocr::OcrLine line : res.Lines())
-                    for (winrt::Windows::Media::Ocr::OcrWord wd : line.Words()) {
-                        auto r = wd.BoundingRect();
-                        if (r.Width <= 0 || r.Height <= 0 || wd.Text().empty()) continue;
-                        TxtCell c;
-                        c.text = std::wstring(wd.Text());
-                        c.l = r.X * kx; c.t = r.Y * ky;
-                        c.r = c.l + r.Width * kx; c.b = c.t + r.Height * ky;
-                        pt.cells.push_back(std::move(c));
-                    }
+    // KillerPDF's engine text layer first (pdf_text.inl): the PDF's own text,
+    // decoded letter by letter through the fonts' ToUnicode CMaps and standard
+    // encodings - English, Arabic, French, whatever the text layer carries.
+    bool native = false;
+    try { native = TtNativeBuild(D, i, pt); } catch (...) { native = false; }
+    if (native) {
+        TtLines(pt);
+        TtReorderRtl(pt);   // RTL lines stream right-to-left, so the text reads logically
+    } else {
+        pt.cells.clear();
+        pt.lines.clear();
+        try {
+            // Windows.Data.Pdf exposes no text layer, so scanned pages take the
+            // built-in OCR pass (Windows.Media.Ocr) over a fresh 2x render: one box
+            // per recognized word, scaled back to page DIPs, feeding KillerPDF's
+            // exact cell pipeline below. Built lazily on first touch and LRU-capped,
+            // so a 2,000-page book never OCRs what you never touch; no OCR language
+            // pack means selection is quietly off and the page keeps its pan gesture.
+            auto s_ocr = OcrEngineGet();
+            if (s_ocr) {
+                int ow = std::clamp((int)std::lround(D.pw[i] * 2), 800, 1600);
+                int oh = max(1, (int)std::lround(ow * D.ph[i] / max(1.f, D.pw[i])));
+                auto soft = RenderSoft(D, i, ow, oh);
+                if (soft) {
+                    auto res = s_ocr.RecognizeAsync(soft).get();
+                    float kx = pt.w / ow, ky = pt.h / oh;
+                    for (winrt::Windows::Media::Ocr::OcrLine line : res.Lines())
+                        for (winrt::Windows::Media::Ocr::OcrWord wd : line.Words()) {
+                            auto r = wd.BoundingRect();
+                            if (r.Width <= 0 || r.Height <= 0 || wd.Text().empty()) continue;
+                            TxtCell c;
+                            c.text = std::wstring(wd.Text());
+                            c.l = r.X * kx; c.t = r.Y * ky;
+                            c.r = c.l + r.Width * kx; c.b = c.t + r.Height * ky;
+                            pt.cells.push_back(std::move(c));
+                        }
+                }
             }
-        }
-    } catch (...) { /* no OCR pack / render failure: selection is just not offered here */ }
-    TtLines(pt);
-    TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
+        } catch (...) { /* no OCR pack / render failure: selection is just not offered here */ }
+        TtLines(pt);
+        TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
+        TtReorderRtl(pt);   // OCR boxes need the same logical-order fix
+    }
     pt.tick = ++D.tick;
     D.txt[i] = std::move(pt);
     TtTrim(D, i);
     return &D.txt[i];
 }
 
-// Peek at already-built text geometry without triggering the OCR build - the
+// Peek at already-built text geometry without triggering the build - the
 // cursor only advertises text that is ready, and the build itself happens off
 // the click path (the pre-warm timer, or the first press as a last resort).
 static TxtPage* TtPeek(DocState& D, int i) {
@@ -1237,6 +1327,7 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         size_t sl = nm.find_last_of(L"\\/");
         if (sl != std::wstring::npos) nm = nm.substr(sl + 1);
         ClearCache(D);
+        TtPdfSessionDrop(D);              // the old file's text session dies with its document
         D.doc = d; D.n = (int)n; D.pw = w; D.ph = h; D.name = nm; D.path = full;
         D.id = ++g.nextDocId;               // the render queue's stable handle for this document
         D.sx = D.sy = 0; D.zoom = 1.0; D.fitMode = 2; D.cur = -1;   // every document opens

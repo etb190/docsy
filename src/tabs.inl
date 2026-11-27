@@ -177,6 +177,7 @@ static void TabTrimCaches(bool b) {
     for (int k = 3; k < (int)v.size() && total > TAB_CACHE_BUDGET; k++) {
         total -= T[v[k].second].cacheBytes;
         ClearCache(T[v[k].second]); T[v[k].second].txt.clear();
+        TtPdfSessionDrop(T[v[k].second]);   // the text session's bytes go with the rest
     }
 }
 
@@ -297,6 +298,7 @@ static bool CloseTabAt(bool b, int idx) {
     if (!live && DocDirty(Tabs(b)[idx])) SwitchTab(b, idx);
     if (idx != Act(b)) {                          // a clean inactive tab: release it where it sits
         ClearCache(Tabs(b)[idx]);
+        TtPdfSessionDrop(Tabs(b)[idx]);           // and its text session with it
         Tabs(b).erase(Tabs(b).begin() + idx);
         g.tabUndo[b].erase(g.tabUndo[b].begin() + idx);
         g.tabRedo[b].erase(g.tabRedo[b].begin() + idx);
@@ -322,6 +324,7 @@ static bool CloseTabAt(bool b, int idx) {
         }
     }
     ClearCache(DV(b));                            // the document's bitmaps die with it
+    TtPdfSessionDrop(DV(b));                      // its text session with them
     if (fd.open && fd.pane == b) {                // the find dies only when ITS document dies
         if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
         if (g_fedit) ShowWindow(g_fedit, SW_HIDE);
@@ -416,7 +419,7 @@ static void CloseAllTabs(bool b) {
             }
         }
     }
-    for (int i = 0; i < (int)Tabs(b).size(); i++) ClearCache(Tabs(b)[i]);
+    for (int i = 0; i < (int)Tabs(b).size(); i++) { ClearCache(Tabs(b)[i]); TtPdfSessionDrop(Tabs(b)[i]); }
     if (fd.open && fd.pane == b) {
         if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
         if (g_fedit) ShowWindow(g_fedit, SW_HIDE);

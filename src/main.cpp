@@ -4,6 +4,7 @@
 #include <exception>
 #include <cstdarg>
 #include "common.h"
+#include "pdf_text.inl"      // KillerPDF's engine text layer, ported (before pdf_render: TtFor calls it)
 #include "pdf_render.inl"
 #include "tabs.inl"
 #include "annotations.inl"
@@ -378,7 +379,7 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
             if (!wcscmp(argv[a], L"annot=demo")) {
                 DocState& D = DVF();
                 if (D.n) {
-                    TtFor(D, 0);   // the OCR layer warms the same way a live drag would
+                    TtFor(D, 0);   // the text layer warms the same way a live drag would
                     Annot hl; hl.type = AT_HIGHLIGHT;
                     hl.color = RGB(0xff, 0xff, 0x00); hl.alpha = 80;
                     hl.lines.push_back(FRect{ 60, 60, 200, 16 });

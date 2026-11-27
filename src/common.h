@@ -11,9 +11,9 @@
 // rail only cancels a click - like the page view, it never pans (no grab-to-scroll).
 // Text selection is KillerPDF's flowing model too: a press on text drags a caret
 // pair of individual characters along the page's reading order (column-aware,
-// line-banded cells: the built-in OCR pass over the page supplies word boxes, each
-// sliced into per-character cells the way KillerPDF's engine supplies letters) and
-// paints one 60/255 accent quad per selected line; select or double-click copies
+// line-banded cells: the text layer's own letters - read by the KillerPDF-engine
+// port, all languages - with the OS OCR's word boxes as the scanned-page fallback)
+// and paints one 60/255 accent quad per selected line; select or double-click copies
 // at once. The page never pans under the mouse - the wheel and the keys own
 // scrolling, so a grab always means text selection, never a scroll.
 // Find Text is KillerPDF's search bar too (Shell/Search.cs + SearchController +
@@ -31,7 +31,7 @@
 // ChevronUp / ChevronDown / Cancel buttons with the danger red close glyph.
 // 250ms debounce, a two-character minimum, Enter / Shift+Enter / F3 / Shift+F3
 // step, Escape closes. The scan walks the document page by page on a pump timer
-// (the OCR text layer is built page-wise, so a 2,000-page book streams its
+// (the text layer is built page-wise, so a 2,000-page book streams its
 // matches instead of blocking), matches fold case unless Match Case, Whole Word
 // rejects letter/digit/underscore neighbours, and every match paints one rounded
 // box per touched word - dim orange for the field, bright with the accent ring
@@ -145,18 +145,23 @@ struct Ent { HBITMAP b; int w, h; int rot = 0; unsigned long long t; };   // rot
                                            // quarter-turns + flip bits baked in
 
 // ---- flowing text selection (port of KillerPDF's TextRunService + #127) ----
-// A page's selectable units - here the OS OCR's per-word boxes over a fresh page
-// render (Windows.Data.Pdf exposes no text layer to read directly), in KillerPDF
-// the engine's word letters - are grouped into visual lines by vertical band overlap,
-// read in column-aware order, and a drag tracks the run of units between two carets
-// (page, index) in that reading order. Geometry lives in page-DIP space with the
-// top-left origin the OCR boxes report, so painting is the same scale the page
-// bitmap already uses. Empty page areas are dead to the mouse - the wheel and the
-// keys own scrolling, so a grab on the page always means selection, never a scroll.
+// A page's selectable units - the PDF text layer's own letters, read by the
+// KillerPDF-engine port in pdf_text.inl (all languages the file carries:
+// ToUnicode CMaps, standard encodings, Identity-H composites), with the OS
+// OCR's per-word boxes as the fallback for scanned pages - are grouped into
+// visual lines by vertical band overlap, read in column-aware order, and a
+// drag tracks the run of units between two carets (page, index) in that
+// reading order. Geometry lives in page-DIP space with the top-left origin
+// the render uses, so painting is the same scale the page bitmap already
+// uses. Empty page areas are dead to the mouse - the wheel and the keys own
+// scrolling, so a grab on the page always means selection, never a scroll.
 struct TxtCell {                      // one selectable unit: a character sliced out
-    std::wstring text;                // of an OCR word box (word-granular boxes are
-    float l = 0, r = 0, t = 0, b = 0; // what the OS OCR reports; TtSplitChars cuts
-    int word = 0, line = 0;           // them into KillerPDF's letter-granular cells)
+    std::wstring text;                // of the text layer's letters (pdf_text.inl) or,
+                                      // on scanned pages, of an OCR word box
+                                      // (TtSplitChars cuts word boxes into
+                                      // KillerPDF's letter-granular cells)
+    float l = 0, r = 0, t = 0, b = 0;
+    int word = 0, line = 0;
 };
 struct TxtLine {                      // a contiguous slice of the flattened cells
     int start = 0, count = 0;
@@ -205,13 +210,14 @@ struct Annot {
 
 // Everything one open document owns: its engine handle, its page geometry, its
 // layout at the pane's own card width, its zoom/scroll/view-mode state, its
-// rendered-page cache, its OCR text geometry and its flowing selection. The
+// rendered-page cache, its text layer and its flowing selection. The
 // split carries TWO of these - pane A's in App::d, pane B's in App::dB - so a
 // pane is a real document surface (KillerPDF's PdfViewer per pane), not a
 // viewport carved out of a shared flow. Every helper below either takes an
 // explicit DocState& (the render path, which paints both panes in one frame)
 // or acts on the focused pane through DVF() (the interaction path, which
 // always names the pane the user is working in).
+namespace pdftext { struct PdfTextSession; }         // the text-layer extractor (pdf_text.inl)
 struct DocState {
     PdfDocument doc{ nullptr };
     std::wstring name;
@@ -243,7 +249,10 @@ struct DocState {
                                         // RenderCacheTabCap) and drops the rest's page bitmaps
     // flowing text selection: carets over the flattened text cells of a page,
     // plus the lazily built per-page text geometry (LRU-capped like the thumbs)
+    // and the KillerPDF-engine text session behind it (pdf_text.inl): the file
+    // bytes parsed once, the page tree, the font cache and the per-page letters
     std::unordered_map<int, TxtPage> txt;
+    pdftext::PdfTextSession* ts = nullptr;
     bool selArm = false;                // press started on text; the drag is live
     bool selDrag = false;               // past the 4px click-vs-drag threshold
     bool selRange = false;              // a committed selection is on screen
@@ -527,7 +536,7 @@ struct Find {
     int scan = 0;                     // how many pages of this run have been read
     int anchor = 0;                   // the page the run starts at - the page you are
                                       // on first, so the counter's numbers land in one
-                                      // OCR tick instead of a whole-book crawl
+                                      // text-layer tick instead of a whole-book crawl
     unsigned gen = 0;                 // bumped on every cancel; a stale pump quits
     bool done = true;                 // the whole document has been scanned
     bool pending = false;             // a query sits in the debounce: no verdict yet, so

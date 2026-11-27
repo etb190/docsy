@@ -340,7 +340,8 @@ struct AiChunker {
         Flush(pending.size());
     }
 };
-// Page words from docsy's OCR cells: words in reading order with paragraph /
+// Page words from docsy's text cells (the engine text layer's letters, OCR's
+// word boxes on scanned pages): words in reading order with paragraph /
 // heading flags derived from the line boxes (PageWordStreamBuilder's geometry,
 // reduced to what docsy's TxtPage already carries).
 static void AiPageWords(const TxtPage& pt, int page, std::vector<AiWordIn>& out) {
