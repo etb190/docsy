@@ -1227,8 +1227,10 @@ static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceRe
     if (t->pdfCaptureBusy) return;                     // one capture at a time per tab
     t->pdfCaptureBusy = true;
     WebPdfGuardOn(t, ix);
-    // the view's GetContent hands the stream over at completion - the runtime
-    // owns its lifetime to the handler, the same lease the managed layer gets
+    // the view's GetContent hands the stream over at completion - but the Invoke
+    // parameter is an [in] lease that dies the moment the handler returns, so the
+    // worker holds its own reference: a captured raw pointer is a use-after-free
+    // the moment the reader is about to take the document (the first crash)
     HRESULT gcHr = resp->GetContent(
         Microsoft::WRL::Callback<ICoreWebView2WebResourceResponseViewGetContentCompletedHandler>(
             [id](HRESULT hr, IStream* st) -> HRESULT {
@@ -1236,7 +1238,8 @@ static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceRe
                     if (g.main) PostMessageW(g.main, WM_APP + 12, (WPARAM)id, (LPARAM)nullptr);   // the later roads take their turn
                     return S_OK;
                 }
-                std::thread([id, st]() {
+                wrl::ComPtr<IStream> keep = st;        // the worker's own lease on the bytes
+                std::thread([id, keep]() {
                     std::wstring path = WebPdfTempPath(WebPdfSafeName(L"document.pdf"));
                     bool ok = false;
                     HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
@@ -1246,7 +1249,7 @@ static void WebPdfResponseSeen(unsigned long long id, ICoreWebView2WebResourceRe
                         ULONG got = 0;
                         bool err = false;
                         for (;;) {
-                            if (FAILED(st->Read(buf, sizeof(buf), &got))) { err = true; break; }
+                            if (FAILED(keep->Read(buf, sizeof(buf), &got))) { err = true; break; }
                             if (!got) break;
                             DWORD wr = 0;
                             if (!WriteFile(f, buf, got, &wr, nullptr) || wr != got) { err = true; break; }
