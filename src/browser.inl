@@ -2005,6 +2005,8 @@ static void WebSwitchTo(int i) {
     WebBarLayout();
     WebSwitchSyncSoon();
     WebRepaintChrome();
+    SumTabStand(1);     // SUM_WEB: the deck moved - the card shows the new
+                        // tab's own stand, open or folded, not the old one's
     AiModeChanged();                             // the sidechat follows the focused tab
     WebSessionSave();                            // the front tab's seat rides the deck too
 }

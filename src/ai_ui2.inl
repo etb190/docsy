@@ -74,6 +74,14 @@ static HHOOK g_sumMouseHook = nullptr;       // the click-outside watcher, one h
 static std::string g_sumInitDoc[SUM_SEATS];  // what each page's last init was built
                                              // for - a reopen only re-inits when the
                                              // document moved under the hood
+static std::map<std::string, bool> g_sumStand[SUM_SEATS];   // each document's own
+                                             // stand: the card is per tab, not per
+                                             // seat - switching decks swaps stands
+                                             // instead of folding the card (the key
+                                             // is the same doc key SumInitStale uses)
+static std::string SumStandKey(int seat) {
+    return (seat == SUM_DOC) ? AiDocSessionKey(DVF().path) : SumWebDocKey();
+}
 
 // ---- the page text builder: [p. N] anchored, running paragraphs ----
 static std::wstring AiPageTextOf(const TxtPage& pt) {
@@ -1944,6 +1952,8 @@ static void SumHideSeat(int seat, bool fromOutside) {
     SumSavePlacementSeat(seat);
     SumUnhookMouse();
     if (fromOutside) g_sumHideTick[seat] = GetTickCount();
+    g_sumStand[seat][SumStandKey(seat)] = false;   // the fold is this document's
+                                                   // own: its tab stops standing
 }
 // The frame's folds drive the seat's render. A minimize takes the whole frame
 // down with the overlays on it - the controller keeps claiming visible while
@@ -2006,7 +2016,11 @@ static void SumOwnerMoved() {
     SumSyncVisible();
 }
 // the pump's verdict on the hook's outside click: every unfolded card whose
-// rect misses the point folds; a click on a card leaves all of them standing
+// rect misses the point folds; a click on a card leaves all of them standing.
+// The tab strips are the exception: a click that swaps decks is the card's
+// own per-tab life - the stand follows the deck (SumTabStand) instead of
+// folding. The reader's band rides the top of g.view (face 3dp + 30dp); the
+// browser's whole chrome bar is g_wstrip.
 static void SumOutsideClick(long sx, long sy) {
     if (!g.main) return;
     POINT o{ 0, 0 };
@@ -2014,6 +2028,18 @@ static void SumOutsideClick(long sx, long sy) {
     RECT cr; GetClientRect(g.main, &cr);
     POINT pt{ (int)sx - o.x, (int)sy - o.y };
     if (pt.x < cr.left || pt.x >= cr.right || pt.y < cr.top || pt.y >= cr.bottom) return;
+    if (g.view && !g_webOn) {
+        POINT vp{ pt.x, pt.y };
+        MapWindowPoints(g.main, g.view, &vp, 1);
+        RECT vr; GetClientRect(g.view, &vr);
+        if (vp.x >= 0 && vp.x < vr.right && vp.y >= 0 && vp.y < TABF(33)) return;
+    }
+    if (g_wstrip) {
+        POINT wp{ pt.x, pt.y };
+        MapWindowPoints(g.main, g_wstrip, &wp, 1);
+        RECT wr; GetClientRect(g_wstrip, &wr);
+        if (wp.x >= 0 && wp.x < wr.right && wp.y >= 0 && wp.y < wr.bottom) return;
+    }
     for (int s = 0; s < SUM_SEATS; s++)
         if (g_sumShown[s] && !PtInRect(&g_sumRect[s], pt))
             SumHideSeat(s, true);
@@ -2199,6 +2225,9 @@ static void SumPrewarm() {
 static void SumOpenSeat(int seat) {
     if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
     g_sumShown[seat] = true;
+    g_sumStand[seat][SumStandKey(seat)] = true;   // the stand rides this document,
+                                                  // not the seat: another tab's
+                                                  // card keeps its own state
     SumSeatBoundsRead(seat);        // the saved card lands (clamped) before the render
     SumEnsureSeat(seat);            // no-ops while the webview lives; re-arms it after
                                     // a rebuild
@@ -2210,12 +2239,23 @@ static void SumOpenSeat(int seat) {
         SumApplyBounds(seat);
         SumRaiseSeat(seat);   // above the frame's later webviews - a tab's page or
                               // the editor would bury a card born before theirs
-        // the page hears keys - Esc, the word plate's Shift - without a click
+        // the page hears keys - Esc, the word plate's Ctrl - without a click
         // first: a window era's SetForegroundWindow, in overlay terms
         g_sumCtr[seat]->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
     }
     if (!g_sumMouseHook) g_sumMouseHook = SetWindowsHookExW(WH_MOUSE_LL, SumMouseHookProc, g.hinst, 0);
     if (g_sumReady[seat] && SumInitStale(seat)) SumSendInitSeat(seat);
+}
+// the deck moved: the card answers to the NEW tab's own stand - a tab that
+// never opened one stays folded, a tab that left one standing gets it back,
+// and a tab standing already just swaps its digest in place. Called on every
+// reader/editor deck swap (SwitchTab) and web tab switch (WebSwitchTo).
+static void SumTabStand(int seat) {
+    if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
+    auto it = g_sumStand[seat].find(SumStandKey(seat));
+    bool stood = it != g_sumStand[seat].end() && it->second;
+    if (stood) SumOpenSeat(seat);
+    else if (g_sumShown[seat]) SumHideSeat(seat, false);
 }
 
 // ---- the summary's generation thread ----

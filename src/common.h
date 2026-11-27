@@ -644,6 +644,8 @@ static void SumRestoreOpen();           // the session left the navigator standi
                                         // the comeback (defined in ai_ui2.inl)
 static void SumRestoreTick();           // the comeback's tick: waits out the prewarm build,
                                         // then opens through the usual door (ai_ui2.inl)
+static void SumTabStand(int seat);      // the deck moved: the card answers to the new
+                                        // tab's own stand (defined in ai_ui2.inl)
 static int g_aiDockW = 0;               // the AI panel's docked strip width this pass:
                                         // LayoutMain reserves it right of the view, the
                                         // panel's bounds read it back (ai_ui.inl)

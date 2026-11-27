@@ -649,21 +649,29 @@ function showWordPop(r, word, ctx){
   S.pin={word:word, ctx:ctx};   // the pin carries its own context: the hover keeps
                                 // wandering, the answer must not follow it
   var wrapR=$("digestWrap").getBoundingClientRect();
+  var dig=$("digest").getBoundingClientRect();
+  // the anchor clamps to the VISIBLE slice of the word or selection: a tall
+  // selection's union box can start above the viewport and end below it, and
+  // a popup hung off its raw top or bottom lands outside the card entirely -
+  // the pin must appear where the eyes are
+  var top=Math.max(r.top, dig.top), bot=Math.min(r.bottom, dig.bottom);
+  if(bot<top) bot=top;
   var x=r.left-wrapR.left, pw=252;
   pop.style.left=Math.max(4, Math.min(x-30, wrapR.width-pw-6))+"px";
   pop.style.top="0px"; pop.style.display="flex";   // shown before it leans: the
                                                    // height is measured, then the
-                                                   // popup floats ABOVE the word
+                                                   // popup floats ABOVE the pin
   var ph=pop.offsetHeight||130;
-  var above=r.top-wrapR.top-6-ph;
+  var above=top-wrapR.top-6-ph;
   if(above>=0) pop.style.top=above+"px";           // room above: it hangs there
-  else pop.style.top=(r.bottom-wrapR.top+6)+"px";  // pinned near the digest's top:
-                                                   // below is the only home
+  else pop.style.top=Math.min(bot-wrapR.top+6,    // pinned near the digest's top:
+                              Math.max(4, wrapR.height-ph-4))+"px";  // below,
+                                                                    // kept inside
   popAns.style.display="none"; popAns.textContent="";
-  plate.style.left=(r.left-wrapR.left-2)+"px";     // the plate marks the pin, word
-  plate.style.top=(r.top-wrapR.top-1)+"px";        // or selection alike
-  plate.style.width=(r.width+4)+"px";
-  plate.style.height=(r.height+2)+"px";
+  plate.style.left=(r.left-wrapR.left-2)+"px";     // the plate marks the pin's
+  plate.style.top=(top-wrapR.top-1)+"px";          // visible slice, word or
+  plate.style.width=(r.width+4)+"px";              // selection alike
+  plate.style.height=(bot-top+2)+"px";
   plate.style.display="block";
 }
 /* The whole selection is a payload too: a live digest selection stands in for
@@ -693,10 +701,18 @@ window.addEventListener("blur", function(){ document.body.classList.remove("ctrl
 /* A mousedown outside the popup cancels it - the pin and the plate go with
    it (Esc already did this; now any click does). The same mousedown
    snapshots a live digest selection BEFORE the browser collapses it under
-   the click, so Ctrl+click opens the popup for the whole selection, not
-   just the word the click landed on. */
+   the click. And Ctrl+click on a live selection pins the popup RIGHT HERE,
+   refusing the default so the selection stays highlighted, standing in for
+   the plate on the whole pin - the click-time path missed it under
+   WebView2's collapse timing. */
 document.addEventListener("mousedown", function(e){
   S.selHold=selPayload(window.getSelection());
+  if(e.ctrlKey && S.selHold && $("digest").contains(e.target)
+     && !pop.contains(e.target) && !S.generating && !S.busy){
+    e.preventDefault();
+    showWordPop(S.selHold.r, S.selHold.word, S.selHold.ctx);
+    return;
+  }
   if(pop.style.display==="flex" && !pop.contains(e.target)) closeWordPop();
 });
 function wordAct(act){

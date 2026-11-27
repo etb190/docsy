@@ -213,6 +213,8 @@ static void SwitchTab(bool b, int idx) {
     TabTrimCaches(b);
     LayoutMain();                                 // the band may appear or collapse; reflow
     TabChrome(b);
+    SumTabStand(0);      // SUM_DOC: the deck moved - the card shows the new
+                         // tab's own stand, open or folded, not the old one's
     SumSearchReveal();   // the reader's deck moved: a card a word-search folded pops back
 }
 
