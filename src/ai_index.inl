@@ -1013,6 +1013,15 @@ static void AiHistLoad() {
                         if ((p = e.get("reason")) && p->t == 's') src.reason = p->s;
                         if ((p = e.get("verified")) && p->t == 'b') src.verified = p->b;
                         if ((p = e.get("location")) && p->t == 'd') src.location = (int)p->d;
+                        // the cited span's box, so a reloaded answer's chips
+                        // still light their chunk's words on the page
+                        const crxk::J* rr = e.get("rects");
+                        if (rr && rr->t == 'a')
+                            for (auto& rq : rr->a) {
+                                if (rq.t != 'a' || rq.a.size() < 4) continue;
+                                src.rects.push_back({ (float)rq.a[0].d, (float)rq.a[1].d,
+                                                      (float)rq.a[2].d, (float)rq.a[3].d });
+                            }
                         msg.sources.push_back(std::move(src));
                     }
                 cv.msgs.push_back(std::move(msg));
@@ -1046,7 +1055,15 @@ static void AiHistSave() {
                      ",\"quote\":" + WxJsonStr(WxU(src.quote)) +
                      ",\"reason\":" + WxJsonStr(WxU(src.reason)) +
                      ",\"verified\":" + (src.verified ? "true" : "false") +
-                     ",\"location\":" + std::to_string(src.location) + "}";
+                     ",\"location\":" + std::to_string(src.location) + ",\"rects\":[";
+                for (size_t q = 0; q < src.rects.size(); q++) {
+                    if (q) j += ",";
+                    j += "[" + std::to_string(src.rects[q].x) + "," +
+                         std::to_string(src.rects[q].y) + "," +
+                         std::to_string(src.rects[q].w) + "," +
+                         std::to_string(src.rects[q].h) + "]";
+                }
+                j += "]}";
             }
             j += "]}";
         }

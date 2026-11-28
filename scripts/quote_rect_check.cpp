@@ -14,7 +14,11 @@
 // words (harakat, hamza carriers, alef maqsura), a needle of common words
 // that scatters across the page invents nothing (the span guard is what
 // killed the second blob), and a passage that walks over a page break
-// lights both pages.
+// lights both pages. The geometric floor under it all gets its own section:
+// AiSpanLineRects - the cited chunk's span box intersected with the page's
+// live cells - paints one slim rect per cited line with no text matching at
+// all, so a quote reshaped past every matcher still lights the passage it
+// came from, and the union-box blob stays dead on any page words can carry.
 //
 //   sed -n '/text selection core (verbatim-portable geometry)/,/text selection app glue/p' src/pdf_render.inl > /tmp/qsel.inc
 //   sed -n '/word normalization (QuoteLocator/,/^\/\/ ---- the chunk model ----/p' src/ai_index.inl > /tmp/qtok.inc
@@ -434,6 +438,91 @@ int main() {
         }
         Expect(clean && head.size() <= 120 && !head.empty(),
                "the segment head never snaps a letter in half");
+    }
+
+    // ---- AiSpanLineRects: the geometric floor (the span box's own words) ----
+    printf("AiSpanLineRects (the citation highlight's geometric floor):\n");
+
+    // 18. a span over two whole lines: one slim rect per line, each clipped to
+    //     the span's x-range - the words the chunk carries, never the union box
+    {
+        PageBuilder p10;
+        const wchar_t* l0[] = { L"the", L"cited", L"chunk", L"opens" };
+        const wchar_t* l1[] = { L"here", L"with", L"its", L"own", L"words" };
+        const wchar_t* l2[] = { L"and", L"strays", L"far", L"below", L"it" };
+        p10.Line(l0, 4, 72, 100, 112, 0);
+        p10.Line(l1, 5, 72, 130, 142, 1);
+        p10.Line(l2, 5, 72, 160, 172, 2);
+        // the span's union box over lines 0-1 whole (x 72..206, y 98..144) -
+        // what the box would paint is one 46-tall slab; the floor paints each
+        // line's own extent instead
+        FRect span{ 72.f, 98.f, 134.f, 46.f };
+        std::vector<FRect> sr;
+        AiSpanLineRects(p10.pt, span, sr);
+        Expect(sr.size() == 2, "a two-line span paints one rect per cited line");
+        if (sr.size() == 2) {
+            Expect(Near(sr[0].y, 100 - 1.44f, 0.05f), "the first rect sits on line 0");
+            Expect(Near(sr[1].y, 130 - 1.44f, 0.05f), "the second rect sits on line 1");
+            Expect(Near(sr[0].w, 108.f, 0.5f),
+                   "line 0's rect is the line's own words, not the span's width");
+            Expect(Near(sr[1].w, 119.f, 0.5f), "line 1's rect is its own words too");
+            Expect(sr[0].h < 20.f, "each rect is slim - never the union slab");
+        }
+        // the third line rides outside the span: nothing lights there
+        bool third = false;
+        for (auto& r : sr) if (r.y > 150.f && r.y < 180.f) third = true;
+        Expect(!third, "the line below the span stays dark");
+    }
+
+    // 19. a span riding two mid-line words: the rect covers exactly those
+    //     words, not the line's start, not the words past the span's edge
+    {
+        PageBuilder p11;
+        const wchar_t* l0[] = { L"aaa", L"bbb", L"ccc", L"ddd", L"eee" };
+        p11.Line(l0, 5, 72, 100, 112, 0);   // words at 72,93,114,135,156 (+15 wide, 6 gap)
+        FRect span{ 92.f, 99.f, 40.f, 14.f };   // x 92-132: 'bbb' (93-108), 'ccc' (114-129)
+        std::vector<FRect> sr;
+        AiSpanLineRects(p11.pt, span, sr);
+        Expect(sr.size() == 1, "a two-word span paints one rect");
+        if (sr.size() == 1) {
+            Expect(Near(R0(sr[0]), 93.f, 0.5f),
+                   "the rect starts at the span's first word ('bbb')");
+            Expect(Near(R1(sr[0]), 129.f, 0.5f), "and ends at the span's last word ('ccc')");
+        }
+    }
+
+    // 20. the neighbor column stays out: a two-column page whose span covers
+    //     only the right column lights only the right column's words
+    {
+        PageBuilder p12;
+        const wchar_t* la[] = { L"left1", L"left2" };
+        const wchar_t* lb[] = { L"right1", L"right2" };
+        p12.Line(la, 2, 72, 100, 112, 0);          // left column line 0
+        p12.Line(lb, 2, 400, 100, 112, 1);         // right column, same band
+        FRect span{ 400.f, 98.f, 60.f, 16.f };     // the right column only
+        std::vector<FRect> sr;
+        AiSpanLineRects(p12.pt, span, sr);
+        Expect(sr.size() == 1, "a one-column span paints one rect");
+        if (sr.size() == 1)
+            Expect(Near(R0(sr[0]), 400.f, 0.5f), "the left column's words stay dark");
+    }
+
+    // 21. the degenerate and the missing: a zero-area span and a span that
+    //     misses every line invent nothing
+    {
+        PageBuilder p13;
+        const wchar_t* l0[] = { L"alpha", L"beta" };
+        p13.Line(l0, 2, 72, 100, 112, 0);
+        FRect zero{ 0.f, 0.f, 0.f, 0.f };
+        std::vector<FRect> sr;
+        AiSpanLineRects(p13.pt, zero, sr);
+        Expect(sr.empty(), "a zero-area span paints nothing");
+        FRect miss{ 72.f, 500.f, 100.f, 10.f };
+        AiSpanLineRects(p13.pt, miss, sr);
+        Expect(sr.empty(), "a span below every line paints nothing");
+        FRect wide{ 0.f, 0.f, 1000.f, 400.f };     // the whole page: every line
+        AiSpanLineRects(p13.pt, wide, sr);
+        Expect(sr.size() == 1, "a page-wide span paints the page's lines whole");
     }
 
     printf("%d checks, %d failed\n", g_total, g_failed);

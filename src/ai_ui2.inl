@@ -1701,6 +1701,55 @@ static bool AiQuoteRects(const TxtPage& pt, const std::string& quote,
     TtRects(pt, s, e, out);
     return !out.empty();
 }
+// The geometric floor under the quote roads: the cited chunk's own words on
+// the cited page, as the chunk's saved span box intersected with the page's
+// live cells - one slim rect per cited line, clipped to the cited words where
+// a line only partly belongs to the chunk. No text matching at all: the span
+// box rides the source (recorded at answer time from the same pipeline that
+// builds the cells), so a quote the model reshaped past every matcher still
+// lights the passage it came from, word-anchored - and the chunk's page-span
+// union box (the reported blob) stays dead on every page a text layer carries.
+static void AiSpanLineRects(const TxtPage& pt, const FRect& span,
+                            std::vector<FRect>& out) {
+    out.clear();
+    if (pt.cells.empty() || pt.lines.empty()) return;
+    if (span.w <= 0 || span.h <= 0) return;
+    // a cell belongs to the cited passage when its vertical center sits inside
+    // the span's band (three quarters of the cell's own height of slack: the
+    // union box of a chunk's words can ride a hair above the line boxes) and
+    // its box actually overlaps the span horizontally - the neighbor column's
+    // words stay out on a two-column page
+    auto inSpan = [&span](const TxtCell& c) {
+        float cy = (c.t + c.b) * 0.5f;
+        float padY = (c.b - c.t) * 0.75f;
+        return cy >= span.y - padY && cy <= span.y + span.h + padY &&
+               min(c.r, span.x + span.w) - max(c.l, span.x) > 0;
+    };
+    std::map<int, std::pair<int, int>> perLine;   // line -> [first,last] cell
+    for (int i = 0; i < (int)pt.cells.size(); i++) {
+        if (!inSpan(pt.cells[i])) continue;
+        int ln = pt.cells[i].line;
+        auto& rng = perLine[ln];
+        if (rng.first < 0) rng.first = i;
+        rng.second = i;
+    }
+    for (auto& kv : perLine) {
+        if (kv.first < 0 || kv.first >= (int)pt.lines.size()) continue;
+        const TxtLine& ln = pt.lines[kv.first];
+        float left = FLT_MAX, right = -FLT_MAX;
+        bool any = false;
+        // the line's own included cells: a partially cited line clips to the
+        // cited words instead of stretching across the whole line
+        for (int i = kv.second.first; i <= kv.second.second; i++) {
+            if (!inSpan(pt.cells[i])) continue;
+            left = min(left, pt.cells[i].l); right = max(right, pt.cells[i].r);
+            any = true;
+        }
+        if (!any) continue;
+        float pad = (ln.bottom - ln.top) * 0.12f;    // TtRects' own line pad
+        out.push_back({ left, ln.top - pad, right - left, (ln.bottom + pad) - (ln.top - pad) });
+    }
+}
 // the Windows half: the page's live text layer (TtFor - a parked shell rebuilds
 // here, on this touch) feeding the pure matcher above
 static bool AiQuotePageRects(DocState& D, int pageIndex, const std::string& quote,
@@ -1709,6 +1758,19 @@ static bool AiQuotePageRects(DocState& D, int pageIndex, const std::string& quot
     TxtPage* tp = TtFor(D, pageIndex);
     if (!tp) return false;
     return AiQuoteRects(*tp, quote, out);
+}
+// the geometric floor's Windows half. Returns 1 when the span's words painted,
+// 0 when the page carries words but none inside the span (an honest miss: the
+// blob must not return to fill it), -1 when the page has no text layer at all
+// - the span box itself is then the only geometry that exists.
+static int AiSpanPageRects(DocState& D, int pageIndex, const FRect& span,
+                           std::vector<FRect>& out) {
+    if (pageIndex < 0 || pageIndex >= D.n) return -1;
+    TxtPage* tp = TtFor(D, pageIndex);
+    if (!tp) return -1;
+    if (tp->cells.empty()) return -1;
+    AiSpanLineRects(*tp, span, out);
+    return out.empty() ? 0 : 1;
 }
 // The quote that walks over a page break: the chunk text reads the two pages
 // as one word stream, so a passage's head sits on the cited page's last lines

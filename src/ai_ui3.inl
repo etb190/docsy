@@ -408,41 +408,22 @@ static void AiPanelMessage(const wchar_t* json) {
                         }
                     }
                 }
-                // the chunk's span box stays as the fallback - and only for a
-                // page the text layer cannot carry (a scan the engine cannot
-                // read, an OCR-only page still in flight): the word roads need
-                // words, and on a native page the span box IS the reported
-                // blob - a wrong square never helped, so a native page the
-                // roads could not pin lands with no highlight at all.
-                if (navPage < 0 && g_aiIndexReady) {
-                    TxtPage* tp = TtFor(DVF(), src->pageIndex);
-                    bool pageHasWords = tp && !tp->cells.empty();
-                    if (!pageHasWords) {
-                        bool found = false;
-                        if (src->location != AQL_UNLOCATED && !src->quote.empty()) {
-                            for (auto& ch : g_aiIndex.chunks) {
-                                for (auto& sp : ch.pages) {
-                                    if (sp.page != src->pageIndex) continue;
-                                    size_t ws, we;
-                                    if (AiLocateInText(ch.text, src->quote, ws, we) != AQH_NONE &&
-                                        ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
-                                        rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                                if (found) break;
-                            }
-                        }
-                        if (!found)
-                            for (auto& ch : g_aiIndex.chunks)
-                                for (auto& sp : ch.pages)
-                                    if (sp.page == src->pageIndex) {
-                                        rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
-                                        found = true;
-                                        break;
-                                    }
-                        if (found) navPage = src->pageIndex;
+                // the geometric floor: the cited chunk's own words on the cited
+                // page. The chunk's span box rides the source itself (recorded
+                // at answer time from the index's own pages, persisted with the
+                // transcript), intersected with the page's live cells into one
+                // slim rect per cited line - a quote the model reshaped past the
+                // matchers still lights the passage it came from, word-anchored,
+                // with no index round-trip and no text matching. The span's raw
+                // box is reserved for a page the text layer cannot carry (a scan
+                // in flight, an engine nothing reads), where it is the only
+                // geometry that exists.
+                if (navPage < 0 && !src->rects.empty()) {
+                    int sr = AiSpanPageRects(DVF(), src->pageIndex, src->rects[0], rects);
+                    if (sr > 0) navPage = src->pageIndex;
+                    else if (sr < 0) {
+                        rects.push_back(src->rects[0]);
+                        navPage = src->pageIndex;
                     }
                 }
                 if (navPage < 0) navPage = src->pageIndex;   // the page lands, no highlight
@@ -489,6 +470,15 @@ static void AiHandleEvent(AiEv* e) {
                     if ((p = s.get("reason")) && p->t == 's') src.reason = p->s;
                     if ((p = s.get("verified")) && p->t == 'b') src.verified = p->b;
                     if ((p = s.get("location")) && p->t == 'd') src.location = (int)p->d;
+                    // the cited span's box (the geometric floor's geometry) rides
+                    // the answer blob so a click can light the chunk's words
+                    const crxk::J* rr = s.get("rects");
+                    if (rr && rr->t == 'a')
+                        for (auto& rq : rr->a) {
+                            if (rq.t != 'a' || rq.a.size() < 4) continue;
+                            src.rects.push_back({ (float)rq.a[0].d, (float)rq.a[1].d,
+                                                  (float)rq.a[2].d, (float)rq.a[3].d });
+                        }
                     m.sources.push_back(std::move(src));
                 }
             st->msgs.push_back(std::move(m));

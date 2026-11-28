@@ -327,6 +327,16 @@ static std::vector<AiSource> AiResolveDocSources(const std::vector<AiModelSource
                 }
             }
         }
+        // the cited page's span box rides even when the quote never located:
+        // the highlight's geometric floor reads it (the span's own words on
+        // the page), so a quote the model reshaped past every matcher still
+        // has its chunk's words to light
+        if (src.rects.empty())
+            for (auto& sp : ch.pages)
+                if (sp.page == pageIdx) {
+                    src.rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                    break;
+                }
         src.pageIndex = pageIdx;
         src.page = pageIdx + 1;
         out.push_back(std::move(src));
@@ -357,6 +367,13 @@ static std::vector<AiSource> AiResolveDocSources(const std::vector<AiModelSource
         int pageIdx = ch.pages.empty() ? -1 : ch.pages.front().page;
         src.pageIndex = pageIdx;
         src.page = pageIdx + 1;
+        // the cited page's span box: the geometric floor's geometry (the
+        // chunk's own words on the page), same as the structured path above
+        for (auto& sp : ch.pages)
+            if (sp.page == pageIdx) {
+                src.rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                break;
+            }
         out.push_back(std::move(src));
     }
     return out;
@@ -644,7 +661,15 @@ static void AiRunReply(const std::string& key, const std::string& input) {
                   ",\"quote\":" + WxJsonStr(WxU(sources[i].quote)) +
                   ",\"reason\":" + WxJsonStr(WxU(sources[i].reason)) +
                   ",\"verified\":" + (sources[i].verified ? "true" : "false") +
-                  ",\"location\":" + std::to_string(sources[i].location) + "}";
+                  ",\"location\":" + std::to_string(sources[i].location) +
+                  ",\"rects\":[";
+            for (size_t k = 0; k < sources[i].rects.size(); k++) {
+                const FRect& r = sources[i].rects[k];
+                if (k) sb += ",";
+                sb += "[" + std::to_string(r.x) + "," + std::to_string(r.y) + "," +
+                      std::to_string(r.w) + "," + std::to_string(r.h) + "]";
+            }
+            sb += "]}";
         }
         sb += "]";
         e->b = sb;
