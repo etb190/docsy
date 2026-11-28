@@ -545,6 +545,112 @@ int main() {
         }
     }
 
+    // ---- AiSliceWords: the cited chunk's own words on one page ----
+    // The passages road's needle: the chunk text is the chunker's words
+    // joined with single spaces, so re-wordizing it reproduces the chunk's
+    // word sequence and the AiPageSpan range slices the page's half. The
+    // slice, matched against the page's live cells, lights the WHOLE cited
+    // passage - where the quote field's 120-byte head lit only a fragment.
+    printf("AiSliceWords (the cited chunk's page slice - the full-passage needle):\n");
+    {
+        std::vector<std::wstring> words = {
+            L"\x0627\x0644\x0645\x0644\x0643",                   // al-malik (the king)
+            L"\x064A\x0644\x0639\x0628",                         // yal'ab (plays)
+            L"\x062F\x0648\x0631\x0627",                         // dawran (a role)
+            L"\x0623\x0633\x0627\x0633\x064A\x0627",             // asasiyan (essential)
+            L"\x0641\x064A",                                     // fi (in)
+            L"\x0627\x0644\x062A\x0648\x062D\x064A\x062F",       // al-tawhid
+            L"\x0627\x0644\x0648\x0637\x0646\x064A",             // al-watani
+            L"\x0648\x062D\x0627\x0645\x064A\x0627",             // wa-hamiyan
+            L"\x0644\x0644\x0639\x0647\x062F",                     // lil-'ahd
+            L"\x0627\x0644\x0645\x0631\x0627\x0628\x0637\x064A",   // al-murabati
+            L"\x0648\x0628\x0645\x0646\x0632\x0644\x0629",         // wa-bimanzila
+            L"\x0627\x0644\x0627\x0645\x0627\x0645"                 // al-imam
+        };
+        std::string chunk;
+        for (size_t i = 0; i < words.size(); i++) {
+            if (i) chunk += ' ';
+            chunk += WxU(words[i]);
+        }
+        // re-wordizing the chunk text reproduces the chunk's word sequence
+        std::vector<std::string> toks;
+        AiWordize(chunk, toks);
+        Expect(toks.size() == words.size(), "re-wordizing the chunk text keeps every word one for one");
+        // the span's word range slices exactly that page's words
+        std::string want;
+        for (int i = 3; i < 8; i++) { if (i > 3) want += ' '; want += WxU(words[i]); }
+        std::string slice = AiSliceWords(chunk, 3, 8);
+        Expect(slice == want, "the slice carries exactly the range's words, joined");
+        // out-of-range bounds clip, never crash, never invent
+        std::string head;
+        for (int i = 0; i < 4; i++) { if (i) head += ' '; head += WxU(words[i]); }
+        Expect(AiSliceWords(chunk, -3, 4) == head, "a negative start clips to the chunk's head");
+        Expect(AiSliceWords(chunk, 10, 99) == WxU(words[10]) + " " + WxU(words[11]),
+               "an end past the tail clips to the chunk's tail");
+        Expect(AiSliceWords(chunk, 5, 5).empty(), "an empty range yields nothing");
+        Expect(AiSliceWords("", 0, 4).empty(), "an empty chunk yields nothing");
+        Expect(AiSliceWords(chunk, 99, 3).empty(), "an inverted range yields nothing");
+
+        // the index alignment a lossy wordizer would drift: a punctuation-only
+        // word the wordizer sheds ("-" drops to nothing) and a glued Arabic
+        // comma must not shift the slice - the chunker's own word sequence is
+        // what the range indexes, wordized per word, empties skipped
+        {
+            std::vector<std::wstring> pw2 = {
+                L"\x0627\x0644\x0645\x0644\x0643",                    // الملك
+                L"-",                                                 // sheds to nothing
+                L"\x064A\x0644\x0639\x0628",                          // يلعب
+                L"\x062F\x0648\x0631\x0627\x060C",                    // دورا، (glued comma)
+                L"\x0641\x064A"                                       // في
+            };
+            std::string c2;
+            for (size_t i = 0; i < pw2.size(); i++) { if (i) c2 += ' '; c2 += WxU(pw2[i]); }
+            // [2,4) is يلعب + دورا، -> "يلعب دورا" - the shed "-" must not pull
+            // the window one word left, the comma must not split the second word
+            std::string want2 = WxU(pw2[2]) + " " +
+                                WxU(pw2[3]).substr(0, WxU(pw2[3]).size() - 2);   // minus the ،
+            Expect(AiSliceWords(c2, 2, 4) == want2, "a shed word and a glued comma never drift the range");
+            Expect(AiSliceWords(c2, 0, 2) == WxU(pw2[0]), "[0,2) rides the chunker's own words past the shed one");
+        }
+
+        // end to end: the page carries the passage as decorated Arabic cells
+        // (a tanween on the third word, the way real pages wear marks); the
+        // slice needle lights BOTH lines whole - the full cited passage
+        PageBuilder p15;
+        const wchar_t* l0[] = { L"\x0627\x0644\x0645\x0644\x0643",           // الملك
+                                L"\x064A\x0644\x0639\x0628",                 // يلعب
+                                L"\x062F\x0648\x0631\x0627\x064B" };         // دورا
+        const wchar_t* l1[] = { L"\x0623\x0633\x0627\x0633\x064A\x0627",     // أساسيا
+                                L"\x0641\x064A",                             // في
+                                L"\x0627\x0644\x062A\x0648\x062D\x064A\x062F" }; // التوحيد
+        p15.Line(l0, 3, 500, 100, 114, 0, 5, 6, true);
+        p15.Line(l1, 3, 500, 130, 144, 1, 5, 6, true);
+        // the chunk's text rides the page's own words (the chunker built it
+        // from them); the page's half of the chunk is the slice
+        std::string pageChunk;
+        for (int i = 0; i < 6; i++) {
+            if (i) pageChunk += ' ';
+            pageChunk += WxU(std::wstring(i < 3 ? l0[i] : l1[i - 3]));
+        }
+        std::vector<FRect> pr;
+        bool pok = AiQuoteRects(p15.pt, pageChunk, pr);
+        Expect(pok && pr.size() == 2,
+               "the passage needle lights the whole cited passage - both lines");
+        // the 120-byte head of the same chunk (what the quote field used to
+        // carry): only the head's words lit - the fragment the reader copied
+        std::vector<std::string> cw;
+        AiWordize(pageChunk, cw);
+        std::string headNeedle;
+        for (int i = 0; i < 2 && i < (int)cw.size(); i++) {
+            if (i) headNeedle += ' ';
+            headNeedle += cw[i];
+        }
+        std::vector<FRect> hr;
+        AiQuoteRects(p15.pt, headNeedle, hr);
+        Expect(hr.size() == 1 && hr[0].w < pr[0].w,
+               "the old 120-byte head lights only a fragment of the same passage");
+    }
+
     printf("%d checks, %d failed\n", g_total, g_failed);
     return g_failed ? 1 : 0;
 }

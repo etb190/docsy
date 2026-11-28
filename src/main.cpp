@@ -5,6 +5,7 @@
 #include <cstdarg>
 #include "common.h"
 #include "pdf_text.inl"      // KillerPDF's engine text layer, ported (before pdf_render: TtFor calls it)
+#include "pdf_fpu.inl"       // the PDFium fallback raster for pages the engine cannot decode
 #include "pdf_render.inl"
 #include "tabs.inl"
 #include "annotations.inl"

@@ -48,6 +48,7 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <tuple>
 #include <algorithm>
 #include <utility>
@@ -71,6 +72,10 @@ namespace pdftext {
 // KillerPDF's limits (PdfContentStreamReader.MaximumSourceBytes and the
 // extractors' character, mapping and expansion caps).
 constexpr size_t MaximumSourceBytes = 64ull * 1024 * 1024;
+// the FILE size the session accepts: scans ride bigger files than text PDFs,
+// and the session's own work (xref, page tree, per-page stream inflates) stays
+// bounded by MaximumSourceBytes per stream, not by the file's size
+constexpr size_t MaximumFileBytes = 512ull * 1024 * 1024;
 constexpr int MaximumLetters = 1000000;
 constexpr int MaximumInstructions = 1000000;
 constexpr int MaximumOperands = 4096;
@@ -2370,6 +2375,61 @@ if (!opened || index < 0 || index >= (int)pages.size()) throw PdfError();
         built[index] = std::move(pg);
         return built[index];
     }
+
+    // ---- the page-image codec scan (the Windows engine's decode gaps) ----
+    // Windows.Data.Pdf cannot decode JPXDecode (JPEG2000) or JBIG2Decode
+    // images: pages riding them - scans of books above all - come back as
+    // garbage, vertical streaks and black boxes over the words, while
+    // KillerPDF's own engine shows the same page fine. This walk flags every
+    // page whose XObject tree (form XObjects included, cycle-capped) draws
+    // such an image, or such a soft mask; the render path hands those pages
+    // to the PDFium fallback (pdf_fpu.inl) instead of the engine.
+    static bool IsBrokenImageFilter(const PdfObj* n) {
+        return n && n->t == PdfObj::NAME &&
+               (n->name == "JPXDecode" || n->name == "JP2Decode" ||
+                n->name == "JBIG2Decode");
+    }
+    bool XoBrokenFilter(const PdfObj* res, std::set<const void*>& seen, int depth) {
+        if (depth > 12 || (int)seen.size() > 4096) return false;
+        const PdfObj* xobjs = ResolveInF(file, res, "XObject");
+        if (!xobjs || xobjs->t != PdfObj::DICT) return false;
+        for (auto& kv : xobjs->dict) {
+            const PdfObj* xo = file.Resolve(&kv.second);
+            if (!xo || xo->t != PdfObj::STREAM) continue;
+            // the cache keeps node addresses stable, so pointer identity is a
+            // cycle guard: a form XObject that draws itself stops here
+            if (!seen.insert((const void*)xo).second) continue;
+            const PdfObj* sub = ResolveInF(file, xo, "Subtype");
+            bool image = sub && sub->t == PdfObj::NAME && sub->name == "Image";
+            bool form = sub && sub->t == PdfObj::NAME && sub->name == "Form";
+            if (!image && !form) continue;
+            const PdfObj* f = ResolveInF(file, xo, "Filter");
+            if (f) {
+                if (IsBrokenImageFilter(f)) return true;
+                if (f->t == PdfObj::ARR)
+                    for (auto& e : f->arr)
+                        if (IsBrokenImageFilter(file.Resolve(&e))) return true;
+            }
+            if (image) {
+                const PdfObj* sm = ResolveInF(file, xo, "SMask");
+                if (sm) {
+                    const PdfObj* smr = file.Resolve(sm);
+                    if (smr && smr->t == PdfObj::STREAM &&
+                        IsBrokenImageFilter(ResolveInF(file, smr, "Filter"))) return true;
+                }
+            }
+            if (form) {
+                const PdfObj* own = ResolveInF(file, xo, "Resources");
+                if (XoBrokenFilter(own ? own : res, seen, depth + 1)) return true;
+            }
+        }
+        return false;
+    }
+    bool PageHasUnsupportedImage(int idx) {
+        if (idx < 0 || idx >= (int)pages.size()) return false;
+        std::set<const void*> seen;
+        return XoBrokenFilter(pages[idx].resources, seen, 0);
+    }
 };
 
 } // namespace pdftext
@@ -2377,11 +2437,23 @@ if (!opened || index < 0 || index >= (int)pages.size()) throw PdfError();
 #ifndef DOCSY_PDFTEXT_TEST
 // -------------------------------------------------------------- Win32 glue --
 // The session is built once per open document, from the file docsy already
-// opened; it lives in DocState::ts and dies with the document.
-namespace pdftext { struct PdfTextSession { Session s; bool ready = false; }; }
+// opened; it lives in DocState::ts and dies with the document. The build
+// mutex is global and double-checked: the AI pumps reach this from their
+// background threads while the UI thread (renders, saves) reaches it too,
+// and two builders would leak one session and race the parser's caches.
+namespace pdftext { struct PdfTextSession {
+    Session s;
+    bool ready = false;
+    // per-page image-codec flags (TtPageFpu): -1 unknown, 0 engine-safe,
+    // 1 needs the PDFium fallback
+    std::vector<int8_t> fpu;
+}; }
+static std::mutex g_ttsBuildM;
 
 static pdftext::PdfTextSession* TtPdfSession(DocState& D) {
     if (D.ts) return D.ts;
+    std::lock_guard<std::mutex> lk(g_ttsBuildM);
+    if (D.ts) return D.ts;                       // a racing builder won
     pdftext::PdfTextSession* ts = new pdftext::PdfTextSession();
     D.ts = ts;
     try {
@@ -2390,8 +2462,12 @@ static pdftext::PdfTextSession* TtPdfSession(DocState& D) {
                                 nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (fh == INVALID_HANDLE_VALUE) throw std::runtime_error("open");
         LARGE_INTEGER fsz{};
+        // the FILE cap sits above the parser's per-stream limits: scanned books
+        // (the JPX/JBIG2 files the fallback exists for) run 100MB+ while their
+        // content streams stay small, and the same session feeds the image-codec
+        // scan, the text layer and the AI pumps
         if (!GetFileSizeEx(fh, &fsz) || fsz.QuadPart <= 0 ||
-            fsz.QuadPart > (LONGLONG)pdftext::MaximumSourceBytes) {
+            fsz.QuadPart > (LONGLONG)pdftext::MaximumFileBytes) {
             CloseHandle(fh);
             throw std::runtime_error("size");
         }
@@ -2411,6 +2487,25 @@ static pdftext::PdfTextSession* TtPdfSession(DocState& D) {
 static void TtPdfSessionDrop(DocState& D) {
     delete D.ts;
     D.ts = nullptr;
+}
+
+// The page's image codecs, cached per page (1 = the page draws a JPX/JBIG2
+// image the Windows engine cannot decode - the PDFium fallback renders it;
+// 0 = the engine reads it fine; -1 = unknown, no parser session for this
+// file). First call may build the text session: the file read and xref parse
+// the text path needs anyway, one time, shared.
+static int TtPageFpu(DocState& D, int i) {
+    pdftext::PdfTextSession* ts = TtPdfSession(D);
+    if (!ts->ready || i < 0 || i >= (int)ts->s.pages.size()) return -1;
+    // the walk resolves objects through the parser's own caches (the page
+    // builds memoize through the same maps), so it rides the parser's lock -
+    // the pumps' page builds and this scan never race the file
+    std::lock_guard<std::mutex> lk(ts->s.lock);
+    if ((int)ts->fpu.size() < (int)ts->s.pages.size())
+        ts->fpu.resize(ts->s.pages.size(), -1);
+    if (ts->fpu[i] < 0)
+        ts->fpu[i] = ts->s.PageHasUnsupportedImage(i) ? 1 : 0;
+    return ts->fpu[i];
 }
 // The page's engine text, or null when this page takes the OCR fallback
 // (encrypted, unreadable, scanned empty, or the extractor's page tree

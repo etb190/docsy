@@ -24,6 +24,15 @@ jobs:
       - name: Build
         shell: cmd
         run: rc /nologo /fo src\docsy.res src\docsy.rc && cl /nologo /std:c++20 /utf-8 /EHsc /O1 /GS- /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /I"wv2\build\native\include" /Fe:docsy.exe src\main.cpp src\docsy.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /FILEALIGN:512 /NODEFAULTLIB:libucrt.lib /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest /LIBPATH:"wv2\build\native\x64" WebView2LoaderStatic.lib advapi32.lib winmm.lib ucrt.lib > build.log 2>&1
+      - name: PDFium fallback renderer
+        shell: cmd
+        run: |
+          curl -sSL -o pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz
+          mkdir pdfium && tar -xf pdfium.tgz -C pdfium
+          copy /b pdfium\bin\pdfium.dll pdfium.dll >nul
+          copy /b pdfium\LICENSE pdfium-PDFIUM-LICENSE.txt >nul
+          if not exist pdfium.dll exit 1
+          if not exist pdfium-PDFIUM-LICENSE.txt exit 1
       - name: Show build log
         if: always()
         shell: bash
@@ -115,9 +124,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           files=""
-          for f in docsy.exe preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf extlog.txt exttest-ubolite.txt exttest-tampermonkey.txt extcheck.txt extcheck-mv2.txt; do if [ -s "$f" ]; then files="$files $f"; fi; done
+          for f in docsy.exe pdfium.dll pdfium-PDFIUM-LICENSE.txt preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf extlog.txt exttest-ubolite.txt exttest-tampermonkey.txt extcheck.txt extcheck-mv2.txt; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
-          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable single-file exe." > release.log 2>&1
+          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable exe + pdfium.dll (the fallback renderer for JPX/JBIG2 scans). Put both files in the same folder; without the dll the app still runs, scans the Windows engine cannot decode render as before." > release.log 2>&1
           echo "release exit: $?" >> release.log
           mkdir dist && cp $files release.log dist/ && cd dist
           git init -q -b dist && git config user.name ci && git config user.email ci@users.noreply.github.com

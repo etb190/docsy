@@ -222,6 +222,16 @@ static HBITMAP RenderCore(winrt::Windows::Data::Pdf::PdfDocument doc, int page, 
 static HBITMAP Render(DocState& D, int i, int w, int h) {
     int rot = D.prot.count(i) ? D.prot[i] : 0;
     int flip = D.pflip.count(i) ? D.pflip[i] : 0;
+    // the fallback first: a page whose images the engine cannot decode (the
+    // text parser flags JPX/JBIG2 scans) renders with PDFium - KillerPDF's
+    // engine reads those pages fine, and so does PDFium. The engine render
+    // stays underneath for every page the parser cleared or the dll misses.
+    bool used = false;
+    if (TtPageFpu(D, i) > 0) {
+        HBITMAP fb = FpuRenderPage(D.path, i, w, h, rot, flip, &used);
+        if (fb && used) return fb;
+        if (fb) DeleteObject(fb);
+    }
     return RenderCore(D.doc, i, w, h, rot, flip);
 }
 
@@ -247,6 +257,10 @@ struct RJob {
     int w, h, rot, flip;                    // rot: quarter-turns; flip: 1=X 2=Y (RenderCore's own bits)
     winrt::agile_ref<winrt::Windows::Data::Pdf::PdfDocument> doc;
     unsigned long long seq;
+    bool fpu;                               // the page's images ride a codec the
+                                            // engine cannot decode: the worker renders
+                                            // it with the PDFium fallback instead
+    std::wstring path;                      // the fallback's own file handle rides the path
 };
 struct RRes {
     int docId, page, kind;
@@ -278,7 +292,8 @@ static void RqEnqueue(DocState& D, int i, int kind, int w, int h, int rot, int f
     for (auto& r : g_rqDone)                            // a matching result is waiting to
         if (r.docId == D.id && r.page == i && r.kind == kind &&
             r.w == w && r.h == h && r.rot == rot && r.flip == flip) return;   // drain: no second render
-    g_rq.push_back(RJob{ D.id, i, kind, w, h, rot, flip, winrt::make_agile(D.doc), ++g_rqSeq });
+    g_rq.push_back(RJob{ D.id, i, kind, w, h, rot, flip, winrt::make_agile(D.doc), ++g_rqSeq,
+                         TtPageFpu(D, i) > 0, D.path });
     g_rqCv.notify_one();
 }
 static void RqPurgeThumbs(int docId, int first, int last) {
@@ -318,8 +333,17 @@ static DWORD WINAPI RqWorker(LPVOID) {
         HBITMAP b = nullptr;
         winrt::Windows::Graphics::Imaging::SoftwareBitmap soft{ nullptr };
         try {
-            if (j.kind == RJ_OCR) soft = RenderSoftDoc(j.doc, j.page, j.w, j.h, j.rot, j.flip);
-            else b = RenderCore(j.doc.get(), j.page, j.w, j.h, j.rot, j.flip);
+            if (j.kind == RJ_OCR) {
+                // the OCR flight's raster rides the same fallback: a flagged
+                // page must not feed the recognizer the engine's garbage
+                bool used = false;
+                if (j.fpu) soft = FpuRenderSoftPage(j.path, j.page, j.w, j.h, j.rot, j.flip, &used);
+                if (!used) soft = RenderSoftDoc(j.doc, j.page, j.w, j.h, j.rot, j.flip);
+            } else {
+                bool used = false;
+                if (j.fpu) b = FpuRenderPage(j.path, j.page, j.w, j.h, j.rot, j.flip, &used);
+                if (!used) b = RenderCore(j.doc.get(), j.page, j.w, j.h, j.rot, j.flip);
+            }
         } catch (...) {}
         {
             std::lock_guard<std::mutex> lk(g_rqM);
@@ -441,6 +465,14 @@ static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoftDoc(
 static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D, int i, int w, int h) {
     int rot = D.prot.count(i) ? D.prot[i] : 0;
     int flip = D.pflip.count(i) ? D.pflip[i] : 0;
+    // the OCR flight's raster follows the same fallback: garbage pixels would
+    // feed the recognizer garbage text, and that text poisons the selection
+    // layer, the AI index and the summarizer alike
+    bool used = false;
+    if (TtPageFpu(D, i) > 0) {
+        auto fb = FpuRenderSoftPage(D.path, i, w, h, rot, flip, &used);
+        if (used) return fb;
+    }
     return RenderSoftDoc(winrt::make_agile(D.doc), i, w, h, rot, flip);
 }
 

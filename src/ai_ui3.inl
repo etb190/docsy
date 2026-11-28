@@ -392,7 +392,21 @@ static void AiPanelMessage(const wchar_t* json) {
                 // reader that sees it whole.
                 std::vector<FRect> rects, rects2;
                 int navPage = -1, page2 = -1;
-                if (!src->quote.empty()) {
+                // the passages road first: the cited chunk's OWN words per page
+                // (the whole passage the answer drew from, word-sliced per page
+                // at resolve time and persisted with the transcript), matched
+                // against the page's live cells - word-accurate per-line rects
+                // over the FULL passage. The roads below stay for the model's
+                // precise short quotes and the transcripts that predate the
+                // passages field.
+                for (auto& pr : src->passages) {
+                    if (pr.second.empty() || pr.first < 0 || pr.first >= DVF().n) continue;
+                    std::vector<FRect> r;
+                    if (!AiQuotePageRects(DVF(), pr.first, pr.second, r) || r.empty()) continue;
+                    if (navPage < 0) { navPage = pr.first; rects = std::move(r); }
+                    else if (page2 < 0) { page2 = pr.first; rects2 = std::move(r); break; }
+                }
+                if (navPage < 0 && !src->quote.empty()) {
                     int nearPages[3] = { src->pageIndex, src->pageIndex + 1, src->pageIndex - 1 };
                     for (int pi : nearPages) {
                         if (pi < 0 || pi >= DVF().n) continue;
@@ -478,6 +492,15 @@ static void AiHandleEvent(AiEv* e) {
                             if (rq.t != 'a' || rq.a.size() < 4) continue;
                             src.rects.push_back({ (float)rq.a[0].d, (float)rq.a[1].d,
                                                   (float)rq.a[2].d, (float)rq.a[3].d });
+                        }
+                    // the chunk's own words per page: the click's primary needle
+                    // (the full passage, not the quote head)
+                    const crxk::J* pp = s.get("passages");
+                    if (pp && pp->t == 'a')
+                        for (auto& pq : pp->a) {
+                            if (pq.t != 'a' || pq.a.size() < 2) continue;
+                            if (pq.a[0].t != 'd' || pq.a[1].t != 's') continue;
+                            src.passages.push_back({ (int)pq.a[0].d, pq.a[1].s });
                         }
                     m.sources.push_back(std::move(src));
                 }

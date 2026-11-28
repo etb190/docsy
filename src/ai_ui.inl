@@ -339,6 +339,11 @@ static std::vector<AiSource> AiResolveDocSources(const std::vector<AiModelSource
                 }
         src.pageIndex = pageIdx;
         src.page = pageIdx + 1;
+        // the cited chunk's own words per page: the highlight's primary needle
+        // - the whole passage the answer drew from, sliced per page so a chunk
+        // that walks over a break lights both halves word-accurately
+        for (auto& sp : ch.pages)
+            src.passages.push_back({ sp.page, AiSliceWords(ch.text, sp.wordStart, sp.wordEnd) });
         out.push_back(std::move(src));
     }
     // marker backfill: the sidechat rides prose (no json grammar), and a
@@ -374,6 +379,11 @@ static std::vector<AiSource> AiResolveDocSources(const std::vector<AiModelSource
                 src.rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
                 break;
             }
+        // the chunk's own words per page, same as the structured path: the
+        // backfilled quote is the 120-byte head, and the head's words light
+        // only a fragment - the full passage is what the reader came for
+        for (auto& sp : ch.pages)
+            src.passages.push_back({ sp.page, AiSliceWords(ch.text, sp.wordStart, sp.wordEnd) });
         out.push_back(std::move(src));
     }
     return out;
@@ -669,6 +679,17 @@ static void AiRunReply(const std::string& key, const std::string& input) {
                 sb += "[" + std::to_string(r.x) + "," + std::to_string(r.y) + "," +
                       std::to_string(r.w) + "," + std::to_string(r.h) + "]";
             }
+            sb += "]";
+            // the cited chunk's own words per page: the click's primary
+            // highlight needle (the full passage, not the quote head) - rides
+            // the answer blob into the transcript and the persisted history
+            sb += ",\"passages\":[";
+            for (size_t k = 0; k < sources[i].passages.size(); k++) {
+                if (k) sb += ",";
+                sb += "[" + std::to_string(sources[i].passages[k].first) + "," +
+                      WxJsonStr(WxU(sources[i].passages[k].second)) + "]";
+            }
+            sb += "]";
             sb += "]}";
         }
         sb += "]";

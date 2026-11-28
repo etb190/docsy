@@ -279,6 +279,37 @@ int main(int argc, char** argv) {
         }
     }
 
+    printf("- broken image codecs (the Windows engine's decode gaps)\n");
+    {
+        // broken_codecs.pdf: page 1 references a JPXDecode image, page 2
+        // reaches a JBIG2Decode image through a form XObject, page 3 stays on
+        // DCTDecode. The render path hands the first two to the PDFium
+        // fallback (pdf_fpu.inl) and keeps the third on Windows.Data.Pdf.
+        FILE* f = fopen((dir + "/broken_codecs.pdf").c_str(), "rb");
+        Expect(f != nullptr, "open broken_codecs.pdf");
+        if (f) {
+            std::vector<uint8_t> bytes;
+            uint8_t buf[65536];
+            size_t got;
+            while ((got = fread(buf, 1, sizeof buf, f)) > 0) bytes.insert(bytes.end(), buf, buf + got);
+            fclose(f);
+            pdftext::Session s;
+            Expect(s.Open(std::move(bytes)), "broken_codecs.pdf parses");
+            Expect((int)s.pages.size() == 3, "three pages found");
+            if ((int)s.pages.size() == 3) {
+                Expect(s.PageHasUnsupportedImage(0), "the JPXDecode page is flagged");
+                Expect(s.PageHasUnsupportedImage(1), "the form's JBIG2Decode image is flagged");
+                Expect(!s.PageHasUnsupportedImage(2), "the DCTDecode page stays clear");
+                Expect(!s.PageHasUnsupportedImage(-1) && !s.PageHasUnsupportedImage(99),
+                       "out-of-range pages answer clear, never crash");
+                // the scan is stable across repeats (the cache answers, no
+                // stale pointer walks)
+                bool again = s.PageHasUnsupportedImage(0);
+                Expect(again, "a repeat scan answers the same");
+            }
+        }
+    }
+
     printf("- GroupWords (KillerPDF's word segmentation)\n");
     {
         // A letter with its baseline running from (sx,700) to (ex,700): the

@@ -237,6 +237,33 @@ def make_times(b):
     b.add(6, stream_obj("", content))
     return b.build(1)
 
+def make_broken_codecs(b):
+    # The image-codec scan's fixtures: page 1 references a JPXDecode
+    # (JPEG2000) image, page 2 reaches a JBIG2Decode image through a form
+    # XObject, page 3 stays on DCTDecode - the codec Windows.Data.Pdf reads
+    # fine. The images are stubs: the scan reads only the resource dicts,
+    # never the pixels.
+    b.add(1, "<< /Type /Catalog /Pages 2 0 R >>")
+    b.add(2, "<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>")
+    b.add(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+             "/Resources << /XObject << /Im0 6 0 R >> >> /Contents 9 0 R >>")
+    b.add(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+             "/Resources << /XObject << /Fm0 7 0 R >> >> /Contents 10 0 R >>")
+    b.add(5, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+             "/Resources << /XObject << /Im1 8 0 R >> >> /Contents 11 0 R >>")
+    b.add(6, stream_obj("/Type /XObject /Subtype /Image /Width 8 /Height 8 "
+                        "/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode", b"\x00" * 8))
+    b.add(7, stream_obj("/Type /XObject /Subtype /Form /BBox [0 0 200 60] "
+                        "/Resources << /XObject << /Im0 12 0 R >> >>", b"q 200 0 0 60 0 0 cm /Im0 Do Q\n"))
+    b.add(8, stream_obj("/Type /XObject /Subtype /Image /Width 8 /Height 8 "
+                        "/ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode", b"\xff\xd8stub"))
+    b.add(9, stream_obj("", b"q 100 0 0 100 72 700 cm /Im0 Do Q\n"))
+    b.add(10, stream_obj("", b"q 1 0 0 1 72 600 cm /Fm0 Do Q\n"))
+    b.add(11, stream_obj("", b"q 100 0 0 100 72 500 cm /Im1 Do Q\n"))
+    b.add(12, stream_obj("/Type /XObject /Subtype /Image /Width 8 /Height 8 "
+                         "/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /JBIG2Decode", b"\x00" * 8))
+    return b.build(1)
+
 MAKERS = [
     ("simple_winansi.pdf", make_simple_winansi),
     ("differences.pdf", make_differences),
@@ -247,6 +274,7 @@ MAKERS = [
     ("actualtext.pdf", make_actualtext),
     ("rotated.pdf", make_rotated),
     ("timestest.pdf", make_times),
+    ("broken_codecs.pdf", make_broken_codecs),
 ]
 
 

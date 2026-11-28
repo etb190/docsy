@@ -42,6 +42,12 @@ struct AiSource {
     int location = AQL_UNLOCATED;
     // resolved geometry: the page's rects in page DIPs (for the highlight)
     std::vector<FRect> rects;
+    // the cited chunk's own words per page (0-based page -> the chunk's word
+    // slice on that page): the highlight's primary needle - the WHOLE passage
+    // the answer drew from, where the quote field carries only the chunk's
+    // 120-byte head. Rides the answer blob and the persisted transcript, so
+    // reloaded conversations' chips light their full passages too.
+    std::vector<std::pair<int, std::string>> passages;
 };
 struct AiChatMsg {
     int role = 0;                // 0 user, 1 assistant
@@ -239,6 +245,35 @@ static AiQuoteHit AiLocateInText(const std::string& chunkText, const std::string
     AiWordize(chunkText, cw);
     AiWordize(quote, nw);
     return AiLocateWords(cw, nw, startOut, endOut);
+}
+// The cited chunk's own words on one page. The chunk's text is its words
+// joined with single spaces (the chunker's Flush) and a page word never
+// carries a space, so the split below walks the chunker's own word sequence
+// one for one. Each word rides the wordizer on its own - re-wordizing the
+// joined text would drift the indices wherever a word's punctuation vanishes
+// (AiWordize sheds ASCII punctuation and the Arabic split marks: a "-" word
+// yields nothing, "12:30" yields "1230") - and empty tokens drop out of the
+// needle while the chunker's indices stay exact. The join rebuilds a
+// quote-shaped needle the page matcher (AiLocateWords over the page's live
+// cells) reads like any other quote - the WHOLE passage the answer drew from,
+// not the 120-byte head the quote field carries.
+static std::string AiSliceWords(const std::string& chunkText, long long wordStart, long long wordEnd) {
+    if (wordEnd <= 0 || chunkText.empty()) return "";
+    std::string out;
+    long long idx = 0;
+    size_t i = 0, n = chunkText.size();
+    while (i < n && idx < wordEnd) {
+        size_t j = chunkText.find(' ', i);
+        if (j == std::string::npos) j = n;
+        if (idx >= wordStart && j > i) {
+            std::vector<std::string> w;
+            AiWordize(chunkText.substr(i, j - i), w);
+            for (auto& t : w) { if (!out.empty()) out += ' '; out += t; }
+        }
+        idx++;
+        i = j + 1;
+    }
+    return out;
 }
 // PassageQuoteValidator: >= 8 normalized letters, else unverified. The join
 // rides the Arabic skeleton - a decorated chunk against the model's plain
@@ -1021,6 +1056,15 @@ static void AiHistLoad() {
                                 if (rq.t != 'a' || rq.a.size() < 4) continue;
                                 src.rects.push_back({ (float)rq.a[0].d, (float)rq.a[1].d,
                                                       (float)rq.a[2].d, (float)rq.a[3].d });
+                            }
+                        // the chunk's own words per page: a reloaded answer's
+                        // chips light their full passages, not the quote head
+                        const crxk::J* pp = e.get("passages");
+                        if (pp && pp->t == 'a')
+                            for (auto& pq : pp->a) {
+                                if (pq.t != 'a' || pq.a.size() < 2) continue;
+                                if (pq.a[0].t != 'd' || pq.a[1].t != 's') continue;
+                                src.passages.push_back({ (int)pq.a[0].d, pq.a[1].s });
                             }
                         msg.sources.push_back(std::move(src));
                     }
