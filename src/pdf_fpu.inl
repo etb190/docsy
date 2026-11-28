@@ -104,8 +104,8 @@ static bool FpuEndsMatch(const void* data, DWORD len, const std::wstring& path) 
         }
         return hv;
     };
-    unsigned long long a = fnv(0, min((long long)len, 65536));
-    unsigned long long b = fnv(max(0, (long long)len - 65536), min((long long)len, 65536));
+    unsigned long long a = fnv(0, min((long long)len, 65536LL));
+    unsigned long long b = fnv(max(0LL, (long long)len - 65536), min((long long)len, 65536LL));
     CloseHandle(h);
     const BYTE* p = (const BYTE*)data;
     auto finv = [&](DWORD off, DWORD cnt) {
@@ -113,8 +113,8 @@ static bool FpuEndsMatch(const void* data, DWORD len, const std::wstring& path) 
         for (DWORD k = 0; k < cnt; k++) { hv ^= p[off + k]; hv *= 1099511628211ULL; }
         return hv;
     };
-    return a == finv(0, min((DWORD)len, 65536u)) &&
-           b == finv(len - min((DWORD)len, 65536u), min((DWORD)len, 65536u));
+    DWORD tail = min((DWORD)len, (DWORD)65536);
+    return a == finv(0, tail) && b == finv(len - tail, tail);
 }
 
 static HMODULE FpuEmbedded() {
@@ -141,7 +141,7 @@ static HMODULE FpuEmbedded() {
                                                                 // an older copy beats none
     DWORD wrote = 0, off = 0;
     const BYTE* p = (const BYTE*)data;
-    while (off < len && WriteFile(h, p + off, min(len - off, 0x100000u), &wrote, nullptr) && wrote)
+    while (off < len && WriteFile(h, p + off, min(len - off, (DWORD)0x100000), &wrote, nullptr) && wrote)
         off += wrote;
     CloseHandle(h);
     if (off != len) { DeleteFileW(tmp); return LoadLibraryW(path); }
