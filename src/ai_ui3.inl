@@ -651,8 +651,11 @@ static void AiHandleEvent(AiEv* e) {
                 const crxk::J* tx = snap.get("text");
                 if (tx && tx->t == 's') pageText = WxW(tx->s);
             }
-            int words = 1000;
-            std::string lang = "English", genre = "nonfiction_classic";
+            // the start message's own dropdowns, parked when it fired - the
+            // old road hardcoded English/1000/nonfiction here and the web
+            // card's selects never reached the prompt
+            int words = g_sumWebWords;
+            std::string lang = g_sumWebLang, genre = g_sumWebGenre;
             std::string docId = "web_" + AiSha256Hex16(pageText);
             unsigned long long run = g_sumRun[SUM_WEB];   // this thread's owner token
             auto cancel = g_sumCancel[SUM_WEB];           // this run's own stop flag

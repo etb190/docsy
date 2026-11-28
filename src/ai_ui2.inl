@@ -506,8 +506,15 @@ static void AiRangeTick() {
                         {
                             std::string ph = std::to_string(words);
                             size_t pos;
+                            // the same belt AiSumRun wears: a stale store body without
+                            // {language} still answers to the selected language
+                            bool wired = sys.find("{language}") != std::string::npos;
                             while ((pos = sys.find("{words}")) != std::string::npos) sys.replace(pos, 7, ph);
                             while ((pos = sys.find("{language}")) != std::string::npos) sys.replace(pos, 10, lang);
+                            if (!wired)
+                                sys += "\n\nOUTPUT LANGUAGE: write every sentence of the summary in " + lang +
+                                       ". The one exception is passages the text itself quotes or prints in another "
+                                       "language: copy those in their original language exactly as printed.";
                         }
                         int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
                         if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
@@ -2697,8 +2704,21 @@ static void AiSumRun(unsigned long long gen, unsigned long long run,
     {
         std::string ph = std::to_string(words);
         size_t p;
+        // the language must ride the run, not the machine's deck state: the
+        // store (%LocalAppData%\docsy\AI\prompts.json) overrides the shipped
+        // rows by id, so a body from before the OUTPUT LANGUAGE rule carries
+        // no {language} to substitute - the substitution below silently
+        // no-ops and the model follows the pages' own tongue no matter what
+        // the summary window selected. A body that wires {language} in keeps
+        // its own wording; a body that does not gets the rule appended here,
+        // so the dropdown speaks on every machine, store fresh or stale.
+        bool wired = sys.find("{language}") != std::string::npos;
         while ((p = sys.find("{words}")) != std::string::npos) sys.replace(p, 7, ph);
         while ((p = sys.find("{language}")) != std::string::npos) sys.replace(p, 10, lang);
+        if (!wired)
+            sys += "\n\nOUTPUT LANGUAGE: write every sentence of the summary in " + lang +
+                   ". The one exception is passages the text itself quotes or prints in another "
+                   "language: copy those in their original language exactly as printed.";
     }
     int budget = max(cfg.maxTokens, max(10000, 3000 + 4 * words));
     if (!AiIsLocalHost(WxU(cfg.baseUrl)) && budget > 16384) budget = 16384;
@@ -2836,9 +2856,15 @@ static void SumPanelMessage(const wchar_t* json, int seat) {
             g_range.genre = genre;
             g_range.bypass = bypass;
         } else {
-            // the live page: one extraction, then the thread. The digest key
-            // rides the tab's address, so a reopen of the same page lands the
-            // saved digest without a rerun.
+            // the live page: one extraction, then the thread. The dropdowns
+            // ride the seat's parking spots - the landing below reads them
+            // (the old road dropped them here and summarized every page
+            // hardcoded English/1000/nonfiction no matter what was selected).
+            // The digest key rides the tab's address, so a reopen of the same
+            // page lands the saved digest without a rerun.
+            g_sumWebWords = words;
+            g_sumWebLang = lang;
+            g_sumWebGenre = genre;
             g_sumWebDocId = SumWebDocKey();
             g_sumWebPending = gen;
             AiWebExtract(gen);

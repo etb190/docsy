@@ -1184,6 +1184,31 @@ static const wchar_t* const TbGlyph[TB_COUNT] = {
     L"", L"\uED62", L"\uE721"
 };   // Transform carries its composed icon, drawn in BarDraw
 
+// One atomic face flip. A mode switch (Web / Editor / AI dock) moves, shows
+// and hides a dozen child windows plus two WebView2 controllers; unlocked,
+// each lands on the frame its call happens in - the sidebar pops, then the
+// toolbars, then the view re-flows, then the panel re-seats - and the eye
+// reads the waves as "every view changes at its own speed". Inside the lock
+// the whole flip accumulates one invalidation and lands as a single repaint:
+// every native surface appears in its final geometry in the same frame, and
+// the webviews compose once, where they ended up. The depth counter lets a
+// flip nest another (EditorToggle hands off to WebToggle) - the innermost
+// guard no-ops, the outermost owns the lock and the forced repaint.
+static int g_flipDepth = 0;
+struct FlipLock {
+    HWND w;
+    explicit FlipLock(HWND wnd) : w(wnd) {
+        if (++g_flipDepth == 1 && w) LockWindowUpdate(w);
+    }
+    ~FlipLock() {
+        if (g_flipDepth > 0 && --g_flipDepth == 0 && w) {
+            UnlockWindowUpdate(w);
+            UpdateWindow(w);          // the flip's one paint, now - not on the
+                                      // queue's next idle beat
+        }
+    }
+};
+
 // ToolbarAvailability: Open arms always (KillerPDF's XAML leaves it enabled
 // with no document), Close/Save/tools/Transform/Search arm with a document;
 // Clear All arms when there is anything to clear. Narrow windows shed

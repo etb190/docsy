@@ -2242,6 +2242,9 @@ static void WebResizeDeb() {                       // a resize re-captures the v
 static void WebToggle(bool on) {
     if (on == g_webOn) return;
     if (on && g_sync) return;                      // the CI shots never browse
+    FlipLock flip(g.main);                         // the whole flip lands as ONE repaint:
+                                                   // no staged waves of sidebar/toolbars/
+                                                   // view/panel each popping on its own frame
     if (on && g_editOn) EditorToggle(false);
     g_webOn = on;
     // (the panel rebind fires BELOW, after the web side actually exists: the

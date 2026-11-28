@@ -30,12 +30,13 @@ static int PaneW(bool b) { return b ? max(0, g.cw - g.splitX - SplitHalf())
 static int PaneX0(bool b) { return b ? g.splitX + SplitHalf() : 0; }  // the pass's view x
 static int CardX(bool b) { return b ? (int)(4 * g.dpi) : 0; }         // the card inside the pass
 static int CardW(bool b) {
-    // the card's right edge keeps the classic 8px window gutter - EXCEPT when
-    // the AI sidechat is docked: the pane's own 1px border is the seam there,
-    // the panel wears none (the gutter's pixels go to the document, the two
-    // borders the reader wore against the chat never stack again)
-    if (!g.split) return max(0, g.cw - (g_aiDockW > 0 ? 0 : (int)(8 * g.dpi)));
-    return b ? max(0, PaneW(true) - (g_aiDockW > 0 ? 4 : 12) * (int)g.dpi)
+    // the card's right edge keeps the classic 8px window gutter in every mode
+    // - the AI sidechat included now: the gutter's pixels are the field the
+    // right corners and ring draw into, and the panel's left border sits
+    // beyond the gutter (the seam lives in the panel's strip - LayoutMain
+    // widens the view by it - so the pages never pay for the corners)
+    if (!g.split) return max(0, g.cw - (int)(8 * g.dpi));
+    return b ? max(0, PaneW(true) - (int)(12 * g.dpi))
              : max(0, PaneW(false) - (int)(4 * g.dpi));
 }
 
@@ -210,12 +211,10 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     // right edge keeps the window gutter; pane A and the unsplit card sit at 0
     int cx = b ? (int)(4 * g.dpi) : 0;
     int cw = CardW(b);                       // the card's own width inside this pass
-    // the AI sidechat docked flush: the card that touches it grows its RIM 3px
-    // past the client - ring and shadow clip away, the canvas runs to the seam,
-    // and the chat's side wears nothing. Page layout keeps `cw`: the extension
-    // is the rim's alone, never the pages'.
-    bool rimRight = ((g.split != 0) == (b != 0)) && g_aiDockW > 0;
-    int cwRim = cw + (rimRight ? 3 * (int)g.dpi : 0);
+    // the right edge carries the same corners, ring and shadow falloff the
+    // left one always has: the AI panel's border sits beyond the gutter now
+    // (the seam rides the panel's strip), so nothing clips the card's rim
+    // away and the chat's side meets a finished corner like any other edge
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
     // the DIB's left edge sits at the pane's view x, so the grain phase shifts
@@ -226,13 +225,13 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     RECT fr{ 0, 0, w, h };                                // the window's grain phase,
     FillRect(bdc, &fr, GrainBrush(1));                    // like every sibling pane
     if (card) {
-        CardShadowStrip(bits, w, h, cx, cx + cwRim, rad, ty);
+        CardShadowStrip(bits, w, h, cx, cx + cw, rad, ty);
         Gdiplus::Graphics gs(bdc);
         gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         // the canvas interior, half a pixel in: GDI+ centers pixels on integer
         // coordinates, so the path edge must sit at the boundary between the
         // ring's outermost pixel and the canvas's first one to fill it whole
-        Gdiplus::GraphicsPath* inner = CardPath((float)cx + 0.5f, (float)ty + 0.5f, (float)cwRim - 1,
+        Gdiplus::GraphicsPath* inner = CardPath((float)cx + 0.5f, (float)ty + 0.5f, (float)cw - 1,
                                                 (float)h - 1 - ty, (float)rad - 1, 0);
         if (Gdiplus::TextureBrush* c = GrainTex(0)) {     // the canvas, phased like GDI's
             c->ResetTransform();
@@ -245,7 +244,7 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
             gs.FillPath(&cb, inner);
         }
         delete inner;
-        CardRingBake(bits, w, h, cwRim, rad, cx, ty);     // the #555 ring, exact per pixel
+        CardRingBake(bits, w, h, cw, rad, cx, ty);        // the #555 ring, exact per pixel
     }
     SelectObject(bdc, ob);
     DeleteDC(bdc);

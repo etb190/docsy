@@ -136,6 +136,12 @@ static unsigned long long g_sumRun[SUM_SEATS] = {};  // bumped by every accepted
 static unsigned long long g_sumWebPending = 0;       // the web seat waiting on its extraction
 static std::string g_sumWebDocId;                    // the web seat's current page key: the
                                                      // digest settings ride the page's url
+// the web seat's own dropdown ride: the start message's words/lang/genre are
+// parked here for the extraction's landing - the old road dropped them and
+// the thread below ran hardcoded English/1000/nonfiction no matter what the
+// web card's selects said
+static int g_sumWebWords = 1000;
+static std::string g_sumWebLang = "English", g_sumWebGenre = "nonfiction_classic";
 static std::shared_ptr<std::atomic<bool>> g_sumCancel[SUM_SEATS];
 static bool g_sumBusy[SUM_SEATS] = {};
 static std::wstring g_sumOwnerPanePath;  // the pane whose pages the window follows
@@ -968,7 +974,15 @@ static void AiOverlayLayout() {
     ScreenToClient(g.main, ((POINT*)&vr) + 1);
     RECT b{ 0, 0, 0, 0 };
     bool seat = g_aiDockW > 0 && vr.right > 0;
-    if (seat) b = { vr.right, vr.top, vr.right + g_aiDockW, vr.bottom };
+    if (seat) {
+        // the right edge pins to the window, not to vr.right + dockW: the
+        // view's own width grew by the card-gutter seam (LayoutMain), so the
+        // panel's strip now carries those pixels - its left border pushes
+        // right of the card's gutter, the page card's rounded corners draw
+        // into the field, and the panel ends exactly at the window edge
+        RECT mr; GetClientRect(g.main, &mr);
+        b = { vr.right, vr.top, mr.right, vr.bottom };
+    }
     // Hide before a move: a visible strip clips its own old rect out of every
     // repaint around it, and a moved strip would leave those holes stale
     // forever. A resize-drag only reseats when the strip actually moved, so
@@ -981,6 +995,9 @@ static void AiOverlayLayout() {
     g_aiCtr->put_IsVisible(g_aiOn && seat ? TRUE : FALSE);
 }
 static void AiChatToggle() {
+    FlipLock flip(g.main);                         // the dock's show/resize lands as ONE
+                                                   // repaint: the panel and the re-flowed
+                                                   // page change in the same frame
     g_aiOn = !g_aiOn;
     AiLoadSettings();
     // the workers' events ride g.main's own queue (ai_evt.inl) - no message-only

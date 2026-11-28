@@ -545,6 +545,9 @@ static void EditorEnsureInit() {
 
 static void EditorToggle(bool on) {
     if (on == g_editOn) return;
+    FlipLock flip(g.main);                         // the whole flip lands as ONE repaint -
+                                                   // the reader's chrome and the editor
+                                                   // surface swap in the same frame
     g_editOn = on;
     AiModeChanged();                               // the panel rebinds: editor <-> reader
     if (on) {

@@ -46,7 +46,13 @@ static void LayoutMain() {
         AiOverlayLayout();                   // hide/seat the strip before any repaint:
                                              // a visible strip clips its own old rect out
                                              // of the handout below and leaves stale holes
-        int vw = max(0, w - sw - rw - aw);
+        // the card's classic gutter (the right corners' and ring's room) comes
+        // out of the AI panel's strip, never out of the card: the view widens
+        // by the seam and the panel's left border pushes right by it, so the
+        // pages keep their exact width while the right corners draw like the
+        // left ones always have
+        int seam = aw > 0 ? (int)(8 * g.dpi) : 0;
+        int vw = max(0, w - sw - rw - aw + seam);
         if (g_etool) MoveWindow(g_etool, 0, cap0, w, th, TRUE);
         if (g.side) {
             MoveWindow(g.side, 0, cap0 + th, sw, ch, TRUE);
@@ -102,6 +108,9 @@ static void LayoutMain() {
     int aw = (g_aiOn && !g.full) ? AiDockWidth(w - sw - rw) : 0;   // the AI column
     g_aiDockW = aw;
     AiOverlayLayout();                       // hide/seat the strip before any repaint
+    // the seam: the card's gutter rides the panel's strip, never the card
+    // (see the editor branch above)
+    int seam = aw > 0 ? (int)(8 * g.dpi) : 0;
     int tl = WEBTOOLH();                        // browser mode: the reader's toolbar row, one button
     int cap = cap0 + tl;                        // everything below sits under caption + toolbar
     int tb = g_webOn ? WebBandH() : TBH();      // browser mode: the tab band - there only
@@ -132,7 +141,7 @@ static void LayoutMain() {
         MoveWindow(g.rail, sw, cap + ws_ + tb, rw, ch, TRUE);   // always there but in full screen
         ShowWindow(g.rail, rw > 0 ? SW_SHOWNOACTIVATE : SW_HIDE);
     }
-    MoveWindow(g.view, sw + rw, cap + ws_ + tb, max(0, w - sw - rw - aw), ch, TRUE);
+    MoveWindow(g.view, sw + rw, cap + ws_ + tb, max(0, w - sw - rw - aw + seam), ch, TRUE);
     if (g.status) MoveWindow(g.status, 0, cap + ws_ + tb + ch, w, sh, TRUE);
     // Hand the vacated strips out. A moved child leaves up to four strips
     // (old ∖ new); each is intersected with every sibling's NEW rect - that
