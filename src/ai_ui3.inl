@@ -369,41 +369,64 @@ static void AiPanelMessage(const wchar_t* json) {
                 AiWebCiteJump(WxW(src->quote));
             } else if (st->mode == 0) {
                 std::lock_guard<std::mutex> lk(g_aiMtx);
-                // the rects were not persisted: re-locate against the live index
-                if (!g_aiIndexReady || src->pageIndex < 0) {
+                // the cited page steers; the index only feeds the fallback
+                if (src->pageIndex < 0) {
                     g.statusHoldText = L"The quoted passage could not be found in this document.";
                     g.statusHoldUntil = GetTickCount64() + 4000;
                     StatusRepaint();
                     return;
                 }
-                // re-locate the quote against the live index: the verified span's
-                // page box when it still lands, else the cited page's own box
+                // the word-accurate road first: the quote's own words against
+                // the page's live text layer, one slim rect per line of quoted
+                // words. The old road laid the cited chunk's whole page-span
+                // box - a blob a quarter-page wide that could miss the quoted
+                // words entirely and never tracked a wrapped passage. The
+                // cited page goes first, then its neighbors: a passage walks
+                // over a page break and the chunk's attribution lands where
+                // the chunk starts. Runs even while the index rebuilds - the
+                // page's text is already there.
                 std::vector<FRect> rects;
-                bool found = false;
-                if (src->location != AQL_UNLOCATED && !src->quote.empty()) {
-                    for (auto& ch : g_aiIndex.chunks) {
-                        for (auto& sp : ch.pages) {
-                            if (sp.page != src->pageIndex) continue;
-                            size_t ws, we;
-                            if (AiLocateInText(ch.text, src->quote, ws, we) != AQH_NONE &&
-                                ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
-                                rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (found) break;
+                int navPage = -1;
+                if (!src->quote.empty()) {
+                    int nearPages[3] = { src->pageIndex, src->pageIndex + 1, src->pageIndex - 1 };
+                    for (int pi : nearPages) {
+                        if (pi < 0 || pi >= DVF().n) continue;
+                        if (AiQuotePageRects(DVF(), pi, src->quote, rects)) { navPage = pi; break; }
                     }
                 }
-                if (!found)
-                    for (auto& ch : g_aiIndex.chunks)
-                        for (auto& sp : ch.pages)
-                            if (sp.page == src->pageIndex) {
-                                rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
-                                found = true;
-                                break;
+                // the chunk's span box stays as the fallback for a page the
+                // text layer cannot carry (a scan the engine cannot read, an
+                // OCR-only page still in flight): the verified span's page box
+                // when it still lands, else the cited page's own box
+                if (navPage < 0 && g_aiIndexReady) {
+                    bool found = false;
+                    if (src->location != AQL_UNLOCATED && !src->quote.empty()) {
+                        for (auto& ch : g_aiIndex.chunks) {
+                            for (auto& sp : ch.pages) {
+                                if (sp.page != src->pageIndex) continue;
+                                size_t ws, we;
+                                if (AiLocateInText(ch.text, src->quote, ws, we) != AQH_NONE &&
+                                    ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
+                                    rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                                    found = true;
+                                    break;
+                                }
                             }
-                AiNavigateToSource(src->pageIndex, rects);
+                            if (found) break;
+                        }
+                    }
+                    if (!found)
+                        for (auto& ch : g_aiIndex.chunks)
+                            for (auto& sp : ch.pages)
+                                if (sp.page == src->pageIndex) {
+                                    rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                                    found = true;
+                                    break;
+                                }
+                    if (found) navPage = src->pageIndex;
+                }
+                if (navPage < 0) navPage = src->pageIndex;   // the page lands, no highlight
+                AiNavigateToSource(navPage, rects);
             }
         }
     }

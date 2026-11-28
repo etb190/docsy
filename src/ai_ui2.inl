@@ -1628,6 +1628,94 @@ static void NotesPanelMessage(const wchar_t* json) {
     }
 }
 
+// ---- the citation's word-accurate highlight ----
+// (pure core: scripts/quote_rect_check.cpp compiles the block between this
+// marker and the Windows wrapper below on Linux)
+//
+// The old cite highlight laid ONE rectangle: the cited chunk's page-span union
+// box - every word the chunk carries on that page, not the words the quote
+// carries. A chunk is a ~1200-character stretch, so the box could cover half a
+// page, sit on the wrong column, and still miss a passage that wraps: "a
+// square, some not even on words where there is relevant stuff but not all of
+// it". This road highlights the QUOTE's own words. The quote tokenizes with
+// the index's wordizer (AiWordize - the exact normalization the chunk match
+// ran), the page's cells ride grouped into words in reading order (both the
+// native road's letter cells and the OCR road's sliced letter cells renumber
+// into word ordinals under TtLines), and the same two passes the chunk match
+// runs - the exact consecutive run, else the in-order subsequence - find the
+// quoted words. TtRects turns the matched cell span into one slim rect per
+// line, first quoted word to last: the passage itself, line by line, not its
+// neighborhood.
+static bool AiQuoteRects(const TxtPage& pt, const std::string& quote,
+                         std::vector<FRect>& out) {
+    out.clear();
+    if (quote.empty() || pt.cells.empty() || pt.lines.empty()) return false;
+    std::vector<std::string> needle;
+    AiWordize(quote, needle);
+    if (needle.empty()) return false;
+    // the page's words in reading order: consecutive cells of one word ordinal
+    // join with no separator, and every token the wordizer cuts out of the
+    // joined text keeps the word's whole cell span, so a match names complete
+    // words (a quote word that hits the fragment before a glued Arabic comma
+    // still lights the word it lives on)
+    std::vector<std::string> toks;   toks.reserve(pt.cells.size());
+    std::vector<int> tokA, tokB;     tokA.reserve(pt.cells.size());
+                                     tokB.reserve(pt.cells.size());
+    for (int i = 0; i < (int)pt.cells.size(); ) {
+        int w = pt.cells[i].word;
+        std::string joined;
+        int j = i;
+        for (; j < (int)pt.cells.size() && pt.cells[j].word == w; j++)
+            joined += WxU(pt.cells[j].text);
+        std::vector<std::string> cw;
+        AiWordize(joined, cw);
+        for (auto& t : cw) {
+            toks.push_back(std::move(t));
+            tokA.push_back(i);
+            tokB.push_back(j - 1);
+        }
+        i = j;
+    }
+    if (toks.empty()) return false;
+    // pass A: the exact consecutive run
+    long long firstTok = -1, lastTok = -1;
+    for (size_t a = 0; a + needle.size() <= toks.size(); a++) {
+        bool eq = true;
+        for (size_t k = 0; k < needle.size(); k++)
+            if (toks[a + k] != needle[k]) { eq = false; break; }
+        if (eq) { firstTok = (long long)a; lastTok = (long long)(a + needle.size() - 1); break; }
+    }
+    // pass B: the quote as an in-order subsequence of the page's words - the
+    // chunk locator's own second pass, honored here the same way (a model
+    // quote that reshapes a little still finds its passage)
+    if (firstTok < 0 && needle.size() >= 3) {
+        size_t need = max<size_t>(3, (size_t)ceil(0.8 * (double)needle.size()));
+        size_t k = 0, matched = 0;
+        for (size_t a = 0; a < toks.size() && k < needle.size(); a++) {
+            if (toks[a] == needle[k]) {
+                if (firstTok < 0) firstTok = (long long)a;
+                lastTok = (long long)a;
+                matched++; k++;
+            }
+        }
+        if (k != needle.size() || matched < need) { firstTok = lastTok = -1; }
+    }
+    if (firstTok < 0 || lastTok < 0) return false;
+    int s = tokA[(size_t)firstTok], e = tokB[(size_t)lastTok] + 1;
+    if (e <= s || e > (int)pt.cells.size()) return false;
+    TtRects(pt, s, e, out);
+    return !out.empty();
+}
+// the Windows half: the page's live text layer (TtFor - a parked shell rebuilds
+// here, on this touch) feeding the pure matcher above
+static bool AiQuotePageRects(DocState& D, int pageIndex, const std::string& quote,
+                             std::vector<FRect>& out) {
+    if (pageIndex < 0 || pageIndex >= D.n || quote.empty()) return false;
+    TxtPage* tp = TtFor(D, pageIndex);
+    if (!tp) return false;
+    return AiQuoteRects(*tp, quote, out);
+}
+
 // ---- the citation jump: the PDF page + the highlight ----
 struct AiHighlight {
     int gen = 0;
@@ -2286,6 +2374,39 @@ static void SumSearchReveal() {
         SumOpenSeat(SUM_WEB);
     }
 }
+// the stage flip's own fold: each seat belongs to one face of the app - the
+// doc seat to the reader, the web seat to the browser. Switching faces
+// (WebToggle / EditorToggle) parks the seat whose face went under and MARKS
+// it; the face's return brings the marked seat back exactly as it stood when
+// the user left. The mark is the stage's own, a third road beside the
+// per-document stand and the word-search mark: a card standing at the flip
+// comes back at the return even though the park itself cleared the current
+// document's stand (that clear exists so a tab that never opened a card stays
+// folded - the stage mark keeps the STAGE-level memory), and a card the user
+// folded themselves never sets it, so it stays folded.
+static bool g_sumStageHide[SUM_SEATS] = {};
+static void SumStageSync() {
+    bool docStage = !g_webOn && !g_editOn;     // the reader's face
+    bool webStage = g_webOn;                   // the browser's face
+    if (!docStage) {
+        if (g_sumShown[SUM_DOC]) {
+            g_sumStageHide[SUM_DOC] = true;
+            SumHideSeat(SUM_DOC, false);
+        }
+    } else if (g_sumStageHide[SUM_DOC]) {
+        g_sumStageHide[SUM_DOC] = false;
+        SumOpenSeat(SUM_DOC);
+    }
+    if (!webStage) {
+        if (g_sumShown[SUM_WEB]) {
+            g_sumStageHide[SUM_WEB] = true;
+            SumHideSeat(SUM_WEB, false);
+        }
+    } else if (g_sumStageHide[SUM_WEB]) {
+        g_sumStageHide[SUM_WEB] = false;
+        SumOpenSeat(SUM_WEB);
+    }
+}
 // the session's last word: the navigator left standing comes back standing.
 // The open races the prewarm build - at two and a half seconds the controller
 // is still mid-flight and SumOpenSeat's show block would be skipped - so the
@@ -2297,13 +2418,17 @@ static void SumRestoreOpen() {
 }
 // the restore tick: every 400 ms it waits out the prewarm build, then opens
 // the standing card; a manual open before then (or fifteen misses - the
-// runtime declared absent) takes the timer down
+// runtime declared absent) takes the timer down. The doc seat's card belongs
+// to the reader's face: a session that last lived on the browser or the
+// editor holds the card until the reader is the stage again - the restore
+// never pops it over another face.
 static void SumRestoreTick() {
     static int tries = 0;
     if (g_sumShown[SUM_DOC] || ++tries > 15) {
         if (g.main) KillTimer(g.main, 4724);
         return;
     }
+    if (g_webOn || g_editOn) return;
     if (g_sumCtr[SUM_DOC] && !g_sumBuilding[SUM_DOC]) {
         tries = 0;
         if (g.main) KillTimer(g.main, 4724);
@@ -2367,6 +2492,9 @@ static void SumPrewarm() {
 static void SumOpenSeat(int seat) {
     if (seat < 0 || seat >= SUM_SEATS || !g.main) return;
     g_sumShown[seat] = true;
+    g_sumStageHide[seat] = false;   // an explicit open - the toolbar, a tab's
+                                    // stand, the search reveal - supersedes
+                                    // any stage park the flip left behind
     g_sumStand[seat][SumStandKey(seat)] = true;   // the stand rides this document,
                                                   // not the seat: another tab's
                                                   // card keeps its own state

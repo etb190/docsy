@@ -8,8 +8,8 @@
 // question must produce terms, and ASCII folding must stay as it was.
 //
 //   sed -n '/word normalization (QuoteLocator/,/^\/\/ LocateInChunk/p' src/ai_index.inl > /tmp/ai_tok1.inc
-//   sed -n '/static bool AiIsStopword/,/^static double AiCosine/p' src/ai_index.inl | head -n -2 > /tmp/ai_tok2.inc
-//   g++ -std=c++20 -O1 -I src -o /tmp/ai_wordize_check scripts/ai_wordize_check.cpp
+//   sed -n '/static bool AiIsStopword/,/^static double AiCosine/p' src/ai_index.inl | head -n -1 > /tmp/ai_tok2.inc
+//   g++ -std=c++20 -O1 -I src -I /tmp -o /tmp/ai_wordize_check scripts/ai_wordize_check.cpp
 //   /tmp/ai_wordize_check
 // ---------------------------------------------------------------------------
 #include <cstdio>
