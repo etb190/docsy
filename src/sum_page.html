@@ -121,6 +121,14 @@ body{background:#141414; color:var(--text); font-family:"Segoe UI",sans-serif;
   border-radius:4px; cursor:pointer;}
 .chip:hover{background:var(--rowhover); color:var(--text);}
 .chip.on{background:var(--selbg); border-color:var(--selfg); color:var(--selfg);}
+/* The C chip's own seat: the custom range's free input. It stands in the chip
+   row, one chip wide-ish, and shares the dark select face. */
+#customBox{height:28px; width:94px; background:#2b2b2b; color:#e0e0e0;
+  border:1px solid #3f3f3f; border-radius:4px; font-size:11.5px; font-family:inherit;
+  font-weight:600; outline:none; padding:0 8px; box-sizing:border-box; text-align:center;}
+#customBox:hover{background-color:#333333; border-color:#505050;}
+#customBox:focus{border-color:var(--selfg); background-color:#242424;}
+#customBox::placeholder{color:var(--dim); font-weight:500;}
 select{
   appearance:none;
   -webkit-appearance:none;
@@ -297,6 +305,8 @@ html,body{margin:0; background-color:#141414 !important;}
     <!-- Row 2: Range Chips & Dropdowns (Avalanche WrapPanel) -->
     <div class="row" id="rangeWrap">
       <div id="rangePanel">
+        <button class="chip" id="chipC" data-p="custom" title="Custom range - type it as X-X (for example 12-45)">C</button>
+        <input id="customBox" placeholder="X-X" spellcheck="false" title="Custom range - type X-X (for example 12-45), Enter commits" style="display:none">
         <button class="chip" data-p="1">1</button>
         <button class="chip" data-p="5">5</button>
         <button class="chip on" data-p="20">20</button>
@@ -459,6 +469,7 @@ var S = {
   pageCount: 1,
   start: 1,
   rangePages: 20,
+  customMode: false,
   generating: false,
   gen: 0,
   full: "",
@@ -485,6 +496,16 @@ var prefetch = {
   text: "",
   ready: false
 };
+
+/* The buffer's hand grenade, pinned: any click that changes what "the next
+   stretch" means - a range chip, a words/lang/genre dropdown, the Buffer
+   toggle going dark - drops the standing fill instead of re-asking it. No
+   generation ever rides a click here: only Start and the right arrow turn
+   the pump, and the buffer rolls only after one of THOSE runs lands. */
+function invalidatePrefetch(){
+  prefetch.text=""; prefetch.ready=false; prefetch.start=-1;
+  $("stBuffer").textContent="";
+}
 
 /* ---- Chrome: Drag handle, close chip, font up/down ---- */
 $("titlebar").addEventListener("mousedown", function(e){
@@ -559,8 +580,12 @@ function wireToggle(wrapId, toggleId, getVal, setVal, settingKey){
     $(toggleId).classList.toggle("on", v);
     post({type:"set-setting", key:settingKey, val:v ? "1" : "0"});
     if(settingKey==="summary.buffer.enabled"){
-      if(v) checkPrefetchBuffer();
-      else $("stBuffer").textContent = "";
+      // flipping the toggle only ARMS or DISARMS the buffer - it never starts
+      // one. The fill rides after the next Start / right-arrow run lands, or
+      // after the right arrow displays a ready stretch; turning it off here
+      // just drops whatever was standing (an in-flight fill lands to a page
+      // that no longer listens).
+      if(!v) invalidatePrefetch();
     }
   }
   $(wrapId).onclick = function(e){
@@ -868,6 +893,7 @@ function updatePagesLeft(){
   $("stPagesLeft").textContent=left>0?(left+" pages left"):"End of document";
 }
 var startBoxFocused=false;
+var customBoxFocused=false;
 function refreshNav(){
   var end=fmtRange();
   if(!startBoxFocused){
@@ -876,9 +902,17 @@ function refreshNav(){
   $("bPrev").disabled=S.start<=1;
   $("bNext").disabled=end>=S.pageCount;
   document.querySelectorAll(".chip").forEach(function(c){
+    if(c.dataset.p==="custom"){          // the C chip lights only in custom mode
+      c.className="chip"+(S.customMode?" on":"");
+      return;
+    }
     var p=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
-    c.className="chip"+(p===S.rangePages?" on":"");
+    c.className="chip"+(!S.customMode&&p===S.rangePages?" on":"");
   });
+  var box=$("customBox");
+  var show=S.customMode&&S.mode==="doc";
+  box.style.display=show?"inline-block":"none";
+  if(show&&!customBoxFocused) box.value=S.start+"-"+end;
   updatePagesLeft();
 }
 function status(t){ $("stStatus").textContent=t||""; }
@@ -949,18 +983,29 @@ $("startBox").addEventListener("keydown", function(e){
     this.blur();
   }else if(e.key==="Escape"){
     e.preventDefault();
+    e.stopPropagation();   // reverting the box is not the card's Esc: without
+                           // this the document handler folds the whole popup
     startBoxFocused=false;
     refreshNav();
     this.blur();
   }
 });
 function commitStartBox(str){
-  var v=parseInt(str.replace(/[^0-9]/g,""),10);
+  // NAVIGATION ONLY - typing here moves the range, it never generates. The
+  // Start button and the right arrow are the only two seats that turn the
+  // pump, and an Enter in this box is neither of them.
+  var s=(str||"").trim();
+  if(s.indexOf("-")>=0){                 // an X-X pair rides the custom road
+    commitCustomRange(s);
+    return;
+  }
+  var v=parseInt(s.replace(/[^0-9]/g,""),10);
   if(!isNaN(v) && v>=1 && v<=S.pageCount){
     if(v!==S.start){
-      if(!startGen(false, v)) return;   // stay put when the debounce ate it
+      S.start=v;
       refreshNav();
       post({type:"page", page:S.start});
+      status("Start page "+v+" - press Start to summarize "+S.start+"-"+fmtRange());
       return;
     }
   }
@@ -1000,6 +1045,21 @@ function handleHostMessage(m){
     // the digest that is about to come up was written at its own stretch:
     // the navigator re-seats on that start, not on the last page-turn
     if(m.digest && m.digestFirst) S.start=Math.max(1, parseInt(m.digestFirst,10)||S.start);
+    // the custom range comes back with the session: the host's
+    // summary.custom.range (and the page's own localStorage as the fallback)
+    // re-arms the C seat when the saved page count still matches this
+    // document's stretch length. The saved digest's re-seat above wins on the
+    // start when one exists - the digest on screen was written at its own X.
+    if(S.mode==="doc" && !S.customMode){
+      var cr=m.customRange||null;
+      if(!cr){ try{ cr=localStorage.getItem("summary.custom"); }catch(e){} }
+      if(cr){ var cm=/^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(cr);
+        if(cm){ var cx=parseInt(cm[1],10), cy=parseInt(cm[2],10);
+          if(cx>=1&&cy>=cx&&cx<=S.pageCount&&cy<=S.pageCount&&S.rangePages===cy-cx+1){
+            S.customMode=true;
+            if(!(m.digest&&m.digestFirst)) S.start=cx;
+          } } }
+    }
     refreshNav();
     $("stModel").textContent=S.model?("Model: "+S.model):"";
 
@@ -1010,8 +1070,8 @@ function handleHostMessage(m){
     S.gen++; S.generating=false; S.incoming=[]; typeStop(); setBusy(false);
     closeWordPop();   // a re-init's new subject takes its plate and popup back
     overlay("",false);
-    prefetch.text=""; prefetch.ready=false;
-    $("stBuffer").textContent="";
+    invalidatePrefetch();   // a new subject drops the old buffer outright - it
+                            // never re-asks one behind the user's back
 
     if(m.digest){
       emptyState(false,false);   // the empty card folds before the digest paints
@@ -1022,7 +1082,6 @@ function handleHostMessage(m){
         var ds=Math.max(0, parseInt(m.digestScroll,10)||0);
         setTimeout(function(){ try{ $("digest").scrollTop=ds; }catch(e){} },0);
       }
-      checkPrefetchBuffer();
     }else{
       S.full=""; S.shown=0; $("digest").innerHTML=""; emptyState(true,false);
       status("");
@@ -1093,7 +1152,9 @@ function handleHostMessage(m){
       // user asked to HEAR the fill land - the chime rides unless the host's
       // native ear already rang it ("ping":false means folded window)
       if(S.bufferEnabled) $("stBuffer").textContent="Buffer: ready";
-      if(m.ping!==false) playPing();
+      if(m.ping!==false && S.bufferEnabled) playPing();   // a buffer the user
+                                    // turned off mid-fill lands silent - the
+                                    // chime belongs to a buffer they kept
     }
     break;
 
@@ -1111,9 +1172,8 @@ function handleHostMessage(m){
     S.generating=false;
     setBusy(false); typeStop(); emptyState(false,false);
     overlay("The selected pages have no readable text to summarize.",false);
-    status("");
-    checkPrefetchBuffer();   // the run died but the buffer's job is separate -
-                             // a dropped request gets re-asked here, not hung
+    status("");    // a dead run spawns nothing: no buffer re-ask behind the
+                   // user's back - only Start and the right arrow generate
     break;
 
   case "word-answer":    // the word plate's Define/Explain: the answer unfolds
@@ -1129,8 +1189,6 @@ function handleHostMessage(m){
     $("digest").innerHTML="";
     overlay(m.text||"Summary failed.",true);
     status(m.text ? ("Error: " + m.text) : "Failed");
-    checkPrefetchBuffer();   // the same safety net: an errored run must not
-                             // leave the buffer chip mid-sentence
     break;
 
   case "stopped":
@@ -1138,7 +1196,6 @@ function handleHostMessage(m){
     S.generating=false;
     paintAll(); setBusy(false); emptyState(false,false);
     overlay("",false); status("Stopped");
-    checkPrefetchBuffer();
     break;
 
   case "nav":
@@ -1183,9 +1240,13 @@ function fillCombos(m){
   fill($("lang"), langs, m.lang||"English"); fill($("langW"), langs, m.lang||"English");
   fill($("genre"), genres, m.genre||"nonfiction_classic");
 
-  $("words").onchange=function(){ post({type:"set-setting", key:"summary.words", val:this.value}); checkPrefetchBuffer(); };
-  $("lang").onchange=function(){ post({type:"set-setting", key:"summary.lang", val:this.value}); checkPrefetchBuffer(); };
-  $("genre").onchange=function(){ post({type:"set-setting", key:"summary.default_genre", val:this.value}); checkPrefetchBuffer(); };
+  // a dropdown changes what the next stretch would LOOK like - the standing
+  // buffer no longer matches it, so the fill is dropped (never re-asked: a
+  // click here is not consent to generate; the next Start / right arrow run
+  // rolls a fresh buffer with the new settings when the buffer is on)
+  $("words").onchange=function(){ post({type:"set-setting", key:"summary.words", val:this.value}); invalidatePrefetch(); };
+  $("lang").onchange=function(){ post({type:"set-setting", key:"summary.lang", val:this.value}); invalidatePrefetch(); };
+  $("genre").onchange=function(){ post({type:"set-setting", key:"summary.default_genre", val:this.value}); invalidatePrefetch(); };
 
   $("prompt").innerHTML="";
   var ps=m.prompts||[];
@@ -1263,16 +1324,19 @@ $("bReset").onclick=function(){
                               // wipes the digest row and its cache entry)
   status("Range cleared - press Start for a fresh summary");
   $("stModel").textContent=S.model?("Model: "+S.model):"";
-  $("stBuffer").textContent="";
-  prefetch.text=""; prefetch.ready=false;
+  invalidatePrefetch();
   setBusy(false); post({type:"reset"});
 };
 
 $("bPrev").onclick=function(){
+  // NAVIGATION ONLY - back steps the stretch and jumps the reader with it;
+  // it never generates. The two generating seats are Start and the right
+  // arrow, and this is neither.
   if(S.start<=1) return;
-  if(!startGen(false, Math.max(1, S.start - S.rangePages))) return;   // stay put when the debounce ate it
+  S.start=Math.max(1, S.start-S.rangePages);
   refreshNav();
   post({type:"page", page:S.start});
+  status("Pages "+S.start+"-"+fmtRange()+" - press Start to summarize");
 };
 
 $("bNext").onclick=function(){
@@ -1306,12 +1370,86 @@ $("bNext").onclick=function(){
 
 document.querySelectorAll(".chip").forEach(function(c){
   c.onclick=function(){
+    if(c.dataset.p==="custom"){        // C flips the range logic to free input:
+      if(S.mode==="web") return;      // the X-X box stands in for the chips
+      enterCustomMode();
+      return;
+    }
+    exitCustomMode();
     S.rangePages=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
+    invalidatePrefetch();   // the stretch changed shape - the standing fill is
+                            // stale; a click here never generates, so nothing
+                            // is re-asked behind the user's back
     refreshNav();
     post({type:"range-changed", pages:S.rangePages});
     post({type:"set-setting", key:"summary.range", val:String(S.rangePages)});
-    checkPrefetchBuffer();
   };
+});
+
+/* ---- Custom Range (the C chip) ----
+   C is short for custom: the chip flips the range logic from the fixed chips
+   to free manual input - an X-X box stands in for the chip row, and the typed
+   pair (it HAS to be X-X, two numbers and the dash) becomes the stretch.
+   Committing a range is navigation, not generation: it moves S.start and
+   S.rangePages, saves the pair, and waits - Start and the right arrow stay
+   the only two buttons that ever turn the pump. */
+function enterCustomMode(){
+  S.customMode=true;
+  refreshNav();
+  var box=$("customBox");
+  box.value=S.start+"-"+fmtRange();
+  box.focus(); box.select();
+}
+function exitCustomMode(){
+  if(!S.customMode) return;
+  S.customMode=false;
+  try{ localStorage.removeItem("summary.custom"); }catch(e){}
+  post({type:"set-setting", key:"summary.custom.range", val:""});
+  refreshNav();
+}
+function commitCustomRange(str){
+  var mm=/^\s*(\d+)\s*-\s*(\d+)\s*$/.exec(str||"");
+  if(!mm){
+    status("Custom range must be X-X - for example 12-45");
+    return false;
+  }
+  var X=parseInt(mm[1],10), Y=parseInt(mm[2],10);
+  if(X<1||Y<X||X>S.pageCount||Y>S.pageCount){
+    status("Pages out of range - the document runs 1-"+S.pageCount);
+    return false;
+  }
+  S.customMode=true;
+  S.start=X; S.rangePages=Y-X+1;
+  try{ localStorage.setItem("summary.custom", X+"-"+Y); }catch(e){}
+  refreshNav();
+  post({type:"range-changed", pages:S.rangePages});
+  post({type:"set-setting", key:"summary.range", val:String(S.rangePages)});
+  post({type:"set-setting", key:"summary.custom.range", val:X+"-"+Y});
+  status("Custom range "+X+"-"+Y+" - press Start to summarize");
+  return true;
+}
+$("customBox").addEventListener("focus", function(){
+  customBoxFocused=true;
+  this.select();
+});
+$("customBox").addEventListener("keydown", function(e){
+  if(e.key==="Enter"){
+    e.preventDefault();
+    customBoxFocused=false;
+    commitCustomRange(this.value);
+    this.blur();
+  }else if(e.key==="Escape"){
+    e.preventDefault();
+    e.stopPropagation();   // same rule as the start box: revert, don't fold
+    customBoxFocused=false;
+    refreshNav();          // the display falls back to the committed range
+    this.blur();
+  }
+});
+$("customBox").addEventListener("blur", function(){
+  if(!customBoxFocused) return;
+  customBoxFocused=false;
+  commitCustomRange(this.value);
 });
 
 document.addEventListener("keydown", function(e){

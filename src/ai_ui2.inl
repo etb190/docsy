@@ -1722,6 +1722,11 @@ static void SumSendInitSeat(int seat) {
         j += ",\"buffer\":" + std::string(buffer ? "true" : "false");
         j += ",\"recap\":" + std::string(recap ? "true" : "false");
         j += ",\"discord\":" + std::string(discord ? "true" : "false");
+        // the custom range rides its own key ("X-Y" as the page wrote it): the
+        // page re-arms its C seat from it when the stretch length still matches
+        // summary.range, so a free-typed 12-45 survives a close and a reopen
+        std::string custom = AiGetSetting("summary.custom.range");
+        if (!custom.empty()) j += ",\"customRange\":" + WxJsonStr(custom);
         std::string savedDigest = AiGetSetting("summary.digest." + docId);
         if (!savedDigest.empty()) {
             j += ",\"digest\":" + WxJsonStr(savedDigest);
