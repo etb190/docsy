@@ -9,7 +9,7 @@
 
 // forward decls the earlier modules already call
 static void AiChatToggle();
-static void AiOverlayLayout();
+static void AiOverlayLayout(bool early);   // the default rides common.h's prototype
 static void AiPaintPage(HDC dc, const DocState& D, int page, int px, int py);
 static void AiModeChanged();          // browser/editor/reader flips rebind the context
 static void AiPanelMessage(const wchar_t* json);   // defined in ai_ui2.inl
@@ -966,7 +966,8 @@ static void AiPanelEnsure() {
 // the dock width the layout reserved this pass (LayoutMain owns the number;
 // the panel just reads it, so every mode agrees on one strip)
 static RECT g_aiLastBounds{ -1, -1, -1, -1 };
-static void AiOverlayLayout() {
+static void AiOverlayLayout(bool early) {   // the default rides common.h's prototype - a
+                                            // default may be specified exactly once per scope
     if (!g.main || !g.view) return;
     if (!g_aiCtr) return;                    // the creation callback lays it out
     RECT vr; GetWindowRect(g.view, &vr);
@@ -987,6 +988,21 @@ static void AiOverlayLayout() {
     // repaint around it, and a moved strip would leave those holes stale
     // forever. A resize-drag only reseats when the strip actually moved, so
     // the steady drag stays flicker-free.
+    if (early) {
+        // LayoutMain's PRE-move call: the strip's final rect is not knowable
+        // yet (the view has not moved), so all it does is hide - a visible
+        // strip clips its own old rect out of the vacated-strip handout below.
+        // The old code ran the full hide-move-show dance HERE, and Direct-
+        // Composition ignores the flip's LockWindowUpdate: the panel visibly
+        // jumped to a wrong intermediate rect, then again to the final one -
+        // its own pace, the thing the flip lock was built to kill. The final
+        // call (post-move) parks the real rect and shows.
+        if (g_aiLastBounds.left >= 0 && g_aiLastBounds.right > g_aiLastBounds.left
+            && !EqualRect(&g_aiLastBounds, &b))
+            g_aiCtr->put_IsVisible(FALSE);     // seated (any rect) and about to change
+                                               // (seat or unseat): hide before the moves
+        return;
+    }
     if (!EqualRect(&g_aiLastBounds, &b)) {
         g_aiCtr->put_IsVisible(FALSE);
         g_aiCtr->put_Bounds(b);

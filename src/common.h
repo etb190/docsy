@@ -635,7 +635,9 @@ static int g_aiDockW = 0;               // the AI panel's docked strip width thi
 static bool g_aiOn = false;             // the AI panel is open (ai_ui.inl owns the panel;
                                         // the layout reads the flag to reserve the strip)
 static void AiPaintPage(HDC dc, const DocState& D, int page, int px, int py);   // the citation's highlight quad (ai_ui2.inl)
-static void AiOverlayLayout();          // the panel's bounds ride every layout (ai_ui.inl)
+static void AiOverlayLayout(bool early = false);   // the panel's bounds ride every layout (ai_ui.inl);
+                                                   // early = the pre-move call, hide-only (a webview
+                                                   // must never be seen at an intermediate rect)
 static bool g_sideNotes = false;        // the sidebar's NOTES tab is the active face
 static int g_sideBandHot = -1;          // the segmented tab under the cursor
 static void SideBandDraw(HDC dc, int w);   // the Pages | Notes band (sidebar.inl)
@@ -1204,8 +1206,19 @@ struct FlipLock {
         if (g_flipDepth > 0 && --g_flipDepth == 0 && w) {
             LockWindowUpdate(nullptr);   // the unlock: NULL ends the deferral and
                                          // hands the accumulated region back
-            UpdateWindow(w);             // the flip's one paint, now - not on the
-                                         // queue's next idle beat
+            // The flip's one paint, NOW, for the whole tree - fully invalidated:
+            // the lock redirects what would have been invalidated onto the
+            // locked frame alone, so a child's own update region may be empty
+            // at this point (an RDW_UPDATENOW without the invalidate would
+            // drain only the frame, and WS_CLIPCHILDREN would keep that paint
+            // out of every child's rect - stale pixels everywhere). RDW_INVALIDATE
+            // with a null rect marks every child in full, RDW_UPDATENOW paints
+            // them all inside this one call, and because each surface repaints
+            // COMPLETELY (never a partial strip) the eye sees one frame: the
+            // old flip's trailing wave - each child landing on the queue's next
+            // beat at its own pace - is exactly what read as tearing.
+            RedrawWindow(w, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
         }
     }
 };
@@ -1636,12 +1649,23 @@ static int g_wtoolHot = -1, g_wtoolDown = -1;
 static const wchar_t* const WebToolCap[3] = { L"PDF", L"Editor", L"Summary" };
 static const wchar_t* const WebToolGlyph[3] = { L"\uE8F1", L"\uE70B", L"\uE8A5" };
 
-static RECT WebToolBtn(int idx) {
-    int bw = (int)(54 * g.dpi);
-    int gap = 0;                               // the reader toolbar's own rule: buttons touch,
-                                               // each face's padding makes the gap - 4dp of dead
-                                               // strip between PDF and Editor read as a hole
-    int x = (int)(4 * g.dpi) + idx * (bw + gap);
+static int WebToolBtnW(HDC dc, int idx) {
+    // the reader toolbar's own rule (TbBtnW): the face hugs its content - the
+    // wider of the glyph's 24px MDL2 line box and the caption, plus 12dp of
+    // padding. The old fixed 54dp face left the narrower captions ("PDF")
+    // swimming in padding: the dead strip BETWEEN the buttons read as gaps.
+    RECT rc{ 0, 0, 0, 0 };
+    HFONT of = (HFONT)SelectObject(dc, CaptionFont(g_tbcap, 14, false, L"Killer Sans"));
+    DrawTextW(dc, WebToolCap[idx], -1, &rc, DT_CALCRECT | DT_SINGLELINE);
+    SelectObject(dc, of);
+    return max((int)(24 * g.dpi), (int)(rc.right - rc.left)) + (int)(12 * g.dpi);
+}   // the caption width casts: MSVC's std::max cannot deduce across LONG and int
+
+static RECT WebToolBtn(HDC dc, int idx) {
+    int x = (int)(4 * g.dpi);
+    for (int i = 0; i < idx; i++) x += WebToolBtnW(dc, i);   // buttons touch; each
+                                                             // face's padding makes the gap
+    int bw = WebToolBtnW(dc, idx);
     int y = (int)(2 * g.dpi);
     return RECT{ x, y, x + bw, y + TbBtnH() };
 }
@@ -1652,7 +1676,7 @@ static void WebToolDraw(HDC dc, int w, int h) {
     FillRect(dc, &bar, GrainBrush(1));
 
     for (int idx = 0; idx < 3; idx++) {
-        RECT b = WebToolBtn(idx);
+        RECT b = WebToolBtn(dc, idx);
         bool hot = (g_wtoolHot == idx);
         bool pr = (g_wtoolDown == idx && hot);
         if (hot || pr) {
@@ -1741,11 +1765,13 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     }
     case WM_MOUSEMOVE: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        HDC dc = GetDC(h);
         int hot = -1;
         for (int i = 0; i < 3; i++) {
-            RECT b = WebToolBtn(i);
+            RECT b = WebToolBtn(dc, i);
             if (PtInRect(&b, p)) { hot = i; break; }
         }
+        ReleaseDC(h, dc);
         if (hot != g_wtoolHot) {
             g_wtoolHot = hot;
             if (hot >= 0) TrackLeave(h);
@@ -1761,8 +1787,9 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_LBUTTONDOWN: {
         POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        HDC dc = GetDC(h);
         for (int i = 0; i < 3; i++) {
-            RECT b = WebToolBtn(i);
+            RECT b = WebToolBtn(dc, i);
             if (PtInRect(&b, p)) {
                 SetCapture(h);
                 g_wtoolDown = i; g_wtoolHot = i;
@@ -1770,6 +1797,7 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 break;
             }
         }
+        ReleaseDC(h, dc);
         return 0;
     }
     case WM_LBUTTONUP: {
@@ -1778,7 +1806,9 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g_wtoolDown = -1;
             if (GetCapture() == h) ReleaseCapture();
             POINT p{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-            RECT b = WebToolBtn(down);
+            HDC dc = GetDC(h);
+            RECT b = WebToolBtn(dc, down);
+            ReleaseDC(h, dc);
             bool inside = PtInRect(&b, p) != 0;
             g_wtoolHot = -1;
             InvalidateRect(h, nullptr, FALSE);
@@ -1800,13 +1830,16 @@ static LRESULT CALLBACK WebToolProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     case WM_SETCURSOR:
         if (LOWORD(lp) == HTCLIENT) {
             POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+            HDC dc = GetDC(h);
             for (int i = 0; i < 3; i++) {
-                RECT b = WebToolBtn(i);
+                RECT b = WebToolBtn(dc, i);
                 if (PtInRect(&b, p)) {
+                    ReleaseDC(h, dc);
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
                 }
             }
+            ReleaseDC(h, dc);
         }
         break;
     }

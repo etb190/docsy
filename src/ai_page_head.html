@@ -158,8 +158,11 @@ body{
   z-index:5; background:linear-gradient(to right,
     rgba(0,0,0,.30), rgba(0,0,0,.16) 5px, rgba(0,0,0,.06) 10px,
     rgba(0,0,0,.02) 15px, rgba(0,0,0,0) 20px);}
-#edgeShadow::after{content:""; position:absolute; left:0; top:0; bottom:0; width:1px;
-  background:#484848;}
+/* the 1px #484848 border that rode this edge is gone: beside the page card the
+   reader's own #555 ring runs flush against this panel now (the card takes the
+   seam's pixels - CardW), and the line doubled the edge into "wtf is that line
+   between pdf view and sidechat". The halo keeps the depth, the border drew
+   the seam twice. */
 .sbtn{width:36px; height:36px; flex:0 0 auto; border:1px solid var(--line); border-radius:4px;
   background:var(--pane); color:var(--text); font-family:"Segoe MDL2 Assets"; font-size:14px;
   display:none; align-items:center; justify-content:center; cursor:pointer;}

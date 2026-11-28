@@ -30,12 +30,18 @@ static int PaneW(bool b) { return b ? max(0, g.cw - g.splitX - SplitHalf())
 static int PaneX0(bool b) { return b ? g.splitX + SplitHalf() : 0; }  // the pass's view x
 static int CardX(bool b) { return b ? (int)(4 * g.dpi) : 0; }         // the card inside the pass
 static int CardW(bool b) {
-    // the card's right edge keeps the classic 8px window gutter in every mode
-    // - the AI sidechat included now: the gutter's pixels are the field the
-    // right corners and ring draw into, and the panel's left border sits
-    // beyond the gutter (the seam lives in the panel's strip - LayoutMain
-    // widens the view by it - so the pages never pay for the corners)
-    if (!g.split) return max(0, g.cw - (int)(8 * g.dpi));
+    // The AI dock's seam: the strip the card's shadow darkened beside the panel
+    // read as a dark line, so the card now TAKES it - with the dock open the
+    // card's right edge lands flush on the panel's border and the pages gain
+    // the gutter's width. The corners still round: an arc cuts into the card's
+    // own bounding box, the field notch shows through behind it, exactly like
+    // the top edge tucked under the band. No dock: the classic 8px window
+    // gutter stays.
+    if (!g.split) {
+        if (g_aiDockW > 0) return max(0, g.cw);
+        return max(0, g.cw - (int)(8 * g.dpi));
+    }
+    if (b && g_aiDockW > 0) return max(0, PaneW(true) - (int)(4 * g.dpi));
     return b ? max(0, PaneW(true) - (int)(12 * g.dpi))
              : max(0, PaneW(false) - (int)(4 * g.dpi));
 }
@@ -188,6 +194,11 @@ static HDC g_bdDC[2] = { nullptr, nullptr };
 static int g_bdW[2] = { 0, 0 }, g_bdH[2] = { 0, 0 };
 static double g_bdDpi[2] = { 0, 0 }; // the bake key: size AND dpi (PerMonitorV2 hops)
 static int g_bdIns[2] = { -1, -1 };  // ... and the card's top inset (the band's row)
+static int g_bdDock[2] = { -1, -1 }; // ... and the dock state: the AI dock flips CardW's
+                                     // right-edge rule (flush vs 8px gutter) without
+                                     // touching the DIB's own size when the dock is
+                                     // the seam's exact width - the stale bake would
+                                     // show the old edge forever
 static BYTE* g_bdBits[2] = { nullptr, nullptr };
 
 static void CardBackdrop(HDC ref, int w, int h, bool b) {
@@ -197,7 +208,8 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     // band's foot so the active tab covers that pixel without a seam. One row
     // short of BANDH keeps that border visible under the inactive tabs.
     int ty = max(0, BandInset(b) - 1);
-    if (g_bdBmp[slot] && g_bdW[slot] == w && g_bdH[slot] == h && g_bdDpi[slot] == g.dpi && g_bdIns[slot] == ty) return;
+    int docked = g_aiDockW > 0 ? 1 : 0;
+    if (g_bdBmp[slot] && g_bdW[slot] == w && g_bdH[slot] == h && g_bdDpi[slot] == g.dpi && g_bdIns[slot] == ty && g_bdDock[slot] == docked) return;
     if (g_bdDC[slot]) { DeleteDC(g_bdDC[slot]); g_bdDC[slot] = nullptr; }
     if (g_bdBmp[slot]) { DeleteObject(g_bdBmp[slot]); g_bdBmp[slot] = nullptr; }
     g_bdW[slot] = 0; g_bdH[slot] = 0;
@@ -212,9 +224,10 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     int cx = b ? (int)(4 * g.dpi) : 0;
     int cw = CardW(b);                       // the card's own width inside this pass
     // the right edge carries the same corners, ring and shadow falloff the
-    // left one always has: the AI panel's border sits beyond the gutter now
-    // (the seam rides the panel's strip), so nothing clips the card's rim
-    // away and the chat's side meets a finished corner like any other edge
+    // left one always has. With the AI dock open the card runs flush to the
+    // panel's border (CardW) - the shadow-darkened gutter beside the chat read
+    // as a dark line, and the pages take its pixels now; the falloff only
+    // escapes into the corner notches, exactly where the rounding is
     int rad = max(2, (int)(6 * g.dpi));
     bool card = cw > 2 * rad + 4 && h > 2 * rad + 2;
     // the DIB's left edge sits at the pane's view x, so the grain phase shifts
@@ -250,7 +263,7 @@ static void CardBackdrop(HDC ref, int w, int h, bool b) {
     DeleteDC(bdc);
     g_bdBmp[slot] = bm; g_bdDC[slot] = CreateCompatibleDC(ref);
     SelectObject(g_bdDC[slot], bm);
-    g_bdBits[slot] = bits; g_bdW[slot] = w; g_bdH[slot] = h; g_bdDpi[slot] = g.dpi; g_bdIns[slot] = ty;
+    g_bdBits[slot] = bits; g_bdW[slot] = w; g_bdH[slot] = h; g_bdDpi[slot] = g.dpi; g_bdIns[slot] = ty; g_bdDock[slot] = docked;
 }
 
 // Find highlights on one visible page (KillerPDF's AddSearchHighlight): a rounded

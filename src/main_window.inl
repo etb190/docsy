@@ -1,6 +1,7 @@
 // ---------------- main window ----------------
 
-static void AiOverlayLayout();              // the AI panel's bounds ride every layout
+static void AiOverlayLayout(bool early);    // the AI panel's bounds ride every layout; the default
+                                             // rides common.h's prototype (specified once per scope)
 static void AiIndexTick();                  // the AI workers' pumps ride the main timer
 static void AiRangeTick();
 static void AiHandleEvent(AiEv* e);
@@ -43,15 +44,18 @@ static void LayoutMain() {
         int rw = RW();
         int aw = (g_aiOn && !g.full) ? AiDockWidth(w - sw - rw) : 0;   // the AI column
         g_aiDockW = aw;
-        AiOverlayLayout();                   // hide/seat the strip before any repaint:
-                                             // a visible strip clips its own old rect out
+        AiOverlayLayout(true);               // hide the strip before any repaint: a
+                                             // visible strip clips its own old rect out
                                              // of the handout below and leaves stale holes
-        // the card's classic gutter (the right corners' and ring's room) comes
-        // out of the AI panel's strip, never out of the card: the view widens
-        // by the seam and the panel's left border pushes right by it, so the
-        // pages keep their exact width while the right corners draw like the
-        // left ones always have
-        int seam = aw > 0 ? (int)(8 * g.dpi) : 0;
+                                             // (hide only - the final call below parks the
+                                             // real rect, and a webview must never be seen
+                                             // at an intermediate one, DComp reading no
+                                             // window lock)
+        int seam = aw > 0 ? (int)(8 * g.dpi) : 0;   // the view widens by the gutter when the
+                                             // dock is open: the card takes the seam's
+                                             // pixels (CardW returns the full view width
+                                             // then - the pages pay for the corners in
+                                             // pixels the panel's strip gives back)
         int vw = max(0, w - sw - rw - aw + seam);
         if (g_etool) MoveWindow(g_etool, 0, cap0, w, th, TRUE);
         if (g.side) {
@@ -107,10 +111,10 @@ static void LayoutMain() {
     int rw = RW();                              // pane's pages; the rail always rides between
     int aw = (g_aiOn && !g.full) ? AiDockWidth(w - sw - rw) : 0;   // the AI column
     g_aiDockW = aw;
-    AiOverlayLayout();                       // hide/seat the strip before any repaint
-    // the seam: the card's gutter rides the panel's strip, never the card
-    // (see the editor branch above)
-    int seam = aw > 0 ? (int)(8 * g.dpi) : 0;
+    AiOverlayLayout(true);                   // hide the strip before any repaint (see the
+                                             // editor branch: hide only, no intermediate seat)
+    int seam = aw > 0 ? (int)(8 * g.dpi) : 0;   // the seam: the card's gutter rides the panel's
+                                                // strip, never the card (see the editor branch)
     int tl = WEBTOOLH();                        // browser mode: the reader's toolbar row, one button
     int cap = cap0 + tl;                        // everything below sits under caption + toolbar
     int tb = g_webOn ? WebBandH() : TBH();      // browser mode: the tab band - there only

@@ -10,8 +10,9 @@
    range row, Generate, Save All / Copy All, and the review cards. The rail's
    Pages | Notes segmented tabs live in the sidebar's own chrome (sidebar.inl);
    this page is the panel below them. Palette = Themes/Dark.xaml; the panel
-   paints nothing behind the words - the window's grain field shows through
-   (the WebView's own background is alpha 0), exactly like the pages grid. */
+   paints its own opaque field-grain plate (a child surface has no DWM
+   redirection - see the plate comment below), matched to the sidebar's #1c1c1c
+   chrome so the two read as one column. */
 :root{
   --bg:#1c1c1c; --pane:#3a3a3a; --rowhover:#404040; --line:#2e2e2e;
   --primary:#1ea54c; --onprimary:#0a0a0a; --text:#e0e0e0; --muted:#a0a0a0;
@@ -20,8 +21,12 @@
 *{box-sizing:border-box; margin:0; padding:0;}
 html,body{height:100%; overflow:hidden;}
 /* opaque plate - a child surface has no DWM redirection of its own; a
-   transparent pixel would expose the frame's stale paint (see sum_page) */
-body{background:#141414; color:var(--text);
+   transparent pixel would expose the frame's stale paint (see sum_page).
+   The plate is the FIELD grain (#1c1c1c, GrainBrush slot 1), not the
+   floating surface's #141414 - the notes panel sits inside the sidebar's
+   chrome column, and a #141414 slab there read as a black box behind the
+   cards ("what is that black background behind notes"). */
+body{background:#1c1c1c; color:var(--text);
   font-family:"Segoe UI",sans-serif; font-size:12px;
   -webkit-user-select:none; user-select:none; cursor:default;}
 ::-webkit-scrollbar{width:10px;}
@@ -94,10 +99,11 @@ var S={ cards:[] };
 
 /* ---------------- the plate: the app's own grain, baked here ----------------
    The opaque plate carries the chrome's own noise tile - the 1:1 JS port of
-   GrainBrush's slot 2 (pdf_render.inl, the #141414 floating surface): splitmix64
-   seed 1337, gaussian speckle around 128 (spread 150), 10% soften, 1.35
-   contrast, the purple lean on 40% of specks at 0.80 mix, at alpha 70/255*0.24.
-   Same seed, same order - the same pixels the frame's other panes lay down. */
+   GrainBrush's slot 1 (pdf_render.inl, the #1c1c1c dark chrome field the
+   sidebar and every pane paint): splitmix64 seed 1337, gaussian speckle
+   around 128 (spread 150), 10% soften, 1.35 contrast, the purple lean on 40%
+   of specks at 0.80 mix, at alpha 70/255*0.24. Same seed, same order - the
+   same pixels the sidebar around this panel lays down. */
 (function(){
   var S2=256, st=1337n, M64=0xFFFFFFFFFFFFFFFFn;
   function rnd(){ st=(st+0x9E3779B97F4A7C15n)&M64; var z=st;
@@ -108,7 +114,10 @@ var S={ cards:[] };
   for(var i=0;i<N;i++){ var u1=1-rnd(), u2=rnd();
     var v=128+SP*Math.sqrt(-2*Math.log(u1))*Math.cos(PI2*u2);
     raw[i]=v<0?0:(v>255?255:v); lean[i]=rnd()<0.40?1:0; }
-  var back=[20,20,20], leanC=[217,98,187];          // B,G,R - the C++ layout
+  var back=[28,28,28], leanC=[217,98,187];          // B,G,R - the C++ layout: slot 1,
+                                                    // the field the sidebar paints around
+                                                    // this panel (the old #141414 floating
+                                                    // plate read as a black box behind notes)
   var Alpha=70/255*0.24, Soften=0.10, Contrast=1.35, LeanMix=0.80;
   var cv=document.createElement("canvas"); cv.width=S2; cv.height=S2;
   var cx=cv.getContext("2d"), im=cx.createImageData(S2,S2), d=im.data;

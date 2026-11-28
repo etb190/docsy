@@ -1056,11 +1056,15 @@ static void WebThumbArrive(WebThumbDone* d) {          // WM_APP + 10: the worke
 }
 
 static void WebShowCurrent() {
+    WebPlace();        // the bounds land FIRST: a surface that shows already sits
+                       // where the flip parked the view - shown before the move it
+                       // composes at the old rect, the reader tearing past behind
+                       // it, then jumps (DirectComposition ignores the flip's
+                       // LockWindowUpdate, so order is the only lock it honors)
     for (int i = 0; i < (int)g_wt.size(); i++)
         if (g_wt[i].ctr)   // the current tab's surface shows at once: its DefaultBackgroundColor
             g_wt[i].ctr->put_IsVisible((i == g_wtCur) ? TRUE : FALSE);   // is the pages' canvas, so the engine's
-    WebPlace();        // spin-up reads as the card, never as black glass or a page that never lands
-}
+}                      // spin-up reads as the card, never as black glass or a page that never lands
 
 static void WebHistorySync(int id) {
     WebTab* t = WebTabById(id);
@@ -2277,7 +2281,7 @@ static void WebToggle(bool on) {
                 WebNewTab(L"https://www.google.com/", true);
             }
         }
-        else { WebEnsureEnv(); WebShowCurrent(); }
+        else { WebEnsureEnv(); }
         if (g_wtool) { ShowWindow(g_wtool, SW_SHOWNOACTIVATE); InvalidateRect(g_wtool, nullptr, FALSE); }
         if (g_wstrip) { ShowWindow(g_wstrip, SW_SHOWNOACTIVATE); InvalidateRect(g_wstrip, nullptr, FALSE); }
         if (g_webFail && g.view) InvalidateRect(g.view, nullptr, FALSE);
@@ -2294,10 +2298,22 @@ static void WebToggle(bool on) {
         BmPopDestroy();                            // the star's bubble has no business over the reader
         g_bmHot = g_bmPress = -1;
     }
-    AiModeChanged();                               // the panel rebinds: browser <-> reader -
-                                                   // after the tab setup above, so the first
-                                                   // flip into web (no tabs yet) finds a tab
     LayoutMain();                                  // the strip band appears or collapses
+                                                   // FIRST: every surface's final geometry
+                                                   // lands here (the tab controllers'
+                                                   // bounds inside WebPlace) - the browser
+                                                   // surfaces show after, so they compose
+                                                   // once, where they ended up, never at
+                                                   // the old rect mid-flight (DComp reads
+                                                   // no window lock; order is the lock)
+    if (on) WebShowCurrent();                      // the current tab's surface, at final
+                                                   // bounds - only on the way IN: the way
+                                                   // out hid every webview above, and an
+                                                   // unconditional show would lift the
+                                                   // browser back over the reader
+    AiModeChanged();                               // the panel rebinds: browser <-> reader -
+                                                   // after the layout above, so the panel's
+                                                   // rebind also sees the flip's final geometry
     WebBarLayout();
     WebRepaintChrome();
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);

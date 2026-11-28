@@ -561,19 +561,6 @@ static void EditorToggle(bool on) {
         if (g_wtool) ShowWindow(g_wtool, SW_HIDE);
         if (g_etool) ShowWindow(g_etool, SW_SHOWNOACTIVATE);
         EditorEnsureInit();
-        if (g_edCtr) {
-            g_edCtr->put_IsVisible(TRUE);
-            RECT r; GetClientRect(g.view, &r);
-            g_edCtr->put_Bounds(r);
-            EditorRefocus();                           // the page's own thumbs ride the
-            EditorRailSync();                          // load and every change after it
-            if (!g_edPath.empty()) {                   // the scroller resumes where the
-                int y = atoi(AiGetSetting("app.edscroll." + WxU(g_edPath), "").c_str());
-                if (y > 0 && g_edWeb)                  // session left it
-                    g_edWeb->PostWebMessageAsJson((L"{\"cmd\":\"scroll-set\",\"y\":" +
-                                                   std::to_wstring(y) + L"}").c_str());
-            }
-        }
     } else {
         g.sideOn = g_edSide;
         // the switch IS the save point: the page's content rides to its file
@@ -600,6 +587,24 @@ static void EditorToggle(bool on) {
         SetTimer(g.side, 2, 25, nullptr);          // any pending thumbs pump in at once
     }
     LayoutMain();
+    // the editor surface shows only here, after the layout: shown earlier it
+    // composed at the view's OLD rect - DirectComposition reads no window
+    // lock, so a webview must land at final bounds before it becomes visible
+    if (g_editOn && g_edCtr) {
+        RECT r; GetClientRect(g.view, &r);
+        g_edCtr->put_Bounds(r);                    // LayoutMain already parked these bounds;
+                                                   // the explicit set keeps the first open's
+                                                   // creation callback honest too
+        g_edCtr->put_IsVisible(TRUE);
+        EditorRefocus();                           // the page's own thumbs ride the
+        EditorRailSync();                          // load and every change after it
+        if (!g_edPath.empty()) {                   // the scroller resumes where the
+            int y = atoi(AiGetSetting("app.edscroll." + WxU(g_edPath), "").c_str());
+            if (y > 0 && g_edWeb)                  // session left it
+                g_edWeb->PostWebMessageAsJson((L"{\"cmd\":\"scroll-set\",\"y\":" +
+                                               std::to_wstring(y) + L"}").c_str());
+        }
+    }
     RailRepaint();
     if (g.view) InvalidateRect(g.view, nullptr, FALSE);
     UpdateTitle();

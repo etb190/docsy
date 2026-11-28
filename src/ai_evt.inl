@@ -81,7 +81,7 @@ static void AiPanelEnsure();           // the panel's own builder: the env's
                                        // cold-start knock (4723) re-rings it
                                        // from the main frame's timer block
 static void AiModeChanged();
-static void AiOverlayLayout();
+static void AiOverlayLayout(bool early);   // the default rides common.h's prototype
 static void SumToggle(int mode);
 static void SumOwnerMoved();   // the frame moved: the summary popup rides along
 static void SumOutsideClick(long x, long y);   // the pump's verdict on an outside click
