@@ -52,17 +52,67 @@ struct AiChatMsg {
 };
 
 // ---- word normalization (QuoteLocator: lowercase letters+digits) ----
+// A byte >= 0x80 is a UTF-8 multibyte sequence's interior - Arabic, accented
+// Latin, CJK. The old isalnum test read those bytes as punctuation and every
+// non-ASCII word vanished from the tokens: an Arabic document's chunks
+// tokenized down to their digits and article numbers, and an Arabic question
+// produced no terms at all - the sidechat's lexical pool went empty (or
+// matched only "numbers and codes") while the summarizer, which rides the raw
+// text, read the same document fine. Non-ASCII now rides as its own bytes (no
+// tolower on them: folding a UTF-8 lead byte corrupts it); both sides of a
+// match run through this same rule, so byte-exact words still meet. ASCII
+// behavior is untouched: only whitespace splits, other ASCII punctuation is
+// absorbed into the word, exactly as the byte-drop era matched Latin text.
+static unsigned AiUtf8Cp(const std::string& s, size_t i, int& len) {
+    unsigned char u = (unsigned char)s[i];
+    if (u < 0x80) { len = 1; return u; }
+    if ((u & 0xE0) == 0xC0 && i + 1 < s.size()) {
+        len = 2; return ((u & 31u) << 6) | ((unsigned char)s[i + 1] & 63u);
+    }
+    if ((u & 0xF0) == 0xE0 && i + 2 < s.size()) {
+        len = 3; return ((u & 15u) << 12) | (((unsigned char)s[i + 1] & 63u) << 6) |
+                        ((unsigned char)s[i + 2] & 63u);
+    }
+    if ((u & 0xF8) == 0xF0 && i + 3 < s.size()) {
+        len = 4; return ((u & 7u) << 18) | (((unsigned char)s[i + 1] & 63u) << 12) |
+                        (((unsigned char)s[i + 2] & 63u) << 6) | ((unsigned char)s[i + 3] & 63u);
+    }
+    len = 1; return u;   // a broken sequence rides as one byte, like the old code
+}
+// The non-ASCII codepoints that still SPLIT a word: the punctuation Arabic
+// writes inside a sentence - comma \xD8\x8C U+060C, semicolon \xD8\x9B U+061B, question mark
+// \xD8\x9F U+061F, full stop \xD9\x94 U+06D4 - the invisible direction marks U+200E/U+200F/U+061C,
+// the quote and dash marks that wrap titles, and the multibyte spaces (NBSP
+// and friends). Without the split, "الوثيقة؟" glued the question mark onto the
+// word and an exact match for the word itself missed. Everything else
+// non-ASCII is a letter and rides whole.
+static bool AiCpSplits(unsigned cp) {
+    if (cp == 0x60C || cp == 0x61B || cp == 0x61F || cp == 0x6D4 || cp == 0x61C) return true;
+    if (cp == 0x200E || cp == 0x200F || cp == 0x200B || cp == 0xFEFF) return true;
+    if (cp == 0xAB || cp == 0xBB || cp == 0x201C || cp == 0x201D ||
+        cp == 0x2018 || cp == 0x2019 || cp == 0x2026 || cp == 0x2013 || cp == 0x2014) return true;
+    if (cp == 0xA0 || cp == 0x202F || cp == 0x3000 || (cp >= 0x2000 && cp <= 0x200A)) return true;
+    return false;
+}
 static void AiWordize(const std::string& text, std::vector<std::string>& words) {
     words.clear();
     std::string cur;
-    for (char c : text) {
-        if (isspace((unsigned char)c)) {
-            if (!cur.empty()) { words.push_back(cur); cur.clear(); }
-        } else if (isalnum((unsigned char)c)) {
-            cur += (char)tolower((unsigned char)c);
+    auto flush = [&]() { if (!cur.empty()) { words.push_back(cur); cur.clear(); } };
+    for (size_t i = 0; i < text.size(); ) {
+        unsigned char u = (unsigned char)text[i];
+        int len = 0;
+        unsigned cp = AiUtf8Cp(text, i, len);
+        if (u < 0x80) {
+            if (isspace(u)) flush();
+            else if (isalnum(u)) cur += (char)tolower(u);
+            i++;
+            continue;
         }
+        if (AiCpSplits(cp)) flush();
+        else cur.append(text, i, (size_t)len);
+        i += (size_t)len;
     }
-    if (!cur.empty()) words.push_back(cur);
+    flush();
 }
 // LocateInChunk: Pass A the exact consecutive run, Pass B the in-order
 // subsequence trusted at max(3, ceil(0.8 * needle words)).
@@ -409,10 +459,28 @@ static void AiPageWords(const TxtPage& pt, int page, std::vector<AiWordIn>& out)
 }
 
 // ---- the document index (per document, persisted) ----
+// The extraction pipeline's build stamp. Bumped whenever a change alters what
+// a page yields: an index chunked by an older build captured that build's
+// extraction (parked shells, OCR fragments over native pages) and its disk
+// cache would otherwise ride forever - the file's bytes never changed, so the
+// hash check passed, and the sidechat answered from junk while the
+// summarizer read the same pages fine. v1 is the native-first pump/arrival
+// era (the commit that stopped the pumps parking empty pages and the OCR
+// landing overwriting the engine text layer).
+static const int AI_EXTRACT_VERSION = 1;
 struct AiDocIndex {
     std::string docId;
     std::wstring path;
     int pageCount = 0;
+    int extractVersion = 0;                     // AI_EXTRACT_VERSION at build time;
+                                                // 0 = a legacy cache (pre-stamp) -
+                                                // always stale, it cannot speak for
+                                                // what the current extraction reads
+    int emptyPages = 0;                         // pages that contributed zero words at
+                                                // build time: parked shells, blanks,
+                                                // flights that failed. A cache whose
+                                                // document was mostly unread to it
+                                                // must not pose as the document
     std::vector<AiChunk> chunks;
     std::vector<std::vector<float>> vectors;    // parallel to chunks (may be empty)
     int dim = 0;
@@ -452,6 +520,8 @@ static bool AiIndexSave(const AiDocIndex& ix) {
     std::string j = "{\"docId\":" + WxJsonStr(WxU(ix.docId)) +
         ",\"path\":" + WxJsonStr(ix.path) +
         ",\"pageCount\":" + std::to_string(ix.pageCount) +
+        ",\"extractVersion\":" + std::to_string(ix.extractVersion) +
+        ",\"emptyPages\":" + std::to_string(ix.emptyPages) +
         ",\"dim\":" + std::to_string(ix.dim) +
         ",\"embModel\":" + WxJsonStr(WxU(ix.embModel)) +
         ",\"prefixKey\":" + WxJsonStr(WxU(ix.prefixKey)) +
@@ -528,6 +598,8 @@ static bool AiIndexLoad(const std::string& docId, AiDocIndex& ix) {
     const crxk::J* p;
     if ((p = j.get("path")) && p->t == 's') ix.path = WxW(p->s);
     if ((p = j.get("pageCount")) && p->t == 'd') ix.pageCount = (int)p->d;
+    if ((p = j.get("extractVersion")) && p->t == 'd') ix.extractVersion = (int)p->d;
+    if ((p = j.get("emptyPages")) && p->t == 'd') ix.emptyPages = (int)p->d;
     if ((p = j.get("dim")) && p->t == 'd') ix.dim = (int)p->d;
     if ((p = j.get("embModel")) && p->t == 's') ix.embModel = p->s;
     if ((p = j.get("prefixKey")) && p->t == 's') ix.prefixKey = p->s;
@@ -619,9 +691,19 @@ static void AiQueryTerms(const std::string& q, std::vector<std::string>& terms) 
         }
         cur.clear();
     };
-    for (char c : q) {
-        if (isalnum((unsigned char)c)) cur += (char)tolower((unsigned char)c);
-        else push();
+    for (size_t i = 0; i < q.size(); ) {
+        unsigned char u = (unsigned char)q[i];
+        int len = 0;
+        unsigned cp = AiUtf8Cp(q, i, len);
+        if (u < 0x80) {
+            if (isalnum(u)) cur += (char)tolower(u);
+            else push();
+            i++;
+            continue;
+        }
+        if (AiCpSplits(cp)) push();       // the same split rule AiWordize runs:
+        else cur.append(q, i, (size_t)len);  // a question mark must not ride into
+        i += (size_t)len;                    // the last word it lands on
     }
     push();
 }

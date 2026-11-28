@@ -56,6 +56,7 @@ static std::mutex g_aiIdxMtx;            // guards the index's STRUCTURE (reset,
 static bool g_aiIndexReady = false;
 static bool g_aiIndexing = false;
 static int g_aiIdxPage = 0;
+static int g_aiIdxEmpty = 0;             // pages that contributed zero words this build
 static std::string g_aiIdxKey;
 static std::wstring g_aiIdxPath;
 static AiChunker* g_aiIdxChunk = nullptr;

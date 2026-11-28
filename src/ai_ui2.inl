@@ -568,6 +568,15 @@ static void AiIndexKickoff(const std::wstring& path) {
         // zero instead of answering from pages it no longer has. A legacy
         // cache without a recorded hash keeps riding (we cannot know).
         if (!ix.contentHash.empty()) stale = (AiFileHash(path) != ix.contentHash);
+        // Two more ways a cache lies about the document it rides:
+        //  - a build by an older extraction (extractVersion behind, or the
+        //    pre-stamp 0) chunked pages that build could not read;
+        //  - a build whose document was mostly unread to it (emptyPages over
+        //    a third of the pages) captured shells and blanks, not the text -
+        //    the sidechat answered "fragments and numbers" off exactly such
+        //    a cache while the summarizer read the same file fine.
+        if (!stale && ix.extractVersion != AI_EXTRACT_VERSION) stale = true;
+        if (!stale && ix.pageCount > 0 && ix.emptyPages * 3 > ix.pageCount) stale = true;
     }
     if (!stale && !ix.chunks.empty()) {
         ix.path = path;
@@ -593,6 +602,7 @@ static void AiIndexKickoff(const std::wstring& path) {
     g_aiSemWant = false;   // a stale pre-book (press during a build that then
                            // aborted or a doc switch) must not fire THIS build
     g_aiIdxPage = 0;
+    g_aiIdxEmpty = 0;
     g_aiIdxKey = docId;
     g_aiIdxPath = path;
     if (g_aiIdxChunk) { delete g_aiIdxChunk; g_aiIdxChunk = nullptr; }
@@ -604,6 +614,7 @@ static void AiIndexKickoff(const std::wstring& path) {
     g_aiIndex.docId = docId;
     g_aiIndex.path = path;
     g_aiIndex.pageCount = DVF().n;
+    g_aiIndex.extractVersion = AI_EXTRACT_VERSION;
     g_aiIndex.contentHash = AiFileHash(path);
     AiPanelSend(WxW(AiStatusJson("status")));
     // 150ms cadence - see AiRangeStart's note: one dense page's text layer can
@@ -628,6 +639,8 @@ static void AiIndexTick() {
     }
     int p = g_aiIdxPage;
     if (p >= D.n) {
+        g_aiIndex.emptyPages = g_aiIdxEmpty;   // rides into the saved cache: the
+                                               // kickoff's thin-cache check reads it
         g_aiIdxChunk->Finish();
         {
             // the build's landing move rides the seat lock - the reply thread's
@@ -705,6 +718,10 @@ static void AiIndexTick() {
         std::vector<AiWordIn> words;
         AiPageWords(it->second, p, words);
         for (auto& w : words) g_aiIdxChunk->Append(w);
+    } else {
+        g_aiIdxEmpty++;   // a page the build never read: shell, blank, or a flight
+                          // that failed - the saved cache records the count so the
+                          // next kickoff can tell a real index from a thin one
     }
     g_aiIdxPage++;
     AiPanelSend(WxW(AiStatusJson("status")));
