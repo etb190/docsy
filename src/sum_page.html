@@ -1398,7 +1398,7 @@ $("bNext").onclick=function(){
 document.querySelectorAll(".chip").forEach(function(c){
   c.onclick=function(){
     if(c.dataset.p==="custom"){        // C flips the range logic to free input:
-      if(S.mode==="web") return;      // the X-X box stands in for the chips
+      if(S.mode==="web") return;      // the navigator's start box speaks X-X
       enterCustomMode();
       return;
     }
