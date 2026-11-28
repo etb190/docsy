@@ -1107,6 +1107,14 @@ static void AiHistSave() {
                          std::to_string(src.rects[q].w) + "," +
                          std::to_string(src.rects[q].h) + "]";
                 }
+                // the chunk's own words per page: a saved conversation's chips
+                // light their full passages after a restart, not the quote head
+                j += "],\"passages\":[";
+                for (size_t q = 0; q < src.passages.size(); q++) {
+                    if (q) j += ",";
+                    j += "[" + std::to_string(src.passages[q].first) + "," +
+                         WxJsonStr(WxU(src.passages[q].second)) + "]";
+                }
                 j += "]}";
             }
             j += "]}";
