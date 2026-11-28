@@ -114,36 +114,123 @@ static void AiWordize(const std::string& text, std::vector<std::string>& words) 
     }
     flush();
 }
-// LocateInChunk: Pass A the exact consecutive run, Pass B the in-order
-// subsequence trusted at max(3, ceil(0.8 * needle words)).
+// The quote match's Arabic skeleton. Models quote Arabic without the marks
+// the text layer carries - a legal PDF writes fatha, kasra, shadda, tatweel
+// inside its words and writes alef as hamza/madda carriers and final ya as
+// alef maqsura, while the model's copy rides plain - so byte-exact word
+// equality missed every decorated word and the highlight fell to the chunk's
+// page-span box. One rule now rides BOTH sides of every quote match: strip
+// the marks that live inside a word (harakat through Quranic annotation,
+// tatweel, the direction chameleons) and fold the letters Arabic spells
+// several ways onto one (alef family onto alef, alef maqsura and Farsi yeh
+// onto yeh). ASCII and the other scripts ride untouched.
+static void AiArSkeleton(const std::string& w, std::string& out) {
+    out.clear(); out.reserve(w.size());
+    for (size_t i = 0; i < w.size(); ) {
+        unsigned char u = (unsigned char)w[i];
+        int len = 0;
+        unsigned cp = AiUtf8Cp(w, i, len);
+        if (u < 0x80) { out.append(w, i, 1); i++; continue; }
+        bool strip = (cp >= 0x610 && cp <= 0x61A) ||   // Quranic annotation signs
+                     cp == 0x640 ||                    // tatweel
+                     (cp >= 0x64B && cp <= 0x65F) ||   // harakat through small ya
+                     cp == 0x670 ||                    // superscript alef
+                     (cp >= 0x6D6 && cp <= 0x6ED) ||   // Quranic marginal marks
+                     cp == 0x6DD || cp == 0xFEFF;
+        if (strip) { i += (size_t)len; continue; }
+        if (cp == 0x622 || cp == 0x623 || cp == 0x625 || cp == 0x671)
+            cp = 0x627;                                // madda/hamza alefs -> alef
+        else if (cp == 0x649 || cp == 0x6CC)
+            cp = 0x64A;                                // alef maqsura / Farsi yeh -> ya
+        if (cp < 0x80) out += (char)cp;
+        else if (cp < 0x800) {
+            out += (char)(0xC0 | (cp >> 6));
+            out += (char)(0x80 | (cp & 63));
+        } else {
+            out += (char)(0xE0 | (cp >> 12));
+            out += (char)(0x80 | ((cp >> 6) & 63));
+            out += (char)(0x80 | (cp & 63));
+        }
+        i += (size_t)len;
+    }
+}
+// LocateInChunk: Pass A the quote's consecutive run - byte-equal first, then
+// the Arabic skeleton (the model's plain copy against the page's decorated
+// words); Pass B the tight in-order subsequence: the needle's own words fill
+// the window, a reshaped needle word is skipped only within a small budget,
+// the stream words between matches stay within a few, and the whole window
+// stays quote-sized - a needle of common words that scatters across a page
+// must NOT be trusted to light the page (the span guard is what kept the old
+// pass B's wide walk from painting a bigger blob than the chunk box it
+// replaced). The window's end is the LAST matched word - the old pass B wrote
+// first+1, stranding every geometric reader of the window on the first word's
+// page. The same matcher rides both sides of the citation: the chunk locator
+// here and the highlight's page matcher in ai_ui2.inl.
 enum AiQuoteHit { AQH_NONE = 0, AQH_EXACT, AQH_APPROX };
 static AiQuoteHit AiLocateWords(const std::vector<std::string>& chunk,
                                 const std::vector<std::string>& needle,
                                 size_t& startOut, size_t& endOut) {
-    if (needle.empty() || chunk.empty()) return AQH_NONE;
-    // Pass A
-    for (size_t i = 0; i + needle.size() <= chunk.size(); i++) {
-        bool eq = true;
-        for (size_t j = 0; j < needle.size(); j++)
-            if (chunk[i + j] != needle[j]) { eq = false; break; }
-        if (eq) { startOut = i; endOut = i + needle.size(); return AQH_EXACT; }
-    }
-    // Pass B: needle >= 3 words
-    if (needle.size() < 3) return AQH_NONE;
-    size_t need = max<size_t>(3, (size_t)ceil(0.8 * (double)needle.size()));
-    size_t first = std::string::npos, matched = 0;
-    size_t j = 0;
-    for (size_t i = 0; i < chunk.size() && j < needle.size(); i++) {
-        if (chunk[i] == needle[j]) {
-            if (first == std::string::npos) first = i;
-            matched++; j++;
+    startOut = endOut = 0;
+    if (needle.empty() || chunk.empty() || needle.size() > chunk.size())
+        return AQH_NONE;
+    // the skeletons once per stream (byte equality stays the fast path)
+    std::vector<std::string> skC(chunk.size()), skN(needle.size());
+    for (size_t i = 0; i < chunk.size(); i++) AiArSkeleton(chunk[i], skC[i]);
+    for (size_t i = 0; i < needle.size(); i++) AiArSkeleton(needle[i], skN[i]);
+    // Pass A: the exact consecutive run - byte-equal first, skeleton-equal
+    // next; the first home wins
+    for (int wantSk = 0; wantSk < 2; wantSk++) {
+        for (size_t i = 0; i + needle.size() <= chunk.size(); i++) {
+            bool eq = true;
+            for (size_t j = 0; j < needle.size(); j++) {
+                const std::string& a = wantSk ? skC[i + j] : chunk[i + j];
+                const std::string& b = wantSk ? skN[j] : needle[j];
+                if (a != b) { eq = false; break; }
+            }
+            if (eq) { startOut = i; endOut = i + needle.size(); return AQH_EXACT; }
         }
     }
-    if (j == needle.size() && matched >= need && first != std::string::npos) {
-        startOut = first;
-        endOut = first + 1;      // the window's end lands below
-        return AQH_APPROX;
+    // Pass B: the tight in-order subsequence (the needle carries >= 3 words)
+    if (needle.size() < 3) return AQH_NONE;
+    const size_t maxSkip = needle.size() / 5;        // the model reshaped a few words
+    const size_t maxGap = 3;                         // stream words a wrap may interleave
+    const size_t minMatch = max<size_t>(3, (size_t)ceil(0.75 * (double)needle.size()));
+    const size_t maxSpan = needle.size() * 2 + 4;    // the window stays quote-sized
+    bool bestSet = false;
+    size_t bFirst = 0, bLast = 0, bMatched = 0, bSpan = 0;
+    for (size_t s = 0; s + minMatch <= chunk.size(); s++) {
+        size_t k = 0, matched = 0, skipped = 0;
+        size_t first = (size_t)-1, last = (size_t)-1;
+        for (size_t i = s; i < chunk.size() && k < needle.size(); i++) {
+            // the walk dies where a quote does not reach: before the first
+            // match the window cannot grow past its own length; after it the
+            // gap between matched words stays a wrap's width
+            if (first == (size_t)-1) { if (i - s > maxSpan) break; }
+            else if (i - last > maxGap + 1) break;
+            size_t kk = k, use = 0;
+            while (kk < needle.size() &&
+                   !(chunk[i] == needle[kk] || skC[i] == skN[kk])) {
+                kk++; use++;
+                if (use > maxSkip) break;
+            }
+            if (kk < needle.size() &&
+                (chunk[i] == needle[kk] || skC[i] == skN[kk])) {
+                if (first == (size_t)-1) first = i;
+                matched++; skipped += use; k = kk + 1; last = i;
+            }
+        }
+        if (k == needle.size() && matched >= minMatch) {
+            size_t span = last - first + 1;
+            if (span <= maxSpan &&
+                (!bestSet || matched > bMatched ||
+                 (matched == bMatched &&
+                  (span < bSpan || (span == bSpan && first < bFirst))))) {
+                bestSet = true; bFirst = first; bLast = last;
+                bMatched = matched; bSpan = span;
+            }
+        }
     }
+    if (bestSet) { startOut = bFirst; endOut = bLast + 1; return AQH_APPROX; }
     return AQH_NONE;
 }
 static AiQuoteHit AiLocateInText(const std::string& chunkText, const std::string& quote,
@@ -153,15 +240,18 @@ static AiQuoteHit AiLocateInText(const std::string& chunkText, const std::string
     AiWordize(quote, nw);
     return AiLocateWords(cw, nw, startOut, endOut);
 }
-// PassageQuoteValidator: >= 8 normalized letters, else unverified
+// PassageQuoteValidator: >= 8 normalized letters, else unverified. The join
+// rides the Arabic skeleton - a decorated chunk against the model's plain
+// quote still reads as the same letters (the byte join failed every harakat
+// and the quote landed unverified, which sent the highlight to the span box).
 static bool AiQuotePlausible(const std::string& quote, const std::string& chunkText) {
-    std::string qj, cj;
+    std::string qj, cj, sk;
     {
         std::vector<std::string> w;
         AiWordize(quote, w);
-        for (auto& x : w) qj += x;
+        for (auto& x : w) { AiArSkeleton(x, sk); qj += sk; }
         AiWordize(chunkText, w);
-        for (auto& x : w) cj += x;
+        for (auto& x : w) { AiArSkeleton(x, sk); cj += sk; }
     }
     if (qj.size() < 8) return false;
     return cj.find(qj) != std::string::npos;
@@ -245,11 +335,17 @@ static std::string AiNormalizeForMatch(const std::string& text) {
     }
     return out;
 }
-// SegmentHead: the first <= 120 chars of the normalized segment, word-bounded
+// SegmentHead: the first <= 120 bytes of the normalized segment, word-bounded.
+// The cut walks back to a UTF-8 lead byte first - a 120-byte resize mid-
+// codepoint snapped an Arabic letter in half and the fragment rode into the
+// quote as a token no page word could ever equal (the backfilled citation's
+// highlight fell to the span box on a byte that belongs to no word).
 static std::string AiSegmentHead(const std::string& seg) {
     std::string n = AiNormalizeForMatch(seg);
     if (n.size() <= 120) return n;
-    n.resize(120);
+    size_t cut = 120;
+    while (cut > 0 && ((unsigned char)n[cut] & 0xC0) == 0x80) cut--;   // not a lead byte
+    n.resize(cut);
     size_t sp = n.find_last_of(' ');
     if (sp != std::string::npos && sp > 40) n.resize(sp);
     return n;

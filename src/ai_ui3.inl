@@ -376,57 +376,77 @@ static void AiPanelMessage(const wchar_t* json) {
                     StatusRepaint();
                     return;
                 }
-                // the word-accurate road first: the quote's own words against
+                // the word-accurate roads first: the quote's own words against
                 // the page's live text layer, one slim rect per line of quoted
-                // words. The old road laid the cited chunk's whole page-span
-                // box - a blob a quarter-page wide that could miss the quoted
-                // words entirely and never tracked a wrapped passage. The
-                // cited page goes first, then its neighbors: a passage walks
-                // over a page break and the chunk's attribution lands where
-                // the chunk starts. Runs even while the index rebuilds - the
-                // page's text is already there.
-                std::vector<FRect> rects;
-                int navPage = -1;
+                // words. The skeleton matcher carries the model's plain quote
+                // onto the page's decorated Arabic (harakat, tatweel, hamza
+                // carriers, alef maqsura), and the locator's gap and span
+                // guards keep a needle of common words that scatters across
+                // the page from lighting everything between its farthest two
+                // matches - the unguarded subsequence walk was the second blob
+                // the reader kept hitting. The cited page goes first, then its
+                // neighbors: a passage walks over a page break and the chunk's
+                // attribution lands where the chunk starts. The cross-page
+                // road follows: a passage straddling the break matches no
+                // single page, and the joined two-page stream is the only
+                // reader that sees it whole.
+                std::vector<FRect> rects, rects2;
+                int navPage = -1, page2 = -1;
                 if (!src->quote.empty()) {
                     int nearPages[3] = { src->pageIndex, src->pageIndex + 1, src->pageIndex - 1 };
                     for (int pi : nearPages) {
                         if (pi < 0 || pi >= DVF().n) continue;
                         if (AiQuotePageRects(DVF(), pi, src->quote, rects)) { navPage = pi; break; }
                     }
-                }
-                // the chunk's span box stays as the fallback for a page the
-                // text layer cannot carry (a scan the engine cannot read, an
-                // OCR-only page still in flight): the verified span's page box
-                // when it still lands, else the cited page's own box
-                if (navPage < 0 && g_aiIndexReady) {
-                    bool found = false;
-                    if (src->location != AQL_UNLOCATED && !src->quote.empty()) {
-                        for (auto& ch : g_aiIndex.chunks) {
-                            for (auto& sp : ch.pages) {
-                                if (sp.page != src->pageIndex) continue;
-                                size_t ws, we;
-                                if (AiLocateInText(ch.text, src->quote, ws, we) != AQH_NONE &&
-                                    ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
-                                    rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
-                                    found = true;
-                                    break;
-                                }
+                    if (navPage < 0) {
+                        int pairs[2] = { src->pageIndex, src->pageIndex - 1 };
+                        for (int pi : pairs) {
+                            if (pi < 0) continue;
+                            if (AiQuoteRectsCross(DVF(), pi, src->quote, page2, rects, rects2)) {
+                                navPage = pi; break;
                             }
-                            if (found) break;
                         }
                     }
-                    if (!found)
-                        for (auto& ch : g_aiIndex.chunks)
-                            for (auto& sp : ch.pages)
-                                if (sp.page == src->pageIndex) {
-                                    rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
-                                    found = true;
-                                    break;
+                }
+                // the chunk's span box stays as the fallback - and only for a
+                // page the text layer cannot carry (a scan the engine cannot
+                // read, an OCR-only page still in flight): the word roads need
+                // words, and on a native page the span box IS the reported
+                // blob - a wrong square never helped, so a native page the
+                // roads could not pin lands with no highlight at all.
+                if (navPage < 0 && g_aiIndexReady) {
+                    TxtPage* tp = TtFor(DVF(), src->pageIndex);
+                    bool pageHasWords = tp && !tp->cells.empty();
+                    if (!pageHasWords) {
+                        bool found = false;
+                        if (src->location != AQL_UNLOCATED && !src->quote.empty()) {
+                            for (auto& ch : g_aiIndex.chunks) {
+                                for (auto& sp : ch.pages) {
+                                    if (sp.page != src->pageIndex) continue;
+                                    size_t ws, we;
+                                    if (AiLocateInText(ch.text, src->quote, ws, we) != AQH_NONE &&
+                                        ws >= (size_t)sp.wordStart && we <= (size_t)sp.wordEnd) {
+                                        rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                                        found = true;
+                                        break;
+                                    }
                                 }
-                    if (found) navPage = src->pageIndex;
+                                if (found) break;
+                            }
+                        }
+                        if (!found)
+                            for (auto& ch : g_aiIndex.chunks)
+                                for (auto& sp : ch.pages)
+                                    if (sp.page == src->pageIndex) {
+                                        rects.push_back({ sp.l, sp.t, sp.r - sp.l, sp.b - sp.t });
+                                        found = true;
+                                        break;
+                                    }
+                        if (found) navPage = src->pageIndex;
+                    }
                 }
                 if (navPage < 0) navPage = src->pageIndex;   // the page lands, no highlight
-                AiNavigateToSource(navPage, rects);
+                AiNavigateToSource(navPage, page2, rects, rects2);
             }
         }
     }

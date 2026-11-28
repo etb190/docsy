@@ -1641,26 +1641,33 @@ static void NotesPanelMessage(const wchar_t* json) {
 // the index's wordizer (AiWordize - the exact normalization the chunk match
 // ran), the page's cells ride grouped into words in reading order (both the
 // native road's letter cells and the OCR road's sliced letter cells renumber
-// into word ordinals under TtLines), and the same two passes the chunk match
-// runs - the exact consecutive run, else the in-order subsequence - find the
-// quoted words. TtRects turns the matched cell span into one slim rect per
-// line, first quoted word to last: the passage itself, line by line, not its
-// neighborhood.
-static bool AiQuoteRects(const TxtPage& pt, const std::string& quote,
-                         std::vector<FRect>& out) {
-    out.clear();
-    if (quote.empty() || pt.cells.empty() || pt.lines.empty()) return false;
-    std::vector<std::string> needle;
-    AiWordize(quote, needle);
-    if (needle.empty()) return false;
-    // the page's words in reading order: consecutive cells of one word ordinal
-    // join with no separator, and every token the wordizer cuts out of the
-    // joined text keeps the word's whole cell span, so a match names complete
-    // words (a quote word that hits the fragment before a glued Arabic comma
-    // still lights the word it lives on)
-    std::vector<std::string> toks;   toks.reserve(pt.cells.size());
-    std::vector<int> tokA, tokB;     tokA.reserve(pt.cells.size());
-                                     tokB.reserve(pt.cells.size());
+// into word ordinals under TtLines), and AiLocateWords - the chunk locator's
+// own matcher, byte run then Arabic skeleton then the tight guarded
+// subsequence - finds the quoted words. The skeleton is what carries Arabic:
+// the model quotes the chunk plain while the page's words ride decorated
+// (harakat, tatweel, hamza carriers, alef maqsura), and byte equality missed
+// every one. The locator's guards are what keep it word-accurate: a needle of
+// common words that scatters across the page fails the gap and span checks
+// instead of lighting everything between its farthest two matches - the old
+// hand-rolled pass B had no span guard and painted a wider blob than the
+// chunk box it replaced. TtRects turns the matched cell span into one slim
+// rect per line, first quoted word to last: the passage itself, line by line,
+// not its neighborhood.
+struct AiPageToks {
+    std::vector<std::string> toks;   // one wordizer token per page word
+    std::vector<int> a, b;           // the token's first/last cell, inclusive
+};
+static void AiPageTokenize(const TxtPage& pt, AiPageToks& t) {
+    t.toks.clear(); t.a.clear(); t.b.clear();
+    if (pt.cells.empty()) return;
+    t.toks.reserve(pt.cells.size());
+    t.a.reserve(pt.cells.size());
+    t.b.reserve(pt.cells.size());
+    // words in reading order: consecutive cells of one word ordinal join with
+    // no separator, and every token the wordizer cuts out of the joined text
+    // keeps the word's whole cell span, so a match names complete words (a
+    // quote word that hits the fragment before a glued Arabic comma still
+    // lights the word it lives on)
     for (int i = 0; i < (int)pt.cells.size(); ) {
         int w = pt.cells[i].word;
         std::string joined;
@@ -1669,39 +1676,27 @@ static bool AiQuoteRects(const TxtPage& pt, const std::string& quote,
             joined += WxU(pt.cells[j].text);
         std::vector<std::string> cw;
         AiWordize(joined, cw);
-        for (auto& t : cw) {
-            toks.push_back(std::move(t));
-            tokA.push_back(i);
-            tokB.push_back(j - 1);
+        for (auto& x : cw) {
+            t.toks.push_back(std::move(x));
+            t.a.push_back(i);
+            t.b.push_back(j - 1);
         }
         i = j;
     }
-    if (toks.empty()) return false;
-    // pass A: the exact consecutive run
-    long long firstTok = -1, lastTok = -1;
-    for (size_t a = 0; a + needle.size() <= toks.size(); a++) {
-        bool eq = true;
-        for (size_t k = 0; k < needle.size(); k++)
-            if (toks[a + k] != needle[k]) { eq = false; break; }
-        if (eq) { firstTok = (long long)a; lastTok = (long long)(a + needle.size() - 1); break; }
-    }
-    // pass B: the quote as an in-order subsequence of the page's words - the
-    // chunk locator's own second pass, honored here the same way (a model
-    // quote that reshapes a little still finds its passage)
-    if (firstTok < 0 && needle.size() >= 3) {
-        size_t need = max<size_t>(3, (size_t)ceil(0.8 * (double)needle.size()));
-        size_t k = 0, matched = 0;
-        for (size_t a = 0; a < toks.size() && k < needle.size(); a++) {
-            if (toks[a] == needle[k]) {
-                if (firstTok < 0) firstTok = (long long)a;
-                lastTok = (long long)a;
-                matched++; k++;
-            }
-        }
-        if (k != needle.size() || matched < need) { firstTok = lastTok = -1; }
-    }
-    if (firstTok < 0 || lastTok < 0) return false;
-    int s = tokA[(size_t)firstTok], e = tokB[(size_t)lastTok] + 1;
+}
+static bool AiQuoteRects(const TxtPage& pt, const std::string& quote,
+                         std::vector<FRect>& out) {
+    out.clear();
+    if (quote.empty() || pt.cells.empty() || pt.lines.empty()) return false;
+    std::vector<std::string> needle;
+    AiWordize(quote, needle);
+    if (needle.empty()) return false;
+    AiPageToks t;
+    AiPageTokenize(pt, t);
+    if (t.toks.empty()) return false;
+    size_t ws = 0, we = 0;
+    if (AiLocateWords(t.toks, needle, ws, we) == AQH_NONE) return false;
+    int s = t.a[ws], e = t.b[we - 1] + 1;
     if (e <= s || e > (int)pt.cells.size()) return false;
     TtRects(pt, s, e, out);
     return !out.empty();
@@ -1715,15 +1710,64 @@ static bool AiQuotePageRects(DocState& D, int pageIndex, const std::string& quot
     if (!tp) return false;
     return AiQuoteRects(*tp, quote, out);
 }
+// The quote that walks over a page break: the chunk text reads the two pages
+// as one word stream, so a passage's head sits on the cited page's last lines
+// and its tail on the next page's first lines - and every single-page road
+// misses half of it (the old code fell to the chunk's span box: the blob).
+// The two pages' token streams join here (the break rides as the ordinary
+// word gap the chunk text reads it as), the locator runs on the joined
+// stream, and each page cuts the cells its own half covers into per-line
+// rects. A window that never crosses the seam is refused - the single-page
+// roads own that case - and a seam crossed by page furniture (the running
+// header and footer the chunk text carries in the same spot) is matched by
+// the same words the chunk carries, furniture included.
+static bool AiQuoteRectsCross(DocState& D, int pageIndex, const std::string& quote,
+                              int& page2, std::vector<FRect>& out,
+                              std::vector<FRect>& out2) {
+    out.clear(); out2.clear(); page2 = -1;
+    if (pageIndex < 0 || pageIndex + 1 >= D.n || quote.empty()) return false;
+    TxtPage* p1 = TtFor(D, pageIndex);
+    TxtPage* p2 = TtFor(D, pageIndex + 1);
+    if (!p1 || !p2 || p1->cells.empty() || p2->cells.empty()) return false;
+    AiPageToks t1, t2;
+    AiPageTokenize(*p1, t1);
+    AiPageTokenize(*p2, t2);
+    size_t n1 = t1.toks.size();
+    if (!n1 || t2.toks.empty()) return false;
+    std::vector<std::string> toks = t1.toks;
+    toks.insert(toks.end(), t2.toks.begin(), t2.toks.end());
+    std::vector<std::string> needle;
+    AiWordize(quote, needle);
+    if (needle.empty()) return false;
+    size_t ws = 0, we = 0;
+    if (AiLocateWords(toks, needle, ws, we) == AQH_NONE) return false;
+    if (ws >= n1 || we <= n1) return false;   // both halves on one page: not ours
+    // page one's half runs from the quote's first word to the seam (the page's
+    // last word); page two's half starts at its own first word - the window
+    // crosses the seam, so ws < n1 and the page-two token index is 0, never
+    // ws - n1 (a size_t underflow: the wild index read past the vector)
+    int s1 = t1.a[ws], e1 = t1.b[n1 - 1] + 1;
+    int s2 = t2.a[0], e2 = t2.b[we - 1 - n1] + 1;
+    if (e1 <= s1 || e1 > (int)p1->cells.size()) return false;
+    if (e2 <= s2 || e2 > (int)p2->cells.size()) return false;
+    TtRects(*p1, s1, e1, out);
+    TtRects(*p2, s2, e2, out2);
+    page2 = pageIndex + 1;
+    return !out.empty() && !out2.empty();
+}
 
 // ---- the citation jump: the PDF page + the highlight ----
 struct AiHighlight {
     int gen = 0;
     int page = -1;
     std::vector<FRect> rects;
+    int page2 = -1;                  // a passage that walked over the break
+    std::vector<FRect> rects2;       // lights its continuation page too
 };
 static AiHighlight g_aiHi;
-static void AiNavigateToSource(int pageIndex, const std::vector<FRect>& rects) {
+static void AiNavigateToSource(int pageIndex, int page2,
+                               const std::vector<FRect>& rects,
+                               const std::vector<FRect>& rects2) {
     DocState& D = DVF();
     if (pageIndex < 0 || pageIndex >= D.n) {
         g.statusHoldText = L"The quoted passage could not be found in this document.";
@@ -1734,6 +1778,8 @@ static void AiNavigateToSource(int pageIndex, const std::vector<FRect>& rects) {
     g_aiHi.gen++;
     g_aiHi.page = pageIndex;
     g_aiHi.rects = rects;
+    g_aiHi.page2 = page2;
+    g_aiHi.rects2 = rects2;
     bool b = FocusB();
     if (D.vm == 1 && pageIndex != D.cur) SetPage(pageIndex);
     int row = std::clamp(pageIndex / PerRow(D), 0, max(0, (int)D.rh.size() - 1));
@@ -1745,13 +1791,20 @@ static void AiNavigateToSource(int pageIndex, const std::vector<FRect>& rects) {
     InvalidateRect(g.view, nullptr, FALSE);
 }
 static void AiPaintPage(HDC dc, const DocState& D, int page, int px, int py) {
-    if (g_aiHi.page != page || g_aiHi.rects.empty()) return;
+    bool main = (g_aiHi.page == page && !g_aiHi.rects.empty());
+    bool cont = (g_aiHi.page2 == page && !g_aiHi.rects2.empty());
+    if (!main && !cont) return;
     float k = (float)(D.zoom * g.dpi);
     Gdiplus::Graphics gs(dc);
     Gdiplus::SolidBrush br(Gdiplus::Color(88, 100, 180, 255));
-    for (auto& r : g_aiHi.rects)
-        gs.FillRectangle(&br, Gdiplus::RectF(px + r.x * k, py + r.y * k,
-                                             max(r.w * k, 3.0f), max(r.h * k, 3.0f)));
+    if (main)
+        for (auto& r : g_aiHi.rects)
+            gs.FillRectangle(&br, Gdiplus::RectF(px + r.x * k, py + r.y * k,
+                                                 max(r.w * k, 3.0f), max(r.h * k, 3.0f)));
+    if (cont)
+        for (auto& r : g_aiHi.rects2)
+            gs.FillRectangle(&br, Gdiplus::RectF(px + r.x * k, py + r.y * k,
+                                                 max(r.w * k, 3.0f), max(r.h * k, 3.0f)));
 }
 
 // ---- the web citation jump: find + select + scroll on the live page ----
