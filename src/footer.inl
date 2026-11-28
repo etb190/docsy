@@ -161,6 +161,8 @@ static void SetViewMode(int m) {
     if (!D.n || m == D.vm || m < 0 || m > 3) return;
     int c = PageAt(D, D.sy + g.ch / 3);
     D.vm = m;
+    g.prefVm = m;                            // the app's stand follows: every document
+                                             // after this one opens in the mode just chosen
     if (D.fitMode != 2) ApplyFit(D.fitMode == 1, FocusB()); else Layout(D, FocusB());
     ScrollTo(D.sx, max(0, PageTop(D, c) - Gap() / 2));   // the current page's row stays in sight
     InvalidateRect(g.view, nullptr, FALSE);
@@ -202,6 +204,7 @@ static void ToggleFull(HWND h) {
 // negative (dark reading for light documents). docsy inverts during the blit.
 static void ToggleInv() {
     g.inv = !g.inv;
+    AiSetSetting("app.inv", g.inv ? "1" : "0");   // the lamp rides out with the session
     InvalidateRect(g.view, nullptr, FALSE);
     StatusRepaint();
 }

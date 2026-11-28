@@ -5,7 +5,7 @@ Tiny, fast, native Windows PDF reader. One C++ file, no dependencies, uses the P
 
 Keys: Ctrl+O open - drag & drop - wheel scroll (single view flips at the page edges) - Ctrl+wheel zoom - PgUp/PgDn/Space - Home/End - +/- zoom - F or Ctrl+0 fit width - Ctrl+1 100% - Ctrl+2 fit page - F5/F6/F7/F8 continuous/single/two-page/grid views - F9 thumbnails - F11 full screen - Ctrl+F find (Enter/Shift+Enter or F3/Shift+F3 step, Alt+C match case, Alt+W whole word, Esc closes) - drag on text to select, double-click for a word, click the status line for the file size.
 
-One instance: opening a PDF (or launching the exe again) while Docsy is already up hands the file to the running window as a new tab instead of a second copy, and every document reopens where it was last read - the page the pane sat on when it or the app closed, the thumbnail rail landing there with it - and the window itself comes back at the size and spot it was closed at, maximized included.
+One instance: opening a PDF (or launching the exe again) while Docsy is already up hands the file to the running window as a new tab instead of a second copy, and every document reopens where it was last read - the page the pane sat on when it or the app closed, the thumbnail rail landing there with it - and the window itself comes back at the size and spot it was closed at, maximized included. Every PDF left open rides back in as its own tab when the app starts, pane by pane with each pane's front tab and the split seated where they were, and the reading stand follows too: the view mode (continuous, single, two-page, grid), the fit or zoom, and the night lamp are the app's own answers, applied to every document and remembered across runs.
 
 
 ## Browser extensions

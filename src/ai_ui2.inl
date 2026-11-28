@@ -3191,6 +3191,39 @@ static void SessionSaveAll() {
             AiSetSetting("app.winmax", wp.showCmd == SW_SHOWMAXIMIZED ? "1" : "0");
         }
     }
+    {   // the whole tab set rides out, pane by pane in strip order: the live
+        // front slot reads the working set, the parked slots their own state,
+        // and every document re-remembers its page (a switch parks without a
+        // store write, so this is the walk-out chance). Which pane led,
+        // whether the split stood, and the reading stand's answers go too.
+        for (int b = 0; b < 2; b++) {
+            std::vector<DocState>& T = Tabs(b);
+            std::wstring list;
+            int act = -1, cnt = 0;
+            if (T.empty()) {
+                if (DV(b).n > 0 && !DV(b).path.empty()) {
+                    list = DV(b).path + L"\n";     // no strip yet: the live document is
+                    act = 0;                       // the pane's one and only tab
+                }
+            } else {
+                for (int i = 0; i < (int)T.size(); i++) {
+                    const DocState& s = (i == Act(b)) ? DV(b) : T[i];
+                    if (!s.n || s.path.empty()) continue;
+                    if (i == Act(b)) act = cnt;
+                    PdfRememberPage(s);
+                    list += s.path + L"\n";
+                    cnt++;
+                }
+            }
+            AiSetSetting(b ? "app.tabsB" : "app.tabsA", WxU(list));
+            AiSetSetting(b ? "app.actB" : "app.actA", std::to_string(act));
+        }
+        AiSetSetting("app.focusB", FocusB() ? "1" : "0");
+        AiSetSetting("app.split", g.split ? "1" : "0");
+        AiSetSetting("app.vm", std::to_string(g.prefVm));
+        AiSetSetting("app.fit", std::to_string(g.prefFit));
+        AiSetSetting("app.zoom", std::to_string(g.prefZoom));
+    }
 }
 // The window's own stand back: size, position and maximized flag from the
 // session's keys. The rectangle must still land on a live monitor's work
@@ -3211,11 +3244,72 @@ static bool WinPlaceLoad(RECT& r, bool& zoomed) {
     RECT inter;
     return IntersectRect(&inter, &r, &mi.rcWork) != 0;   // some of it must be on a screen
 }
-static void SessionRestore() {
+// The reading stand's defaults: view mode, fit, zoom and the night lamp, read
+// once before the first paint so the first document opens the way the last
+// session read, without a visible flip.
+static void PrefsLoad() {
+    g.prefVm = min(3, max(0, atoi(AiGetSetting("app.vm", "0").c_str())));
+    g.prefFit = min(2, max(0, atoi(AiGetSetting("app.fit", "2").c_str())));
+    g.prefZoom = atof(AiGetSetting("app.zoom", "1.0").c_str());
+    if (g.prefZoom < 0.1 || g.prefZoom > 6.0) g.prefZoom = 1.0;
+    g.inv = AiGetSetting("app.inv", "0") == "1";
+}
+static void SessionRestore(const wchar_t* cli) {
     std::string view = AiGetSetting("app.view", "pdf");
-    std::string doc = AiGetSetting("app.doc", "");
-    if (!doc.empty() && WxFileExists(WxW(doc).c_str()))
-        TabOpenInto(false, WxW(doc));          // the document rides beneath every view
+    // Every open document rides back in, pane by pane in strip order, through
+    // the same queue a drop rides - one document per posted message, the
+    // window painting between loads - and when the queue drains, its tail
+    // seats each pane's saved front tab and the pane the reader was reading.
+    // A file on the command line joins pane A's queue last: it is the tab the
+    // reader clicked, so it stays the front one and the saved front yields.
+    bool anyB = false, focusB = AiGetSetting("app.focusB", "0") == "1";
+    bool splitSaved = AiGetSetting("app.split", "0") == "1";
+    for (int b = 0; b < 2; b++) {
+        std::wstring list = WxW(AiGetSetting(b ? "app.tabsB" : "app.tabsA", ""));
+        int n = 0, scanned = 0;
+        int k = atoi(AiGetSetting(b ? "app.actB" : "app.actA", "-1").c_str());
+        for (size_t i = 0; i < list.size(); ) {
+            size_t e = list.find(L'\n', i);
+            if (e == std::wstring::npos) e = list.size();
+            std::wstring p = list.substr(i, e - i);
+            i = e + 1;
+            if (p.empty()) continue;
+            bool live = WxFileExists(p.c_str());
+            if (scanned == k && live) g.sessAct[b] = n;   // the saved front, by its seat
+            if (live) {
+                g_dropQ.push_back(p);
+                g_dropPane.push_back(b != 0);
+                if (b != 0) anyB = true;
+                n++;
+            } else if (scanned <= k) {
+                k--;                              // a file gone since shifts the front's seat
+            }
+            scanned++;
+        }
+    }
+    if (cli && *cli) {                            // the launch's own file: a full path first,
+        wchar_t full[MAX_PATH * 4];               // this process's working directory is the
+        if (GetFullPathNameW(cli, (DWORD)_countof(full), full, nullptr) && WxFileExists(full)) {
+            g_dropQ.push_back(full);
+            g_dropPane.push_back(false);
+            g.sessAct[0] = -1;                    // the clicked file leads; the saved front yields
+        }
+    }
+    if (g_dropQ.empty()) {                        // a profile from before the tabs rode the
+        std::string doc = AiGetSetting("app.doc", "");   // session: its single document
+        if (!doc.empty() && WxFileExists(WxW(doc).c_str())) {    // still comes back
+            g_dropQ.push_back(WxW(doc));
+            g_dropPane.push_back(false);
+            g.sessAct[0] = 0;
+        }
+    }
+    if ((anyB || splitSaved) && !g.split) SplitRestore();   // pane B's tabs need their
+                                                            // pane, and a saved split stands
+    g.sessFocusB = focusB;
+    if (!g_dropQ.empty()) {
+        g.sessTail = g.sessAct[0] >= 0 || g.sessAct[1] >= 0 || (focusB && g.split);
+        PostMessageW(g.main, WM_APP + 3, 0, 0);   // the queue's own road opens them
+    }
     if (view == "web") {
         std::string rail = AiGetSetting("app.webside", "0");
         g_webSide = rail == "1";

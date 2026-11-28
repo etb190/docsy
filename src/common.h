@@ -356,6 +356,12 @@ struct App {
     bool lineHot = false;               // the divider is hovered
     int splitGrow = 0;                  // how much OpenSplit grew the window, so CloseSplit
                                         // hands back exactly that (0: an even split, closes in place)
+    bool sessTail = false;              // the session's tabs are draining: when the queue
+    int sessAct[2] = {-1, -1};          // empties, its tail seats each pane's saved front
+    bool sessFocusB = false;            // tab and the pane the reader was reading
+    int prefVm = 0;                     // the reading stand - view mode, fit and zoom: the
+    int prefFit = 2;                    // app's last answers, applied to every document
+    double prefZoom = 1.0;              // open and remembered across runs
     // ---- tabs (KillerPDF's DocumentSession model, PdfViewer.Tabs.cs) ----
     // Every open document is a session; a pane owns its own list and its own
     // front tab, exactly like KillerPDF's per-pane _sessions/_active. The LIVE

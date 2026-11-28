@@ -259,15 +259,17 @@ static bool TabOpenInto(bool b, const std::wstring& p) {
     int created = -1;
     if (!wasEmpty) {
         PdfRememberPage(DV(b));                   // the outgoing document leaves its page in
-        int vm = DV(b).vm, fit = DV(b).fitMode;   // the store: a later open lands where the
-        TabCancelTransients(b);                   // reader left it, not back at the start
+        TabCancelTransients(b);                   // the store: a later open lands where the
+                                                  // reader left it, not back at the start
         TabCaptureLive(b);                        // the current document parks in its slot
-        Tabs(b).push_back(DocState{});            // the new session rides the strip's end
+        Tabs(b).push_back(DocState{});            // the new session rides the strip's end -
+                                                  // Open seats it at the app's own stand
+                                                  // (g.prefVm / prefFit / prefZoom), which
+                                                  // SetViewMode and the zooms keep current
         g.tabUndo[b].push_back({});
         g.tabRedo[b].push_back({});
         Act(b) = (int)Tabs(b).size() - 1;
         DV(b) = DocState{};
-        DV(b).vm = vm; DV(b).fitMode = fit;
         created = Act(b);
     } else {
         TabCancelTransients(b);
@@ -284,6 +286,8 @@ static bool TabOpenInto(bool b, const std::wstring& p) {
         }
         return false;
     }
+    if (DV(b).fitMode != 2)                       // the app's fit computes its zoom at this
+        ApplyFit(DV(b).fitMode == 1, b);          // window before the remembered page seats
     PdfRestorePage(DV(b), b);                    // the remembered position comes back: the
                                                  // pane scrolls to its page and the
                                                  // thumbnail rail walks there with it

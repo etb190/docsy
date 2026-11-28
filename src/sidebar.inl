@@ -477,3 +477,19 @@ static void ToggleSplit() {
     InvalidateRect(g.view, nullptr, FALSE);
 }
 
+// The session's split comes back in place: the window keeps the stand the
+// placement gave it and the divider lands mid-window - ToggleSplit's even
+// road without the widening, so the remembered size is not grown behind the
+// reader's back (and closing this split later hands back nothing).
+static void SplitRestore() {
+    if (!g.view || g.split) return;
+    g.split = true;
+    g.splitGrow = 0;
+    g.splitX = std::clamp(g.cw / 2, PaneMin(), max(PaneMin(), g.cw - SplitHalf() - PaneMin()));
+    g.splitA = true;                           // the reader keeps the pane they were on;
+                                               // the session's tail re-seats pane B if led
+    g.splitDrag = false; g.lineHot = false;
+    g.dB.vHot = g.dB.hHot = g.dB.vDrag = g.dB.hDrag = false;
+    LayoutMain();
+}
+

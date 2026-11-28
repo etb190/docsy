@@ -529,6 +529,8 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     BmLoad();                                  // the bookmarks' list: one file read, before any
                                                // window can paint the bar
     HistLoad();
+    PrefsLoad();                               // the reading stand: the view mode, fit,
+                                               // zoom and night lamp, before the first paint
     RECT wr; bool zoomed = false;
     if (WinPlaceLoad(wr, zoomed))              // the window's own stand: the size and spot
         MoveWindow(g.main, wr.left, wr.top,    // it was closed at, before the first paint
@@ -538,9 +540,9 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
     SetTimer(g.main, 4721, 2500, nullptr);   // the summary navigator's idle prewarm:
                                              // its hidden seat builds itself before
                                              // the first click needs it
-    if (argc > 1) TabOpenInto(false, argv[1]);
-    else SessionRestore();                   // no file on the line: the last session's
-                                             // view, document and panels ride back in
+    SessionRestore(argc > 1 ? argv[1] : nullptr);   // every open document rides back in,
+                                                    // through the drop queue's road; a file
+                                                    // on the line joins last and leads
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) { TranslateMessage(&msg); DispatchMessageW(&msg); }
     return 0;

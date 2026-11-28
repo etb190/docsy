@@ -776,7 +776,19 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
             g_dropQ.erase(g_dropQ.begin());
             g_dropPane.erase(g_dropPane.begin());
             TabOpenInto(pb, p);
-            if (!g_dropQ.empty()) PostMessageW(h, WM_APP + 3, 0, 0);
+            if (!g_dropQ.empty()) {
+                PostMessageW(h, WM_APP + 3, 0, 0);
+            } else if (g.sessTail) {          // the session's tabs are all in: seat the
+                g.sessTail = false;           // saved fronts and the pane the reader led
+                for (int b = 0; b < 2; b++)
+                    if (g.sessAct[b] >= 0 && g.sessAct[b] < (int)Tabs(b != 0).size())
+                        SwitchTab(b != 0, g.sessAct[b]);
+                if (g.split && g.sessFocusB != FocusB()) {
+                    g.splitA = !g.sessFocusB;
+                    TabChrome(g.sessFocusB);
+                }
+                g.sessAct[0] = g.sessAct[1] = -1;
+            }
         }
         return 0;
     }

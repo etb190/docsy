@@ -1262,6 +1262,7 @@ static void SetZoomAt(double z, int ax, int ay, bool b) {
                                             // the rasters: stale-size entries still paint
                                             // stretched while the worker catches up (Evict
                                             // keeps their weight inside the byte budget)
+    g.prefFit = 2; g.prefZoom = z;          // the app's stand follows the hand
     Layout(D, b);
     syr = (int)(ry * D.docH) - ay;
     if (D.docW > CardW(b)) sxr = (int)(rx * D.docW) - ax;
@@ -1305,6 +1306,7 @@ static void ApplyFit(bool pageFit, bool b) {   // one pane's fit, at that pane's
     }
     SetZoomAt(z, 0, 0, b);
     D.fitMode = pageFit ? 1 : 0;
+    g.prefFit = D.fitMode;                   // the app's stand follows the hand
     StatusRepaint();
 }
 
@@ -1426,9 +1428,11 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         TtPdfSessionDrop(D);              // the old file's text session dies with its document
         D.doc = d; D.n = (int)n; D.pw = w; D.ph = h; D.name = nm; D.path = full;
         D.id = ++g.nextDocId;               // the render queue's stable handle for this document
-        D.sx = D.sy = 0; D.zoom = 1.0; D.fitMode = 2; D.cur = -1;   // every document opens
-                                                      // at 100%; -1 so LayoutMain's UpdateTitle
-                                                      // sees the change and syncs the sidebar highlight
+        D.sx = D.sy = 0; D.cur = -1;        // -1 so LayoutMain's UpdateTitle sees the change
+                                            // and syncs the sidebar highlight
+        D.vm = g.prefVm;                    // every document opens at the app's own stand:
+        D.fitMode = g.prefFit;              // the view mode, fit and zoom the reader last
+        D.zoom = g.prefZoom;                // chose, remembered across runs
         D.txt.clear();               // the new document's text geometry starts fresh
         D.annos.clear();             // the tools' marks die with their document - KillerPDF's
                                      // annotations live in the PDF; docsy's live with it
