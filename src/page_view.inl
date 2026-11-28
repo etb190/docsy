@@ -403,6 +403,70 @@ static HFONT g_tafont = nullptr; static int g_tapx = 0; static std::wstring g_ta
 // at the fill color when one is set), text renders in its own font and fill,
 // and the Select tool's chosen annotation wears KillerPDF's accent ring with
 // its four 14px corner handles.
+// One annotation's mark - highlight quads, ink stroke, text box - shared by
+// the screen paint and the save's burn-in (the save takes this and nothing
+// else: the selection chrome is the screen's own, never a file's pixels).
+static void PaintAnnotBody(HDC dc, Gdiplus::Graphics& gs, const Annot& a,
+                           int px, int py, float k) {
+    Gdiplus::Color c(a.alpha, GetRValue(a.color), GetGValue(a.color), GetBValue(a.color));
+    if (a.type == AT_HIGHLIGHT) {
+        Gdiplus::SolidBrush br(c);
+        for (const FRect& r : a.lines)
+            gs.FillRectangle(&br, px + r.x * k, py + r.y * k, max(r.w * k, 2.0f), max(r.h * k, 2.0f));
+    } else if (a.type == AT_INK) {
+        if (a.ix.empty()) return;
+        std::vector<Gdiplus::PointF> pts;
+        pts.reserve(a.ix.size());
+        for (size_t i = 0; i < a.ix.size(); i++)
+            pts.push_back(Gdiplus::PointF(px + a.ix[i] * k, py + a.iy[i] * k));
+        if (a.fillA > 0 && a.ix.size() >= 3) {   // closed shapes fill their interior
+            Gdiplus::Color fc(a.fillA, GetRValue(a.fill), GetGValue(a.fill), GetBValue(a.fill));
+            Gdiplus::SolidBrush fb(fc);
+            gs.FillPolygon(&fb, pts.data(), (INT)pts.size());
+        }
+        Gdiplus::Pen pen(c, max(1.0f, a.width * k));
+        pen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+        gs.DrawLines(&pen, pts.data(), (INT)pts.size());   // a dot: two points 0.25 apart,
+                                                           // round caps meet as a disc
+    } else {                                     // AT_TEXT
+        if (a.fillA > 0) {
+            Gdiplus::Color fc(a.fillA, GetRValue(a.fill), GetGValue(a.fill), GetBValue(a.fill));
+            Gdiplus::SolidBrush fb(fc);
+            gs.FillRectangle(&fb, px + a.x * k, py + a.y * k,
+                             max(a.w * k, 1.0f), max(a.h * k, 1.0f));
+        }
+        if (!a.text.empty()) {
+            int hpx = max(6, (int)std::lround(a.fsize * k));
+            // one cached face per (px, name, styles) - the usual case is a
+            // single text style per document
+            if (!g_tafont || g_tapx != hpx || g_tafontName != a.font) {
+                if (g_tafont) DeleteObject(g_tafont);
+                g_tafont = CreateFontW(-hpx, 0, 0, 0, a.bold ? FW_BOLD : FW_NORMAL,
+                                       a.italic, a.under, 0, DEFAULT_CHARSET,
+                                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                       DEFAULT_PITCH | FF_DONTCARE, a.font.c_str());
+                g_tapx = hpx; g_tafontName = a.font;
+            }
+            HGDIOBJ of = SelectObject(dc, g_tafont);
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, a.color);
+            RECT tr{ px + (int)(a.x * k) + 2, py + (int)(a.y * k) + 1,
+                     px + (int)((a.x + a.w) * k), py + (int)((a.y + a.h) * k) };
+            DrawTextW(dc, a.text.c_str(), -1, &tr, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+            SelectObject(dc, of);
+        }
+    }
+}
+
+// The save's burn-in: a page's annotations from a snapshot, nothing of the
+// screen - the selection chrome never lands in a file.
+static void PaintAnnosVec(HDC dc, const std::vector<Annot>& ann, int px, int py, float k) {
+    if (ann.empty()) return;
+    Gdiplus::Graphics gs(dc);
+    gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    for (size_t ai = 0; ai < ann.size(); ai++) PaintAnnotBody(dc, gs, ann[ai], px, py, k);
+}
+
 static void PaintAnnots(HDC dc, const DocState& D, int page, int px, int py, float k) {
     auto it = D.annos.find(page);
     if (it == D.annos.end() || it->second.empty()) return;
@@ -410,54 +474,7 @@ static void PaintAnnots(HDC dc, const DocState& D, int page, int px, int py, flo
     gs.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     for (size_t ai = 0; ai < it->second.size(); ai++) {
         const Annot& a = it->second[ai];
-        Gdiplus::Color c(a.alpha, GetRValue(a.color), GetGValue(a.color), GetBValue(a.color));
-        if (a.type == AT_HIGHLIGHT) {
-            Gdiplus::SolidBrush br(c);
-            for (const FRect& r : a.lines)
-                gs.FillRectangle(&br, px + r.x * k, py + r.y * k, max(r.w * k, 2.0f), max(r.h * k, 2.0f));
-        } else if (a.type == AT_INK) {
-            if (a.ix.empty()) continue;
-            std::vector<Gdiplus::PointF> pts;
-            pts.reserve(a.ix.size());
-            for (size_t i = 0; i < a.ix.size(); i++)
-                pts.push_back(Gdiplus::PointF(px + a.ix[i] * k, py + a.iy[i] * k));
-            if (a.fillA > 0 && a.ix.size() >= 3) {   // closed shapes fill their interior
-                Gdiplus::Color fc(a.fillA, GetRValue(a.fill), GetGValue(a.fill), GetBValue(a.fill));
-                Gdiplus::SolidBrush fb(fc);
-                gs.FillPolygon(&fb, pts.data(), (INT)pts.size());
-            }
-            Gdiplus::Pen pen(c, max(1.0f, a.width * k));
-            pen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
-            gs.DrawLines(&pen, pts.data(), (INT)pts.size());   // a dot: two points 0.25 apart,
-                                                               // round caps meet as a disc
-        } else {                                     // AT_TEXT
-            if (a.fillA > 0) {
-                Gdiplus::Color fc(a.fillA, GetRValue(a.fill), GetGValue(a.fill), GetBValue(a.fill));
-                Gdiplus::SolidBrush fb(fc);
-                gs.FillRectangle(&fb, px + a.x * k, py + a.y * k,
-                                 max(a.w * k, 1.0f), max(a.h * k, 1.0f));
-            }
-            if (!a.text.empty()) {
-                int hpx = max(6, (int)std::lround(a.fsize * k));
-                // one cached face per (px, name, styles) - the usual case is a
-                // single text style per document
-                if (!g_tafont || g_tapx != hpx || g_tafontName != a.font) {
-                    if (g_tafont) DeleteObject(g_tafont);
-                    g_tafont = CreateFontW(-hpx, 0, 0, 0, a.bold ? FW_BOLD : FW_NORMAL,
-                                           a.italic, a.under, 0, DEFAULT_CHARSET,
-                                           OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                           DEFAULT_PITCH | FF_DONTCARE, a.font.c_str());
-                    g_tapx = hpx; g_tafontName = a.font;
-                }
-                HGDIOBJ of = SelectObject(dc, g_tafont);
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, a.color);
-                RECT tr{ px + (int)(a.x * k) + 2, py + (int)(a.y * k) + 1,
-                         px + (int)((a.x + a.w) * k), py + (int)((a.y + a.h) * k) };
-                DrawTextW(dc, a.text.c_str(), -1, &tr, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
-                SelectObject(dc, of);
-            }
-        }
+        PaintAnnotBody(dc, gs, a, px, py, k);
         if (D.tool == TOOL_SELECT && g.annSelPage == page && g.annSelIdx == (int)ai &&
             g.annSelB == (&D == &g.dB)) {
             // KillerPDF's selection chrome: the accent border at 2px over a

@@ -235,6 +235,19 @@ static HBITMAP Render(DocState& D, int i, int w, int h) {
     return RenderCore(D.doc, i, w, h, rot, flip);
 }
 
+// Render's body generalized to its actual inputs: the file's path (PDFium
+// opens its own handle) and the engine ref as the fallback. The save thread
+// renders from its snapshot the same way the render worker does - never
+// through a DocState& that the UI thread may be moving under it.
+static HBITMAP RenderEx(const std::wstring& path, winrt::agile_ref<PdfDocument> doc,
+                        int i, int w, int h, int rot, int flip) {
+    bool used = false;
+    HBITMAP fb = FpuRenderPage(path, i, w, h, rot, flip, &used);
+    if (fb && used) return fb;
+    if (fb) DeleteObject(fb);
+    return RenderCore(doc.get(), i, w, h, rot, flip);
+}
+
 // ---- the async render pipeline ----
 // Every page and thumbnail renders on one background worker: the UI thread
 // asks (GetBmp / SidePump), gets a placeholder the same frame, and results
@@ -1592,22 +1605,133 @@ static void CloseDoc() {
     CloseTabAt(FocusB(), Act(FocusB()));
 }
 
-// The shared write-out: every page renders at ~150dpi with the annotations
-// composited - the same paint the screen shows - and lands as JPEG pages in a
-// minimal PDF. SaveDoc's writer is the only emitter. The bytes land in a
+// ---- the save thread ----
+// The write-out (every page at ~150dpi with the annotations burned in, JPEG
+// pages in a minimal PDF) no longer runs on the UI thread: it would render
+// every page synchronously, and a hundred-page document froze the app for
+// the whole write. SvEnqueue snapshots everything one save reads - the tab
+// may close, switch or keep drawing the moment the UI thread hands over -
+// and one background thread writes it out, FIFO, posting progress and
+// completions to the main window (WM_APP + 20). The bytes still land in a
 // sibling temp first and REPLACE the target only once the whole PDF is out -
-// a half-written save must never eat the file it was saving. SaveAs adopts
-// the same rule: the copy is completed off to the side, then moved into place.
-static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err) {
-    std::wstring tmp = file + L".docsy-tmp";
+// a half-written save must never eat the file it was saving - and pages the
+// reader has not touched since the last save ride back out of that file
+// verbatim, so a re-save renders only what changed.
+struct SvSnap {                                 // everything one save's write-out reads
+    int docId = 0;                              // the completion's owner lookup (DocById)
+    std::wstring target;                        // the file this save writes
+    std::wstring src;                           // the document's own path: PDFium's read
+                                                // source and, when it is docsy's own save
+                                                // format, the previous save's page pixels
+    int n = 0;
+    std::vector<float> pw, ph;
+    std::unordered_map<int, int> prot;
+    std::unordered_map<int, BYTE> pflip;
+    std::unordered_map<int, std::vector<Annot>> annos;
+    std::vector<char> same;                     // per page: matches the checkpoint, so its
+                                                // pixels are already in the src file
+    winrt::agile_ref<PdfDocument> doc;          // the engine fallback, kept alive by the ref
+    std::function<void(int, int)> progress;     // (done, total): the status line counts along
+    bool ok = false;                            // filled by the worker, read on the UI thread
+    std::wstring err;
+};
+static std::mutex g_svM;
+static std::condition_variable g_svCv;
+static std::vector<SvSnap> g_svQ;               // pending write-outs, FIFO - one thread, so
+static std::vector<SvSnap> g_svDone;            // two saves to one file never race its tmp
+static bool g_svWorking = false;                // a write-out is on the thread right now
+static bool g_svQuit = false;
+static HANDLE g_svThread = nullptr;
+static std::wstring g_svLabel;                  // the in-flight save's file name, for the status
+
+// The previous save's page pixels, read back out of docsy's own save format:
+// the header carries the marker, a classic xref table follows the objects,
+// and page p's image is object 5+3p - a /DCTDecode stream whose /Length is a
+// plain integer. Anything else (a foreign PDF, a truncated file, dimensions
+// that do not match the render this save would produce) refuses, and the
+// caller renders the page fresh.
+static bool SvExtractImage(const std::wstring& file, int p, int wantW, int wantH,
+                           int n, std::vector<BYTE>& out) {
+    if (p < 0 || p >= n || n <= 0) return false;
+    HANDLE f = CreateFileW(file.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    auto fail = [&]() { CloseHandle(f); return false; };
+    LARGE_INTEGER li;
+    if (!GetFileSizeEx(f, &li) || li.QuadPart < 256) return fail();
+    long long size = li.QuadPart;
+    char head[65] = {};
+    DWORD rd = 0;
+    if (!ReadFile(f, head, 64, &rd, nullptr) || rd < 24 ||
+        !strstr(head, "% docsy-raster-save")) return fail();
+    long long tailLen = min(size, (long long)4 * 1024 * 1024);   // startxref and the xref
+    std::vector<char> tb((size_t)tailLen + 1, 0);                // table: 20 bytes an object,
+    li.QuadPart = size - tailLen;                                // 4MB covers 65k pages
+    if (!SetFilePointerEx(f, li, nullptr, FILE_BEGIN)) return fail();
+    if (!ReadFile(f, tb.data(), (DWORD)tailLen, &rd, nullptr) || rd != (DWORD)tailLen) return fail();
+    const char* sx = nullptr;
+    for (long long o = tailLen - 10; o >= 0; o--)           // the LAST startxref is ours
+        if (!memcmp(tb.data() + o, "startxref", 9)) { sx = tb.data() + o; break; }
+    if (!sx) return fail();
+    long long xrefPos = _atoi64(sx + 9);
+    if (xrefPos <= 0 || xrefPos >= size) return fail();
+    char xb[64] = {};
+    li.QuadPart = xrefPos;
+    if (!SetFilePointerEx(f, li, nullptr, FILE_BEGIN)) return fail();
+    if (!ReadFile(f, xb, 63, &rd, nullptr) || rd < 10) return fail();
+    if (memcmp(xb, "xref\n0 ", 7)) return fail();
+    if (atoi(xb + 7) != 3 + n * 3) return fail();           // another page count: not this
+    const char* nl = strchr(xb + 7, '\n');                  // document's save - never reuse
+    if (!nl) return fail();
+    long long entry0 = xrefPos + (nl + 1 - xb);
+    char eb[24] = {};                                       // entry k at entry0 + 20k; its
+    li.QuadPart = entry0 + 20 * (long long)(5 + p * 3);     // first ten bytes are the offset
+    if (!SetFilePointerEx(f, li, nullptr, FILE_BEGIN)) return fail();
+    if (!ReadFile(f, eb, 20, &rd, nullptr) || rd < 20) return fail();
+    eb[10] = 0;
+    long long objOff = _atoi64(eb);
+    if (objOff <= 0 || objOff >= size) return fail();
+    char ob[513] = {};
+    li.QuadPart = objOff;
+    if (!SetFilePointerEx(f, li, nullptr, FILE_BEGIN)) return fail();
+    if (!ReadFile(f, ob, 512, &rd, nullptr) || rd < 32) return fail();
+    ob[512] = 0;
+    char num[32];
+    snprintf(num, 32, "%d 0 obj", 5 + p * 3);
+    const char* wd = strstr(ob, "/Width ");
+    const char* ht = strstr(ob, "/Height ");
+    const char* ln = strstr(ob, "/Length ");
+    const char* st = strstr(ob, "stream\n");
+    if (!strstr(ob, num) || !wd || !ht || !ln || !st || st < ln) return fail();
+    if (atoi(wd + 7) != wantW || atoi(ht + 8) != wantH) return fail();
+    long long len = _atoi64(ln + 8);
+    if (len <= 0 || len > 32 * 1024 * 1024) return fail();
+    long long dataPos = objOff + (st + 7 - ob);
+    if (dataPos + len + 12 > size) return fail();           // the endstream must fit too
+    out.resize((size_t)len);
+    li.QuadPart = dataPos;
+    if (!SetFilePointerEx(f, li, nullptr, FILE_BEGIN)) return fail();
+    if (!ReadFile(f, out.data(), (DWORD)len, &rd, nullptr) || rd != (DWORD)len) return fail();
+    CloseHandle(f);
+    return out.size() > 3 && out[0] == 0xFF && out[1] == 0xD8 &&
+           out[out.size() - 2] == 0xFF && out[out.size() - 1] == 0xD9;
+}
+static const std::vector<Annot>& SvAnnos(const SvSnap& S, int i) {
+    static const std::vector<Annot> kNone;
+    auto it = S.annos.find(i);
+    return it == S.annos.end() ? kNone : it->second;
+}
+static bool SvWrite(SvSnap& S, std::wstring& err) {
+    std::wstring tmp = S.target + L".docsy-tmp";
     HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) { err = L"the file could not be written"; return false; }
-    auto pageJpeg = [&](int i, std::vector<BYTE>& out) -> bool {
-        int w = std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400);
-        int h = max(1, (int)std::lround((float)w * D.ph[i] / max(1.f, D.pw[i])));
-        HBITMAP b = Render(D, i, w, h);    // the writer renders synchronously: save needs
-        if (!b) return false;              // every page's pixels now, not on the worker's
-                                           // queue (and a save-sized 2x render never
+    auto pageJpeg = [&](int i, int w, int h, std::vector<BYTE>& out) -> bool {
+        int rot = S.prot.count(i) ? S.prot[i] : 0;
+        int flip = S.pflip.count(i) ? S.pflip[i] : 0;
+        HBITMAP b = RenderEx(S.src, S.doc, i, w, h, rot, flip);   // the writer renders on its
+        if (!b) return false;              // own thread: save needs every page's pixels,
+                                           // but never at the cost of the UI's breath
+                                           // (and a save-sized 2x render never
                                            // pollutes the view cache the way GetBmp did)
         // the burn-in lands on a private 32bpp DIB section, and the JPEG encoder
         // reads the section's OWN memory (Bitmap over scan0). The old path handed
@@ -1633,8 +1757,8 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         BitBlt(ddc, 0, 0, w, h, sdc, 0, 0, SRCCOPY);
         SelectObject(sdc, osel); DeleteDC(sdc);
         DeleteObject(b);                   // the fresh render was this call's own
-        float k = (float)w / max(1.f, D.pw[i]);
-        PaintAnnots(ddc, D, i, 0, 0, k);               // annotations burn in
+        float k = (float)w / max(1.f, S.pw[i]);
+        PaintAnnosVec(ddc, SvAnnos(S, i), 0, 0, k);    // the snapshot's annotations burn in
         CLSID jpg{}; UINT cnt = 0, bytes = 0;
         Gdiplus::GetImageEncodersSize(&cnt, &bytes);
         std::vector<BYTE> buf(bytes);
@@ -1662,7 +1786,7 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         SelectObject(ddc, od); DeleteDC(ddc); DeleteObject(dib);   // the bitmap view is
         return ok && !out.empty();                                 // gone before the buffer
     };
-    std::string head = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n";
+    std::string head = "%PDF-1.4\n%\xE2\xE3\xCF\xD3\n% docsy-raster-save\n";
     DWORD wr = 0;
     WriteFile(f, head.data(), (DWORD)head.size(), &wr, nullptr);
     long long pos = (long long)head.size();
@@ -1676,17 +1800,24 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
     // page i's number (3+2i) collide with page i-1's image (5+2(i-1)): two
     // "N 0 obj" bodies, an xref that pointed the Kids at image XObjects, and
     // a document whose pages rendered white everywhere but page one.
-    for (int i = 0; i < D.n; i++) kids += std::to_string(3 + i * 3) + " 0 R ";
-    emit("2 0 obj\n<< /Type /Pages /Kids [ " + kids + "] /Count " + std::to_string(D.n) + " >>\nendobj\n");
-    std::vector<long long> pageOff(D.n), contOff(D.n), imgOff(D.n);
+    for (int i = 0; i < S.n; i++) kids += std::to_string(3 + i * 3) + " 0 R ";
+    emit("2 0 obj\n<< /Type /Pages /Kids [ " + kids + "] /Count " + std::to_string(S.n) + " >>\nendobj\n");
+    std::vector<long long> pageOff(S.n), contOff(S.n), imgOff(S.n);
     bool failed = false;
-    for (int i = 0; i < D.n && !failed; i++) {
+    for (int i = 0; i < S.n && !failed; i++) {
+        int wpx = std::clamp((int)std::lround(S.pw[i] * 2.0f), 64, 2400);
+        int hpx = max(1, (int)std::lround((float)wpx * S.ph[i] / max(1.f, S.pw[i])));
         std::vector<BYTE> jpg;
-        if (!pageJpeg(i, jpg)) { failed = true; break; }
+        if (i < (int)S.same.size() && S.same[i] && SvExtractImage(S.src, i, wpx, hpx, S.n, jpg)) {
+            // the disk image IS this page's saved pixels: a page the reader
+            // has not touched since the last save rides back verbatim, and
+            // only the pages that changed render again
+        } else if (!pageJpeg(i, wpx, hpx, jpg)) { failed = true; break; }
+        if (S.progress) S.progress(i + 1, S.n);        // the status line counts along
         // Windows.Data.Pdf's Size() is DIPs (96/inch); the page box wants PDF
         // points (72/inch) - x0.75 lands the saved page at its true print size
         // (the old x2 wrote DIPs as points and bloated every page by a third)
-        float wpt = D.pw[i] * 0.75f, hpt = D.ph[i] * 0.75f;
+        float wpt = S.pw[i] * 0.75f, hpt = S.ph[i] * 0.75f;
         char hb2[256];
         pageOff[i] = pos;
         snprintf(hb2, 256, "%d 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %.2f %.2f] /Contents %d 0 R /Resources << /XObject << /Im %d 0 R >> >> >>\nendobj\n",
@@ -1697,8 +1828,8 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         emit(std::to_string(4 + i * 3) + " 0 obj\n<< /Length " + std::to_string(cs.size()) + " >>\nstream\n" + cs + "endstream\nendobj\n");
         imgOff[i] = pos;
         std::string ih = std::to_string(5 + i * 3) + " 0 obj\n<< /Type /XObject /Subtype /Image /Width " +
-            std::to_string(std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400)) +
-            " /Height " + std::to_string(max(1, (int)std::lround((float)std::clamp((int)std::lround(D.pw[i] * 2.0f), 64, 2400) * D.ph[i] / max(1.f, D.pw[i])))) +
+            std::to_string(wpx) +
+            " /Height " + std::to_string(hpx) +
             " /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length " + std::to_string(jpg.size()) + " >>\nstream\n";
         emit(ih);
         WriteFile(f, jpg.data(), (DWORD)jpg.size(), &wr, nullptr);
@@ -1712,20 +1843,146 @@ static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstrin
         return false;
     }
     long long xref = pos;
-    std::string xr = "xref\n0 " + std::to_string(3 + D.n * 3) + "\n0000000000 65535 f \n";
+    std::string xr = "xref\n0 " + std::to_string(3 + S.n * 3) + "\n0000000000 65535 f \n";
     auto off10 = [](long long v) { char b[16]; snprintf(b, 16, "%010lld", v); return std::string(b); };
     xr += off10(catOff) + " 00000 n \n" + off10(pagesOff) + " 00000 n \n";
-    for (int i = 0; i < D.n; i++)
+    for (int i = 0; i < S.n; i++)
         xr += off10(pageOff[i]) + " 00000 n \n" + off10(contOff[i]) + " 00000 n \n" + off10(imgOff[i]) + " 00000 n \n";
-    xr += "trailer\n<< /Size " + std::to_string(3 + D.n * 3) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
+    xr += "trailer\n<< /Size " + std::to_string(3 + S.n * 3) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) + "\n%%EOF\n";
     emit(xr);
     CloseHandle(f);
-    if (!MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+    if (!MoveFileExW(tmp.c_str(), S.target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         DeleteFileW(tmp.c_str());   // the temp dies alone; the real file never knew
         err = L"the file could not be replaced";
         return false;
     }
     return true;
+}
+
+static DWORD WINAPI SvWorker(LPVOID) {
+    try { winrt::init_apartment(winrt::apartment_type::multi_threaded); } catch (...) {}
+    for (;;) {
+        SvSnap S;
+        {
+            std::unique_lock<std::mutex> lk(g_svM);
+            g_svCv.wait(lk, [] { return g_svQuit || !g_svQ.empty(); });
+            if (g_svQuit) break;
+            S = std::move(g_svQ.front());
+            g_svQ.erase(g_svQ.begin());
+            g_svWorking = true;
+        }
+        std::wstring err;
+        bool ok = SvWrite(S, err);
+        {
+            std::lock_guard<std::mutex> lk(g_svM);
+            S.ok = ok; S.err = std::move(err);
+            g_svDone.push_back(std::move(S));
+            g_svWorking = false;
+        }
+        if (g.main) PostMessageW(g.main, WM_APP + 20, 0, 0);   // the UI thread adopts the
+    }                                                          // checkpoint and says "Saved"
+    return 0;
+}
+static void SvKick() {                         // the thread starts with the first save and
+    if (g_svThread) return;                    // lives for the process (SvShutdown joins it)
+    g_svThread = CreateThread(nullptr, 0, SvWorker, nullptr, 0, nullptr);
+}
+// The UI's save entry: snapshot everything the write-out reads, pre-check the
+// tmp file so an unwritable target refuses up front (a tab closing behind a
+// save still gets the old guarantee - no writability, no close), and hand the
+// job to the thread. Pages still matching the checkpoint (PageClean) are
+// marked for the disk-reuse path: their pixels are already in the previous
+// save's file, and only what changed renders.
+static bool SvEnqueue(DocState& D, const std::wstring& target, std::wstring& err) {
+    if (!D.n || target.empty()) { err = L"nothing to save"; return false; }
+    HANDLE f = CreateFileW((target + L".docsy-tmp").c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) { err = L"the file could not be written"; return false; }
+    CloseHandle(f);                            // writability checked; the write-out's own
+                                               // CREATE_ALWAYS restarts it fresh
+    SvSnap S;
+    S.docId = D.id; S.target = target; S.src = D.path; S.n = D.n;
+    S.pw = D.pw; S.ph = D.ph; S.prot = D.prot; S.pflip = D.pflip; S.annos = D.annos;
+    S.same.assign(D.n, 0);
+    if (D.doc) S.doc = winrt::make_agile(D.doc);
+    for (int p = 0; p < D.n; p++) S.same[p] = PageClean(D, p) ? 1 : 0;
+    S.progress = [](int done, int total) {
+        if (g.main) PostMessageW(g.main, WM_APP + 20, (WPARAM)done, (LPARAM)total);
+    };
+    size_t sl = target.find_last_of(L"\\/");
+    {
+        std::lock_guard<std::mutex> lk(g_svM);
+        g_svLabel = sl == std::wstring::npos ? target : target.substr(sl + 1);
+        for (auto& j : g_svQ)                  // a second save of a still-waiting document
+            if (j.docId == S.docId) {          // replaces its snapshot: the thread has not
+                j = std::move(S);              // started it, so the newest state must be
+                return true;                   // the one that lands on disk
+            }
+        g_svQ.push_back(std::move(S));
+    }
+    SvKick();
+    g_svCv.notify_one();
+    return true;
+}
+static bool SvIdle() {                         // nothing queued, nothing in flight, and
+    std::lock_guard<std::mutex> lk(g_svM);     // the finished jobs adopted by the UI thread
+    return !g_svWorking && g_svQ.empty() && g_svDone.empty();
+}
+static void SvShutdown() {                     // WM_DESTROY: the in-flight write-out finishes
+    if (!g_svThread) return;                   // (its temp must never be cut mid-move), then
+    {                                          // the thread joins and the handle closes
+        std::lock_guard<std::mutex> lk(g_svM);
+        g_svQuit = true;
+    }
+    g_svCv.notify_all();
+    WaitForSingleObject(g_svThread, INFINITE);
+    CloseHandle(g_svThread);
+    g_svThread = nullptr;
+}
+// The completion's owner check: does the live page still match the snapshot
+// the thread wrote? Strict map-entry equality - the snapshot mirrors the
+// enqueue-time state exactly.
+static bool SvPageMatches(const DocState& D, const SvSnap& S, int p) {
+    auto a = D.annos.find(p), sa = S.annos.find(p);
+    if ((a == D.annos.end()) != (sa == S.annos.end())) return false;
+    if (a != D.annos.end()) {
+        if (a->second.size() != sa->second.size()) return false;
+        for (size_t i = 0; i < a->second.size(); i++)
+            if (!AnnotEq(a->second[i], sa->second[i])) return false;
+    }
+    auto pa = D.prot.find(p), ps = S.prot.find(p);
+    if ((pa == D.prot.end()) != (ps == S.prot.end())) return false;
+    if (pa != D.prot.end() && pa->second != ps->second) return false;
+    auto fa = D.pflip.find(p), fs = S.pflip.find(p);
+    if ((fa == D.pflip.end()) != (fs == S.pflip.end())) return false;
+    if (fa != D.pflip.end() && fa->second != fs->second) return false;
+    return true;
+}
+// The write landed: pages the reader did not touch while the thread worked
+// adopt the snapshot as their new checkpoint (the disk now holds exactly that
+// state); a page edited mid-save keeps its old checkpoint and stays dirty -
+// the next save re-renders just it, off-thread as ever.
+static void SvMergeCheckpoint(DocState& D, const SvSnap& S) {
+    for (int p = 0; p < S.n; p++) {
+        if (!SvPageMatches(D, S, p)) continue;
+        auto sa = S.annos.find(p);
+        if (sa == S.annos.end()) D.savedAnnos.erase(p); else D.savedAnnos[p] = sa->second;
+        auto ps = S.prot.find(p);
+        if (ps == S.prot.end()) D.savedProt.erase(p); else D.savedProt[p] = ps->second;
+        auto fs = S.pflip.find(p);
+        if (fs == S.pflip.end()) D.savedPflip.erase(p); else D.savedPflip[p] = fs->second;
+    }
+}
+// The synchronous write-out, for the caller that must hold the bytes before
+// it continues: the shot harness's save= (the CI validates the file it just
+// wrote). The UI's saves ride SvEnqueue instead - same writer, own thread.
+static bool WriteAnnotatedPdf(DocState& D, const std::wstring& file, std::wstring& err) {
+    SvSnap S;
+    S.docId = D.id; S.target = file; S.src = D.path; S.n = D.n;
+    S.pw = D.pw; S.ph = D.ph; S.prot = D.prot; S.pflip = D.pflip; S.annos = D.annos;
+    if (D.doc) S.doc = winrt::make_agile(D.doc);
+    return SvWrite(S, err);                    // same: empty - every page renders fresh,
+                                               // exactly as this path always has
 }
 
 // Save_Click: no document -> "Open a file first"; a real path -> KillerPDF's
@@ -1758,15 +2015,11 @@ static void SaveDoc(bool saveAs) {
         if (r != 2) { SetStatusHold(L"Save canceled"); return; }   // Cancel or dismissed
     }
     std::wstring err;
-    if (!WriteAnnotatedPdf(D, file, err)) { SetStatusHold(std::wstring(L"Save failed: ") + err); return; }
-    SnapClean(D);                                // this state is now the checkpoint
-    if (file != D.path) {                        // Save As adopts its file (KillerPDF's
-        D.path = file;                           // SaveAsWithName lands the doc on it)
-        size_t sl = file.find_last_of(L"\\/");
-        D.name = sl == std::wstring::npos ? file : file.substr(sl + 1);
-        UpdateTitle();
-    }
-    SetStatusHold(std::wstring(L"Saved to ") + file);
+    if (!SvEnqueue(D, file, err)) {              // the write-out rides its own thread: the
+        SetStatusHold(std::wstring(L"Save failed: ") + err);   // reader keeps working - the
+        return;                                  // tmp's writability refused up front, and
+    }                                            // the checkpoint lands as the pages do
+    SetStatusHold(std::wstring(L"Saving ") + D.name + L"...");   // page progress counts along
 }
 
 // ---------------- sidebar ----------------

@@ -299,6 +299,25 @@ static bool DocDirty(const DocState& D) {   // any byte the next save would writ
     return D.n && (AnnosDirty(D.savedAnnos, D.annos) || D.savedProt != D.prot
                    || D.savedPflip != D.pflip);
 }
+static bool AnnotsSame(const std::vector<Annot>& a, const std::vector<Annot>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++) if (!AnnotEq(a[i], b[i])) return false;
+    return true;
+}
+static bool PageClean(const DocState& D, int p) {   // this page still matches the saved
+                                                    // checkpoint: the last save's pixels
+                                                    // are this page's pixels (an empty
+                                                    // vector and a missing entry read equal)
+    auto a = D.annos.find(p), s = D.savedAnnos.find(p);
+    bool haveA = a != D.annos.end() && !a->second.empty();
+    bool haveS = s != D.savedAnnos.end() && !s->second.empty();
+    if (haveA != haveS) return false;
+    if (haveA && !AnnotsSame(a->second, s->second)) return false;
+    auto pa = D.prot.find(p), ps = D.savedProt.find(p);
+    if ((pa == D.prot.end() ? 0 : pa->second) != (ps == D.savedProt.end() ? 0 : ps->second)) return false;
+    auto fa = D.pflip.find(p), fs = D.savedPflip.find(p);
+    return (fa == D.pflip.end() ? 0 : fa->second) == (fs == D.savedPflip.end() ? 0 : fs->second);
+}
 
 struct App {
     HWND main = nullptr, view = nullptr, side = nullptr, status = nullptr;
@@ -683,6 +702,8 @@ static void PolyCommit(HWND h);         // close the polygon (repeat first point
 static void ListPopOpen(HWND owner, POINT p, std::vector<std::wstring> items, int who, int selRow);
 static void OpenDlg();                   // the Open button's file dialog
 static void PaintAnnots(HDC dc, const DocState& D, int page, int px, int py, float k);
+static void PaintAnnosVec(HDC dc, const std::vector<Annot>& ann, int px, int py, float k);
+                                        // the save's burn-in: a snapshot's own annotations
 // the footer's shared fills (defined with the status bar, used by the bars)
 static HBRUSH PopBrush();
 static HBRUSH PopHoverBrush();

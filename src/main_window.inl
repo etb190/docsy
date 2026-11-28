@@ -262,6 +262,62 @@ static bool NudgeSel(WPARAM wp, bool shift) {
     return true;
 }
 
+// ---- the save thread's UI side ----
+// The write-outs run off-thread (pdf_render's Sv*); their completions come
+// home here. A save is instant from the reader's chair: Ctrl+S hands the job
+// over and keeps working, the status line counts the pages, and the
+// checkpoint lands per page as each write finishes.
+static bool g_svFail = false;      // a save failed since the quit's wait began
+static bool g_svQuitting = false;  // the quit's wait is pumping - further closes ignore
+static void SvDrain() {
+    std::vector<SvSnap> done;
+    { std::lock_guard<std::mutex> lk(g_svM); done.swap(g_svDone); }
+    for (auto& S : done) {
+        DocState* D = DocById(S.docId);
+        if (!S.ok) {
+            g_svFail = true;
+            SetStatusHold(std::wstring(L"Save failed: ") + S.err);
+            continue;
+        }
+        if (D) SvMergeCheckpoint(*D, S);
+        if (D && S.target != D->path) {            // Save As adopts its file (KillerPDF's
+            D->path = S.target;                    // SaveAsWithName lands the doc on it),
+            size_t sl = S.target.find_last_of(L"\\/");
+            D->name = sl == std::wstring::npos ? S.target : S.target.substr(sl + 1);
+            UpdateTitle();
+        }
+        SetStatusHold(std::wstring(L"Saved to ") + S.target);
+    }
+    StatusRepaint();
+}
+static void SvMessage(WPARAM done, LPARAM total) {   // the thread's posts: page progress,
+    if (done) {                                      // or landed write-outs to adopt
+        std::wstring label;
+        { std::lock_guard<std::mutex> lk(g_svM); label = g_svLabel; }
+        SetStatusHold(label + L" - saving page " + std::to_wstring((int)done) +
+                      L" of " + std::to_wstring((int)total));
+        return;
+    }
+    SvDrain();
+}
+static bool SvWaitIdle(HWND h) {               // the quit's saves ride the thread: pump
+    g_svQuitting = true;                       // until the writes land, the window disabled
+    g_svFail = false;                          // but painting - a frozen UI is exactly what
+    EnableWindow(h, FALSE);                    // this thread exists to prevent
+    SetStatusHold(L"Saving documents...");
+    bool ok = true;
+    for (;;) {
+        MSG m;
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
+        if (SvIdle()) break;
+        Sleep(15);
+    }
+    EnableWindow(h, TRUE);
+    g_svQuitting = false;
+    if (g_svFail) { SetStatusHold(L"Save failed - the window stays open"); ok = false; }
+    return ok;
+}
+
 static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_CREATE: {
@@ -792,7 +848,10 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         }
         return 0;
     }
+    case WM_APP + 20: SvMessage(wp, lp); return 0;   // the save thread: page progress, or
+                                                     // landed write-outs to adopt
     case WM_CLOSE: {
+        if (g_svQuitting) return 0;              // the quit's wait owns the window now
         // KillerPDF's quit prompt (Str_Dlg_UnsavedExit through KillerDialog.
         // AskToSave): unsaved work asks before the window dies. Save writes
         // every dirty tab of both panes in place - a session holds a live
@@ -816,28 +875,27 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
                 if (T.empty()) {
                     if (!DocDirty(DV(b))) return true;
                     std::wstring err;
-                    if (!WriteAnnotatedPdf(DV(b), DV(b).path, err)) {
+                    if (!SvEnqueue(DV(b), DV(b).path, err)) {
                         SetStatusHold(std::wstring(L"Save failed: ") + err);
                         return false;
                     }
-                    SnapClean(DV(b));
                     return true;
                 }
                 for (int i = 0; i < (int)T.size(); i++) {
                     DocState& S = (i == Act(b)) ? DV(b) : T[i];
-                    if (!DocDirty(S)) continue;
+                    if (!S.n || !DocDirty(S)) continue;
                     std::wstring err;
-                    if (!WriteAnnotatedPdf(S, S.path, err)) {
+                    if (!SvEnqueue(S, S.path, err)) {
                         SetStatusHold(std::wstring(L"Save failed: ") + err);
                         return false;
                     }
-                    SnapClean(S);
                 }
                 return true;
             };
             if (!savePane(false)) return 0;          // a failed save is not a closed window
             if (!savePane(true)) return 0;
-        }
+            if (!SvWaitIdle(h)) return 0;            // the writes ride their thread: the
+        }                                            // window stays live until the last lands
         if (r == 2 || r == 1) DestroyWindow(h);   // Save / Don't Save close; Cancel stays
         return 0;
     }
@@ -845,6 +903,8 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         SessionSaveAll();                    // the view, the doc, the panels ride out
                                              // first - before any controller closes
         RqShutdown();                        // the render worker ends before the queues die
+        SvShutdown();                        // the save thread's write-out finishes (a temp is
+                                             // never cut mid-move) and joins before the end
         WebShutdown();                       // the WebView2 controllers close with the window
         PostQuitMessage(0); return 0;
     }

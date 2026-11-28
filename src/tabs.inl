@@ -324,12 +324,12 @@ static bool CloseTabAt(bool b, int idx) {
         int r = AskPrompt3(L"", L"This file has unsaved changes. Save them before closing it?",
                            L"Cancel", L"Don't Save", L"Save");
         if (r == 0) return false;                 // Cancel: the document stays open
-        if (r == 2) {                             // Save: a failed write keeps it open too
-            std::wstring err;
-            if (!WriteAnnotatedPdf(DV(b), DV(b).path, err)) {
-                SetStatusHold(std::wstring(L"Save failed: ") + err);
-                return false;
-            }
+        if (r == 2) {                             // Save: the write rides its own thread and
+            std::wstring err;                     // the tab closes now; the tmp's writability
+            if (!SvEnqueue(DV(b), DV(b).path, err)) {   // refused up front keeps the old
+                SetStatusHold(std::wstring(L"Save failed: ") + err);   // guarantee - a later
+                return false;                     // mid-write failure only says so, the file
+            }                                     // itself is never torn
         }
     }
     PdfRememberPage(DV(b));                       // the closing document leaves its page in the
@@ -423,11 +423,10 @@ static void CloseAllTabs(bool b) {
                 DocState& S = (i == Act(b)) ? DV(b) : Tabs(b)[i];
                 if (!S.n || !DocDirty(S)) continue;
                 std::wstring err;
-                if (!WriteAnnotatedPdf(S, S.path, err)) {
-                    SetStatusHold(std::wstring(L"Save failed: ") + err);
-                    return;                       // a failed save stops the sweep, window up
-                }
-                SnapClean(S);
+                if (!SvEnqueue(S, S.path, err)) {    // the writes ride their own thread; the
+                    SetStatusHold(std::wstring(L"Save failed: ") + err);   // checkpoints land
+                    return;                       // as each finishes - a failed save stops
+                }                                 // the sweep, window up
             }
         }
     }
