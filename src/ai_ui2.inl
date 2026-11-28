@@ -3177,6 +3177,39 @@ static void SessionSaveAll() {
     bool stood = g_sumShown[SUM_DOC] ||
                  (g_sumHideTick[SUM_DOC] && GetTickCount() - g_sumHideTick[SUM_DOC] < 600);
     AiSetSetting("summary.open", stood ? "1" : "0");
+    {   // the window's own stand rides out too: the restored rectangle
+        // (GetWindowPlacement keeps the true geometry under a minimize, and
+        // under the fullscreen's takeover) plus the maximized flag, so the
+        // next launch opens at the size and spot this one was left at
+        WINDOWPLACEMENT wp{ sizeof wp };
+        if (g.main && GetWindowPlacement(g.main, &wp)) {
+            const RECT& r = wp.rcNormalPosition;
+            AiSetSetting("app.winx", std::to_string(r.left));
+            AiSetSetting("app.winy", std::to_string(r.top));
+            AiSetSetting("app.winw", std::to_string(r.right - r.left));
+            AiSetSetting("app.winh", std::to_string(r.bottom - r.top));
+            AiSetSetting("app.winmax", wp.showCmd == SW_SHOWMAXIMIZED ? "1" : "0");
+        }
+    }
+}
+// The window's own stand back: size, position and maximized flag from the
+// session's keys. The rectangle must still land on a live monitor's work
+// area (a monitor unplugged since must not park the window where no screen
+// can see it) and clear a floor size; anything else falls back to the
+// default stand.
+static bool WinPlaceLoad(RECT& r, bool& zoomed) {
+    int x = atoi(AiGetSetting("app.winx", "0").c_str());
+    int y = atoi(AiGetSetting("app.winy", "0").c_str());
+    int w = atoi(AiGetSetting("app.winw", "0").c_str());
+    int h = atoi(AiGetSetting("app.winh", "0").c_str());
+    zoomed = AiGetSetting("app.winmax", "0") == "1";
+    if (w < 400 || h < 260) return false;      // never saved, or too small to be of use
+    r = { x, y, x + w, y + h };
+    HMONITOR hm = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{ sizeof mi };
+    if (!GetMonitorInfoW(hm, &mi)) return false;
+    RECT inter;
+    return IntersectRect(&inter, &r, &mi.rcWork) != 0;   // some of it must be on a screen
 }
 static void SessionRestore() {
     std::string view = AiGetSetting("app.view", "pdf");
