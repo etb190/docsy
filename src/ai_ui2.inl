@@ -3052,7 +3052,11 @@ static void SumPanelMessage(const wchar_t* json, int seat) {
         const crxk::J* p = m.get("page");
         if (p && p->t == 'd' && seat == SUM_DOC) {
             int pg = max(1, min((int)p->d, DVF().n));
-            SetPage(pg - 1);
+            // the range's first page leads the reader: continuous, two-page and
+            // grid scroll the page's row into view, single mode flips to it -
+            // SetPage alone parked the whole view at the document top in every
+            // mode but single, and the thumbnail rail must walk there too
+            PdfNavigateToPage(pg - 1);
             DocState& D = DVF();
             if (!D.path.empty()) {
                 std::string docId = AiDocSessionKey(D.path);
@@ -3145,7 +3149,14 @@ static void SumPanelMessage(const wchar_t* json, int seat) {
 static void SessionSaveAll() {
     const wchar_t* v = g_editOn ? L"editor" : (g_webOn ? L"web" : L"pdf");
     AiSetSetting("app.view", WxU(v));
-    if (!DVF().path.empty()) AiSetSetting("app.doc", WxU(DVF().path));
+    if (!DVF().path.empty()) {
+        AiSetSetting("app.doc", WxU(DVF().path));
+        PdfRememberPage(DVF());                // the reading position rides out with the app:
+    }                                          // the next open scrolls back to its page
+    {                                          // the second pane's document remembers too
+        DocState& Do = FocusB() ? g.d : g.dB;  // (a blank pane has no path and writes nothing)
+        if (!Do.path.empty()) PdfRememberPage(Do);
+    }
     if (!g_edPath.empty()) {
         AiSetSetting("app.edoc", WxU(g_edPath));
         EditorSave();                          // the typing rides out with the window

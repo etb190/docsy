@@ -245,12 +245,111 @@ static std::wstring BmFavPath(const std::wstring& host) {
     hex[16] = 0;
     return BmFavDir() + L"\\" + hex + L".png";
 }
+
+// ---- the favicon road's markup helpers -------------------------------------
+// Sites keep their favicon in more places than the classic /favicon.ico: the
+// <link rel="icon"> markup in their pages is the road Google Scholar and
+// plenty of others actually speak - their icon hangs off a custom path and
+// the markup is the only place that names it. These helpers read that markup
+// and turn what a page declares into fetchable URLs.
+static char BmLo(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
+static bool BmWordChar(char c) { c = BmLo(c); return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; }
+
+// one attribute of a tag: tagLo is the lowercased tag (for the name match),
+// tagRaw the original (for the value's own bytes - URLs are case-sensitive)
+static std::string BmTagAttr(const std::string& tagLo, const std::string& tagRaw, const char* attr) {
+    std::string lo(attr);
+    for (char& c : lo) c = BmLo(c);
+    for (size_t a = tagLo.find(lo); a != std::string::npos; a = tagLo.find(lo, a + 1)) {
+        if (a && BmWordChar(tagLo[a - 1])) continue;   // a longer name (data-href): not this one
+        size_t q = a + lo.size();
+        while (q < tagLo.size() && (tagLo[q] == ' ' || tagLo[q] == '\t' || tagLo[q] == '\r' || tagLo[q] == '\n')) q++;
+        if (q >= tagLo.size() || tagLo[q] != '=') continue;
+        q++;
+        while (q < tagLo.size() && (tagLo[q] == ' ' || tagLo[q] == '\t')) q++;
+        if (q >= tagRaw.size()) continue;
+        if (tagRaw[q] == '"' || tagRaw[q] == '\'') {
+            size_t e = tagRaw.find(tagRaw[q], q + 1);
+            if (e == std::string::npos) continue;
+            return tagRaw.substr(q + 1, e - q - 1);
+        }
+        size_t e = q;
+        while (e < tagRaw.size() && tagRaw[e] != ' ' && tagRaw[e] != '\t' && tagRaw[e] != '>' && tagRaw[e] != '\n') e++;
+        return tagRaw.substr(q, e - q);
+    }
+    return "";
+}
+
+// every icon URL a page declares, in the order it declares them: the link rel
+// icons (shortcut icon, icon, apple-touch-icon - all carry "icon") and the
+// tile image meta, the large square some sites keep for the desktop
+static void BmCollectIconHints(const std::string& html, std::vector<std::wstring>& out) {
+    std::string lo = html;
+    for (char& c : lo) c = BmLo(c);
+    auto scan = [&](const char* tag) {
+        for (size_t pos = lo.find(tag); pos != std::string::npos; pos = lo.find(tag, pos + 1)) {
+            size_t end = lo.find('>', pos);
+            if (end == std::string::npos || end - pos > 4096) break;
+            std::string tagLo = lo.substr(pos, end - pos + 1), tagRaw = html.substr(pos, end - pos + 1);
+            if (tag[1] == 'm') {                     // <meta>: the tile image speaks in content=
+                std::string name = BmTagAttr(tagLo, tagRaw, "name");
+                for (char& c : name) c = BmLo(c);
+                if (name.find("tileimage") == std::string::npos) continue;
+                std::string v = BmTagAttr(tagLo, tagRaw, "content");
+                if (!v.empty()) out.push_back(WxW(v));
+                continue;
+            }
+            std::string rel = BmTagAttr(tagLo, tagRaw, "rel");
+            for (char& c : rel) c = BmLo(c);
+            if (rel.find("icon") == std::string::npos) continue;
+            std::string v = BmTagAttr(tagLo, tagRaw, "href");
+            if (!v.empty()) out.push_back(WxW(v));
+        }
+    };
+    scan("<link");
+    scan("<meta");
+}
+static bool BmIcoStartsWith(const std::wstring& h, const wchar_t* pre) {
+    std::wstring p(pre);
+    if (h.size() < p.size()) return false;
+    for (size_t i = 0; i < p.size(); i++) {
+        wchar_t a = h[i];
+        if (a >= L'A' && a <= L'Z') a = (wchar_t)(a - L'A' + L'a');
+        if (a != p[i]) return false;
+    }
+    return true;
+}
+
+// a hint's absolute URL: page-declared paths hang off the host's root
+static std::wstring BmResolveIconHint(std::wstring h, const std::wstring& host) {
+    while (!h.empty() && (h[0] == L' ' || h[0] == L'\t' || h[0] == L'\r' || h[0] == L'\n')) h.erase(0, 1);
+    while (!h.empty() && (h[h.size() - 1] == L' ' || h[h.size() - 1] == L'\t'
+                          || h[h.size() - 1] == L'\r' || h[h.size() - 1] == L'\n')) h.erase(h.size() - 1, 1);
+    if (h.size() < 4 || BmIcoStartsWith(h, L"data:")) return L"";   // inline data is no road for the fetcher
+    if (BmIcoStartsWith(h, L"http://") || BmIcoStartsWith(h, L"https://")) return h;
+    if (BmIcoStartsWith(h, L"//")) return L"https:" + h;
+    if (BmIcoStartsWith(h, L"/")) return L"https://" + host + h;
+    return L"https://" + host + L"/" + h;
+}
+
 static void EnsureHostFavicon(const std::wstring& host) {
     if (host.empty() || g.quiet) return;
     if (std::find(g_wxFavBusy.begin(), g_wxFavBusy.end(), host) != g_wxFavBusy.end()) return;
     std::wstring p = BmFavPath(host);
     if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return;
-    if (GetFileAttributesW((p + L".miss").c_str()) != INVALID_FILE_ATTRIBUTES) return;
+    // A miss is remembered, not for life: a marker older than a day retires so
+    // a site that was offline, or whose icon arrived after the first attempt,
+    // gets its real favicon on a later road instead of wearing the letter tile
+    // for the rest of its days (Google Scholar's case: one hiccup, forever bare)
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (GetFileAttributesExW((p + L".miss").c_str(), GetFileExInfoStandard, &fa)) {
+        FILETIME now{};
+        GetSystemTimeAsFileTime(&now);
+        unsigned long long wrote = ((unsigned long long)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+        unsigned long long stamp = ((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime;
+        if (stamp - wrote < 24ull * 3600 * 10000000ull) return;   // a fresh miss stands
+        DeleteFileW((p + L".miss").c_str());                      // a stale one retires
+    }
     g_wxFavBusy.push_back(host);
     WxMkdirs(BmFavDir());
     HWND main = g.main;
@@ -260,38 +359,60 @@ static void EnsureHostFavicon(const std::wstring& host) {
         std::wstring err;
         auto isValidImg = [](const std::vector<unsigned char>& data) -> bool {
             if (data.size() < 8) return false;
+            if (data[0] == '<' || data[0] == 0xEF) return false;   // html, svg or a BOM: markup, not a decodable image
             if (data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' && data[3] == 'G') return true;
             if (data[0] == 0 && data[1] == 0 && (data[2] == 1 || data[2] == 2) && data[3] == 0) return true;
+            if (data[0] == 'B' && data[1] == 'M') return true;
             if (data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) return true;
             if (data[0] == 'G' && data[1] == 'I' && data[2] == 'F') return true;
-            if (data.size() >= 12 && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F'
-                && data[8] == 'W' && data[9] == 'E' && data[10] == 'B' && data[11] == 'P') return true;
-            return false;
+            return false;   // webp left the list on purpose: gdiplus cannot decode
+                            // it, so accepting it only cached bytes that never load
         };
 
         const wchar_t* const ua = L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
         bool ok = false;
-        // 1. Direct site favicon
-        if (WxHttpGet(L"https://" + host + L"/favicon.ico", ua, d, err) && isValidImg(d)) {
-            WxWriteFile(p, d.data(), d.size());
-            ok = true;
-        }
-        // 2. Google favicon service fallback
-        if (!ok) {
+        auto tryUrl = [&](const std::wstring& url) {
+            if (ok || url.empty()) return;
             d.clear();
-            if (WxHttpGet(L"https://www.google.com/s2/favicons?domain=" + host + L"&sz=32", ua, d, err) && isValidImg(d)) {
+            if (WxHttpGet(url, ua, d, err) && isValidImg(d)) {
                 WxWriteFile(p, d.data(), d.size());
                 ok = true;
             }
-        }
-        // 3. DuckDuckGo fallback
+        };
+        // 1. the classic /favicon.ico - most sites still keep one there
+        tryUrl(L"https://" + host + L"/favicon.ico");
+        // 2. the icons the site's own page declares: their icon hangs off a
+        //    custom path and the markup is the only place that names it
         if (!ok) {
-            d.clear();
-            if (WxHttpGet(L"https://icons.duckduckgo.com/ip3/" + host + L".ico", ua, d, err) && isValidImg(d)) {
-                WxWriteFile(p, d.data(), d.size());
-                ok = true;
+            std::vector<unsigned char> pg;
+            std::wstring e2;
+            if (WxHttpGet(L"https://" + host + L"/", ua, pg, e2) && pg.size() > 16 && pg.size() < (4u << 20)) {
+                std::string html(pg.begin(), pg.end());
+                std::vector<std::wstring> hints;
+                BmCollectIconHints(html, hints);
+                std::vector<std::wstring> urls;
+                for (const std::wstring& h : hints) {
+                    std::wstring u = BmResolveIconHint(h, host);
+                    if (u.empty()) continue;
+                    std::wstring t4 = u.size() >= 4 ? u.substr(u.size() - 4) : L"";
+                    for (auto& c : t4) if (c >= L'A' && c <= L'Z') c = (wchar_t)(c - L'A' + L'a');
+                    if (t4 == L".svg") continue;              // no svg decoder: spend the road elsewhere
+                    if (std::find(urls.begin(), urls.end(), u) == urls.end()) {
+                        urls.push_back(u);
+                        if (urls.size() >= 6) break;
+                    }
+                }
+                for (const std::wstring& u : urls) { tryUrl(u); if (ok) break; }
             }
         }
+        // 3. the touch icon: big and square on the sites that keep one
+        tryUrl(L"https://" + host + L"/apple-touch-icon.png");
+        // 4. Google's favicon service, at 64px so it stays sharp at the strip's
+        //    size. The services answer 404 with their globe when they have
+        //    nothing, and the status check drops that: no placeholder is cached
+        tryUrl(L"https://www.google.com/s2/favicons?domain=" + host + L"&sz=64");
+        // 5. DuckDuckGo's service
+        tryUrl(L"https://icons.duckduckgo.com/ip3/" + host + L".ico");
         if (!ok) {
             WxWriteFile(p + L".miss", (const unsigned char*)"x", 1);
         } else {
@@ -313,7 +434,18 @@ static void BmFaviconArrived(std::wstring* host) {   // WM_APP+9, the UI thread:
                 delete it->second;
                 it->second = nullptr;
             }
-            g_favCache[*host] = WxLoadIcon(p);
+            Gdiplus::Bitmap* bm = WxLoadIcon(p);
+            if (bm) {
+                g_favCache[*host] = bm;
+            } else {
+                // the bytes will not decode: drop the file and the miss marker so
+                // a later run runs the roads again, instead of a letter tile that
+                // never heals and a cache entry that bars every future attempt
+                DeleteFileW(p.c_str());
+                DeleteFileW((p + L".miss").c_str());
+                auto it2 = g_favCache.find(*host);
+                if (it2 != g_favCache.end() && !it2->second) g_favCache.erase(it2);
+            }
         }
     }
     bool any = false;
@@ -339,6 +471,13 @@ static void BmEnsureIco(Bm& b) {
     std::wstring p = BmFavPath(host);
     if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
         b.ico = WxLoadIcon(p);
+        if (!b.ico) {
+            // the cached bytes will not decode: retire them and let the roads
+            // run again, instead of pinning the letter tile on this bookmark
+            DeleteFileW(p.c_str());
+            DeleteFileW((p + L".miss").c_str());
+            EnsureHostFavicon(host);
+        }
         b.icoTried = true;
         return;
     }

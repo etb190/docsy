@@ -1385,6 +1385,9 @@ $("bNext").onclick=function(){
     emptyState(false,false);
     overlay("",false);
     refreshNav();
+    post({type:"page", page:S.start});   // the buffer shortcut navigates like every
+                                         // range commit: the reader and the thumbnail
+                                         // rail follow the range's first page
     updateDoneStatus();
     saveCurrentDigest();
     checkPrefetchBuffer();
@@ -1449,6 +1452,9 @@ function commitCustomRange(str){
   S.start=X; S.rangePages=Y-X+1;
   try{ localStorage.setItem("summary.custom", X+"-"+Y); }catch(e){}
   refreshNav();
+  post({type:"page", page:S.start});   // the committed range's first number is navigation
+                                       // too: X leads, the reader shows X and the rail
+                                       // walks to it, like any other range step
   post({type:"range-changed", pages:S.rangePages});
   post({type:"set-setting", key:"summary.range", val:String(S.rangePages)});
   post({type:"set-setting", key:"summary.custom.range", val:X+"-"+Y});

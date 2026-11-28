@@ -258,8 +258,9 @@ static bool TabOpenInto(bool b, const std::wstring& p) {
     bool wasEmpty = !DV(b).n;                     // the front tab is blank: reuse it
     int created = -1;
     if (!wasEmpty) {
-        int vm = DV(b).vm, fit = DV(b).fitMode;   // the view mode the new tab inherits
-        TabCancelTransients(b);
+        PdfRememberPage(DV(b));                   // the outgoing document leaves its page in
+        int vm = DV(b).vm, fit = DV(b).fitMode;   // the store: a later open lands where the
+        TabCancelTransients(b);                   // reader left it, not back at the start
         TabCaptureLive(b);                        // the current document parks in its slot
         Tabs(b).push_back(DocState{});            // the new session rides the strip's end
         g.tabUndo[b].push_back({});
@@ -283,6 +284,9 @@ static bool TabOpenInto(bool b, const std::wstring& p) {
         }
         return false;
     }
+    PdfRestorePage(DV(b), b);                    // the remembered position comes back: the
+                                                 // pane scrolls to its page and the
+                                                 // thumbnail rail walks there with it
     AiSetSetting("app.doc", WxU(p));             // the session reopens this document
     return true;
 }
@@ -297,6 +301,7 @@ static bool CloseTabAt(bool b, int idx) {
     if (!(live ? DV(b).n : Tabs(b)[idx].n)) return false;   // the blank start tab is not a document
     if (!live && DocDirty(Tabs(b)[idx])) SwitchTab(b, idx);
     if (idx != Act(b)) {                          // a clean inactive tab: release it where it sits
+        PdfRememberPage(Tabs(b)[idx]);            // its page rides out: a reopen finds the place
         ClearCache(Tabs(b)[idx]);
         TtPdfSessionDrop(Tabs(b)[idx]);           // and its text session with it
         Tabs(b).erase(Tabs(b).begin() + idx);
@@ -323,6 +328,9 @@ static bool CloseTabAt(bool b, int idx) {
             }
         }
     }
+    PdfRememberPage(DV(b));                       // the closing document leaves its page in the
+                                                  // store: opening the file again - now or in
+                                                  // a later session - resumes there
     ClearCache(DV(b));                            // the document's bitmaps die with it
     TtPdfSessionDrop(DV(b));                      // its text session with them
     if (fd.open && fd.pane == b) {                // the find dies only when ITS document dies
@@ -419,7 +427,12 @@ static void CloseAllTabs(bool b) {
             }
         }
     }
-    for (int i = 0; i < (int)Tabs(b).size(); i++) { ClearCache(Tabs(b)[i]); TtPdfSessionDrop(Tabs(b)[i]); }
+    PdfRememberPage(DV(b));                       // every document leaves its page behind - the
+                                                  // live one first, then the parked sessions
+    for (int i = 0; i < (int)Tabs(b).size(); i++) {
+        if (Tabs(b)[i].n) PdfRememberPage(Tabs(b)[i]);
+        ClearCache(Tabs(b)[i]); TtPdfSessionDrop(Tabs(b)[i]);
+    }
     if (fd.open && fd.pane == b) {
         if (g.view) { KillTimer(g.view, 7); KillTimer(g.view, 8); }
         if (g_fedit) ShowWindow(g_fedit, SW_HIDE);

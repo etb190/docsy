@@ -1345,6 +1345,19 @@ static void SetPage(int i) {
     StatusRepaint();
 }
 
+// A surface that names a page lands the reader on it: the summary card's range
+// navigator (every range commit posts its first page), the remembered-position
+// restore. Single mode flips (SetPage); continuous, two-page and grid scroll
+// the page's row top into view - the thumbnail rail follows either way,
+// SideSync riding the current-page ring, the status line riding UpdateTitle.
+static void PdfNavigateToPage(int i) {
+    DocState& D = DVF();
+    if (!D.n) return;
+    i = std::clamp(i, 0, D.n - 1);
+    if (D.vm == 1) { SetPage(i); return; }
+    ScrollTo(D.sx, max(0, PageTop(D, i) - Gap() / 2));   // the thumbnail click's own road
+}
+
 // Click/wheel focus (KillerPDF's FocusPaneFromPointer): the pane under the
 // pointer becomes the one every window-level surface serves - the sidebar's
 // ring retargets to its document, the footer's page/zoom reads it, the find
@@ -1454,6 +1467,38 @@ static bool Open(DocState& D, const std::wstring& p) {   // opens into ONE pane:
         if (!g.quiet) MessageBoxW(g.main, L"Could not open this file (invalid, encrypted or unsupported PDF).", L"Docsy", MB_ICONWARNING);
         return false;
     }
+}
+
+// ---- the remembered reading position ---------------------------------------
+// The page the pane sits on rides out to the session store under the file's
+// path, and every open of that file scrolls back to it: closing the document,
+// closing the app, opening another file over it - none of it loses the place.
+// Only the page is remembered (zoom and fit keep their open defaults); the
+// thumbnail rail walks along on its own, because SideSync follows D.cur.
+static void PdfRememberPage(const DocState& D) {         // the pane's page into the store
+    if (g.quiet || D.path.empty() || D.n <= 0) return;
+    int pg = (D.cur >= 0 && D.cur < D.n) ? D.cur : PageAt(D, D.sy + g.ch / 3);
+    if (pg < 0 || pg >= D.n) return;
+    AiSetSetting("app.pdfpage." + WxU(D.path), std::to_string(pg + 1));
+}
+static void PdfRestorePage(DocState& D, bool b) {        // the remembered page comes back:
+    if (g.quiet || D.path.empty() || D.n <= 0) return;   // the pane scrolls to it right after
+    std::string s = AiGetSetting("app.pdfpage." + WxU(D.path), "");   // the open, in its own
+    int pg = atoi(s.c_str());                            // view mode, and the thumbnail rail
+    if (pg < 1) return;                                  // lands there with it (SideSync)
+    pg = min(pg, D.n);
+    int i = pg - 1;
+    if (D.vm == 1) {                                     // single mode IS the current page:
+        D.cur = i;                                       // seat it and lay that page out -
+        if (D.fitMode != 2) ApplyFit(D.fitMode == 1, b); else Layout(D, b);   // the same road
+        D.sx = 0; D.sy = 0;                              // SetPage drives, pane-aware here so
+        UpdateScroll(D, b);                              // a background pane restores too
+        if (g.view) SetTimer(g.view, 4, 160, nullptr);   // pre-warm the restored page's text
+    } else {
+        ScrollPane(b, D.sx, max(0, PageTop(D, i) - Gap() / 2));   // continuous, two-page and
+    }                                                    // grid rows top-align the page
+    SideSync();
+    StatusRepaint();
 }
 
 static void OpenDlg() {                          // the dialog opens into the FOCUSED pane
