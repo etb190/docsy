@@ -316,6 +316,18 @@ struct PdfFile {
     std::map<int, size_t> offsets;              // object number -> file offset
     std::map<int, std::pair<int, int>> stmIndex; // objnum -> (objstm num, index)
     std::map<int, std::vector<uint8_t>> objstm; // decoded object streams
+    std::map<std::pair<int, int>, PdfObj*> stmObjs;   // (objstm, index) -> parsed:
+                                                      // the memo one object stream
+                                                      // entry deserves - without it
+                                                      // every Resolve of an ObjStm-
+                                                      // resident object parses fresh,
+                                                      // and every fresh pointer misses
+                                                      // the font cache (keyed by dict
+                                                      // address), so a page whose /F1
+                                                      // fires 300 times re-reads the
+                                                      // font dict and re-inflates its
+                                                      // ToUnicode 300 times. KillerPDF
+                                                      // keeps these reader-level too.
     std::vector<std::unique_ptr<PdfObj>> anon;  // objects parsed out of streams
     std::vector<std::unique_ptr<PdfObj>> trailerStore;
     bool encrypted = false, recovered = false, valid = false;
@@ -584,19 +596,205 @@ struct PdfFile {
             if (!lx.Token(b) || b.t != PdfObj::INT) return nullptr;
             if (k == index) {
                 if (a.i != num || b.i < 0 || (size_t)(first + b.i) > data.size()) return nullptr;
+                auto sk = std::make_pair(stmNum, index);
+                auto seen = stmObjs.find(sk);
+                if (seen != stmObjs.end()) return seen->second;   // the memo's word
                 Lexer body{ data.data() + first + b.i, data.data() + data.size() };
                 PdfObj value;
                 if (!body.ParseValue(value)) return nullptr;
                 anon.push_back(std::make_unique<PdfObj>(std::move(value)));
+                stmObjs[sk] = anon.back().get();
                 return anon.back().get();
             }
         }
         return nullptr;
     }
 
-    // ---- stream filters: FlateDecode, ASCIIHexDecode, ASCII85Decode,
+    // ---- stream filters: FlateDecode, LZWDecode, ASCIIHexDecode, ASCII85Decode,
     //      RunLengthDecode - the set text extraction meets. DCT and friends
     //      return false, which degrades that one stream, never the page. ----
+
+    // DecodeParms picks its entry by the filter's seat in the chain: a dict
+    // belongs to a single filter, an array walks the chain slot by slot.
+    const PdfObj* DecodeParmsFor(const PdfObj* stream, size_t index) {
+        const PdfObj* parms = ResolveIn(stream, "DecodeParms");
+        if (!parms) parms = ResolveIn(stream, "DP");
+        if (!parms) return nullptr;
+        if (parms->t == PdfObj::DICT) return index == 0 ? parms : nullptr;
+        if (parms->t == PdfObj::ARR && index < parms->arr.size()) {
+            const PdfObj* e = Resolve(&parms->arr[index]);
+            return e && e->t == PdfObj::DICT ? e : nullptr;
+        }
+        return nullptr;
+    }
+    static long long ParmInt(const PdfObj* parms, const char* key, long long def) {
+        const PdfObj* v = parms ? parms->Get(key) : nullptr;
+        if (!v || v->t == PdfObj::NIL) return def;
+        if (v->t == PdfObj::INT) return v->i;
+        if (v->t == PdfObj::REAL) return (long long)v->d;
+        return def;
+    }
+
+    // KillerPDF's ReversePredictor: TIFF predictor 2 and the PNG family 10-15,
+    // riding FlateDecode and LZWDecode through DecodeParms. Real producers
+    // (linearized PDF 1.5 files above all) wrap their cross-reference streams
+    // and object streams in /Predictor 12 - without the reversal the rows
+    // decode to noise and the whole file fails to open. Recovery-tolerant the
+    // way KillerPDF's compatibility mode is: an incomplete tail row truncates,
+    // a wrong per-row filter or a filter byte outside 0-4 stops the walk and
+    // keeps what decoded.
+    static bool ReversePredictor(std::vector<uint8_t>& data, const PdfObj* parms) {
+        long long predictor = ParmInt(parms, "Predictor", 1);
+        if (predictor == 1) return true;
+        long long colors = ParmInt(parms, "Colors", 1);
+        long long bpc = ParmInt(parms, "BitsPerComponent", 8);
+        long long columns = ParmInt(parms, "Columns", 1);
+        if (colors < 1 || columns < 1 || bpc < 1 || bpc > 16) return false;
+        if (bpc != 1 && bpc != 2 && bpc != 4 && bpc != 8 && bpc != 16) return false;
+        long long bytesPerPixel = (colors * bpc + 7) / 8;
+        long long rowLength = (columns * colors * bpc + 7) / 8;
+        if (rowLength <= 0 || rowLength > (1ll << 28)) return false;
+        if (predictor == 2) {                       // TIFF: samples accumulate left
+            size_t rows = data.size() / (size_t)rowLength;
+            if (rows == 0) return false;
+            data.resize(rows * (size_t)rowLength);
+            if (bpc == 8) {
+                for (size_t row = 0; row < data.size(); row += (size_t)rowLength)
+                    for (size_t off = row + (size_t)colors; off < row + (size_t)rowLength; off++)
+                        data[off] = (uint8_t)(data[off] + data[off - (size_t)colors]);
+            } else if (bpc == 16) {
+                size_t stride = (size_t)colors * 2;
+                for (size_t row = 0; row < data.size(); row += (size_t)rowLength)
+                    for (size_t off = row + stride; off + 1 < row + (size_t)rowLength; off += 2) {
+                        size_t prev = off - stride;
+                        unsigned v = (((unsigned)data[off] << 8) | data[off + 1]) +
+                                     (((unsigned)data[prev] << 8) | data[prev + 1]);
+                        data[off] = (uint8_t)(v >> 8);
+                        data[off + 1] = (uint8_t)v;
+                    }
+            } else {                                  // packed samples: bit arithmetic
+                long long samplesPerRow = colors * columns;
+                int mask = (1 << (int)bpc) - 1;
+                auto readBit = [&](size_t rowBase, long long bitAt) -> int {
+                    size_t byte = rowBase + (size_t)(bitAt / 8);
+                    int shift = 7 - (int)(bitAt % 8);
+                    return (data[byte] >> shift) & 1;
+                };
+                auto writeBit = [&](size_t rowBase, long long bitAt, int bit) {
+                    size_t byte = rowBase + (size_t)(bitAt / 8);
+                    int shift = 7 - (int)(bitAt % 8);
+                    uint8_t m = (uint8_t)(1 << shift);
+                    if (bit) data[byte] |= m; else data[byte] &= (uint8_t)~m;
+                };
+                auto readSample = [&](size_t rowBase, long long sample) {
+                    int v = 0;
+                    for (long long b = 0; b < bpc; b++)
+                        v = (v << 1) | readBit(rowBase, sample * bpc + b);
+                    return v;
+                };
+                auto writeSample = [&](size_t rowBase, long long sample, int value) {
+                    for (long long b = 0; b < bpc; b++)
+                        writeBit(rowBase, sample * bpc + b, (value >> ((int)bpc - (int)b - 1)) & 1);
+                };
+                for (size_t row = 0; row < data.size(); row += (size_t)rowLength)
+                    for (long long s = colors; s < samplesPerRow; s++) {
+                        int v = (readSample(row, s) + readSample(row, s - colors)) & mask;
+                        writeSample(row, s, v);
+                    }
+            }
+            return true;
+        }
+        if (predictor < 10 || predictor > 15) return false;
+        size_t encodedRow = (size_t)rowLength + 1;
+        size_t rows = data.size() / encodedRow;
+        if (rows == 0) return false;
+        std::vector<uint8_t> decoded(rows * (size_t)rowLength);
+        for (size_t row = 0; row < rows; row++) {
+            size_t inAt = row * encodedRow, outAt = row * (size_t)rowLength;
+            uint8_t filter = data[inAt];
+            if (filter > 4) {                       // a garbage tail row: keep what
+                if (row == 0) return false;         // decoded before it - recovery
+                decoded.resize(outAt);
+                break;
+            }
+            for (long long col = 0; col < rowLength; col++) {
+                uint8_t raw = data[inAt + 1 + (size_t)col];
+                uint8_t left = col >= bytesPerPixel ? decoded[outAt + (size_t)col - (size_t)bytesPerPixel] : (uint8_t)0;
+                uint8_t above = row > 0 ? decoded[outAt - (size_t)rowLength + (size_t)col] : (uint8_t)0;
+                uint8_t upperLeft = row > 0 && col >= bytesPerPixel
+                    ? decoded[outAt - (size_t)rowLength + (size_t)col - (size_t)bytesPerPixel] : (uint8_t)0;
+                uint8_t v;
+                switch (filter) {
+                case 0: v = raw; break;
+                case 1: v = (uint8_t)(raw + left); break;
+                case 2: v = (uint8_t)(raw + above); break;
+                case 3: v = (uint8_t)(raw + (uint8_t)(((unsigned)left + above) / 2)); break;
+                default: {                          // Paeth
+                    int p = (int)left + above - upperLeft;
+                    int pl = p - left < 0 ? left - p : p - left;
+                    int pa = p - above < 0 ? above - p : p - above;
+                    int pu = p - upperLeft < 0 ? upperLeft - p : p - upperLeft;
+                    uint8_t best = pl <= pa && pl <= pu ? left : (pa <= pu ? above : upperLeft);
+                    v = (uint8_t)(raw + best);
+                    break;
+                }
+                }
+                decoded[outAt + (size_t)col] = v;
+            }
+        }
+        data = std::move(decoded);
+        return !data.empty();
+    }
+
+    // KillerPDF's DecodeLzw: the classic Welch LZW with PDF's early-change
+    // width bump (EarlyChange 1 bumps one code early, 0 on time). Legacy
+    // producers loved it; the interpreter meets it on old Arabic files.
+    static bool Lzw(const std::vector<uint8_t>& in, const PdfObj* parms, std::vector<uint8_t>& out) {
+        long long early = ParmInt(parms, "EarlyChange", 1);
+        if (early != 0 && early != 1) early = 1;
+        static const int MaxCodes = 4096;
+        std::vector<std::vector<uint8_t>> dict(MaxCodes);
+        for (int v = 0; v < 256; v++) dict[v] = { (uint8_t)v };
+        size_t bitAt = 0;
+        int width = 9, nextCode = 258;
+        std::vector<uint8_t> previous;
+        auto readCode = [&](int& code) -> bool {
+            if (bitAt + (size_t)width > in.size() * 8) return false;
+            code = 0;
+            for (int b = 0; b < width; b++) {
+                size_t abs = bitAt + (size_t)b;
+                code = (code << 1) | ((in[abs / 8] >> (7 - (int)(abs % 8))) & 1);
+            }
+            bitAt += (size_t)width;
+            return true;
+        };
+        for (;;) {
+            int code = 0;
+            if (!readCode(code)) break;
+            if (code == 256) {                    // clear: the table resets
+                for (int v = 0; v < MaxCodes; v++) dict[v].clear();
+                for (int v = 0; v < 256; v++) dict[v] = { (uint8_t)v };
+                width = 9; nextCode = 258; previous.clear();
+                continue;
+            }
+            if (code == 257) break;               // end of data
+            std::vector<uint8_t> current;
+            if (code < nextCode && !dict[code].empty()) current = dict[code];
+            else if (code == nextCode && !previous.empty()) {
+                current = previous; current.push_back(previous[0]);
+            } else break;                         // invalid code: the tail dies
+            if (out.size() + current.size() > MaximumSourceBytes) return false;
+            out.insert(out.end(), current.begin(), current.end());
+            if (!previous.empty() && nextCode < MaxCodes) {
+                dict[nextCode] = previous; dict[nextCode].push_back(current[0]);
+                nextCode++;
+                if (width < 12 && nextCode == (1 << width) - (int)early) width++;
+            }
+            previous = std::move(current);
+        }
+        return true;
+    }
+
     bool StreamData(const PdfObj* stream, std::vector<uint8_t>& out) {
         if (!stream) return false;
         if (stream->t == PdfObj::DICT) {         // an object-stream body, already decoded
@@ -617,11 +815,16 @@ struct PdfFile {
             for (const PdfObj& f : filter->arr) chain.push_back(Resolve(&f));
         else return false;
         out.assign(src, src + stream->dataLen);
-        for (const PdfObj* f : chain) {
+        for (size_t ci = 0; ci < chain.size(); ci++) {
+            const PdfObj* f = chain[ci];
             if (!f || f->t != PdfObj::NAME) return false;
+            const PdfObj* parms = DecodeParmsFor(stream, ci);
             std::vector<uint8_t> next;
             if (f->name == "FlateDecode" || f->name == "Fl") {
                 if (!Flate(out, next)) return false;
+                if (parms && !ReversePredictor(next, parms)) return false;
+            } else if (f->name == "LZWDecode" || f->name == "LZW") {
+                if (!Lzw(out, parms, next)) return false;
             } else if (f->name == "ASCIIHexDecode" || f->name == "AHx") {
                 if (!AsciiHex(out, next)) return false;
             } else if (f->name == "ASCII85Decode" || f->name == "A85") {

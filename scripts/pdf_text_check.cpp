@@ -207,6 +207,15 @@ int main(int argc, char** argv) {
              "no ToUnicode: the embedded TrueType cmap names the glyphs");
     TestFile(dir, "broken_code_recovery.pdf", L"AB\xFFFD" L"C",
              "an unmapped code rides through one byte; the letters around it survive");
+    TestFile(dir, "predicted_xref.pdf", L"Predicted",
+             "PDF 1.5 xref stream under PNG predictor 12 opens (the shape two real "
+             "Moroccan family-code files died on - without ReversePredictor the whole "
+             "document fell to OCR and 'detected nothing')");
+    TestFile(dir, "lzw_content.pdf", L"Hello LZW",
+             "LZWDecode content (EarlyChange 1): the legacy producers' filter");
+    TestFile(dir, "objstm_fonts.pdf", L"\u0627\u0644\u0645\u062D" L"\u0627\u0644\u0645\u062D" L"\u0627\u0644\u0645\u062D",
+             "ObjStm-resident font dict fires /F1 three times: the memoized parse "
+             "keeps the font cache hitting, the Arabic comes out whole every time");
 
     printf("- rotated.pdf\n");
     {

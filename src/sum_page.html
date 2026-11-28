@@ -79,6 +79,9 @@ body{background:#141414; color:var(--text); font-family:"Segoe UI",sans-serif;
   border:1px solid var(--cardborder); border-radius:4px; font-size:13px; font-weight:600;
   text-align:center; outline:none; user-select:text;}
 #startBox:focus{border-color:var(--selfg);}
+/* The C chip lights the navigator's own box: custom mode tints it so the eye
+   knows the pair inside speaks the free X-X road, not the lone start page. */
+#startBox.custom{border-color:var(--selfg); background:#242424;}
 
 /* iOS-style toggle switches (TestModeToggle in Avalanche) */
 .sw-wrap{display:flex; align-items:center; cursor:pointer; user-select:none;}
@@ -121,14 +124,6 @@ body{background:#141414; color:var(--text); font-family:"Segoe UI",sans-serif;
   border-radius:4px; cursor:pointer;}
 .chip:hover{background:var(--rowhover); color:var(--text);}
 .chip.on{background:var(--selbg); border-color:var(--selfg); color:var(--selfg);}
-/* The C chip's own seat: the custom range's free input. It stands in the chip
-   row, one chip wide-ish, and shares the dark select face. */
-#customBox{height:28px; width:94px; background:#2b2b2b; color:#e0e0e0;
-  border:1px solid #3f3f3f; border-radius:4px; font-size:11.5px; font-family:inherit;
-  font-weight:600; outline:none; padding:0 8px; box-sizing:border-box; text-align:center;}
-#customBox:hover{background-color:#333333; border-color:#505050;}
-#customBox:focus{border-color:var(--selfg); background-color:#242424;}
-#customBox::placeholder{color:var(--dim); font-weight:500;}
 select{
   appearance:none;
   -webkit-appearance:none;
@@ -174,6 +169,15 @@ body.ctrlhover #digest{cursor:pointer;}
 #digest blockquote{border-left:2px solid var(--line); padding:2px 10px; margin:6px 0;
   color:var(--muted); font-style:italic;}
 #digest hr{border:0; border-top:1px solid var(--line); margin:8px 0;}
+/* The digest speaks the language it was written in: an Arabic summary lays
+   itself out right-to-left - headers lean right, lists count from the right,
+   the quote bar hugs the right edge, and the stream GROWS from the right as
+   the model writes. The direction rides the .md wrapper, so the scrollbar
+   stays at the window edge and the reader's muscle memory keeps its seat. */
+#digest .md[dir="rtl"] p{text-align:justify;}
+#digest .md[dir="rtl"] h1,#digest .md[dir="rtl"] h2,#digest .md[dir="rtl"] h3{text-align:right;}
+#digest .md[dir="rtl"] ul,#digest .md[dir="rtl"] ol{padding-right:22px; padding-left:0;}
+#digest .md[dir="rtl"] blockquote{border-left:0; border-right:2px solid var(--line);}
 
 /* Floating Word Hover Plate (DigestWordHighlightAdorner in Avalanche) */
 #wordPlate{position:absolute; pointer-events:none; background:var(--platebg);
@@ -305,8 +309,7 @@ html,body{margin:0; background-color:#141414 !important;}
     <!-- Row 2: Range Chips & Dropdowns (Avalanche WrapPanel) -->
     <div class="row" id="rangeWrap">
       <div id="rangePanel">
-        <button class="chip" id="chipC" data-p="custom" title="Custom range - type it as X-X (for example 12-45)">C</button>
-        <input id="customBox" placeholder="X-X" spellcheck="false" title="Custom range - type X-X (for example 12-45), Enter commits" style="display:none">
+        <button class="chip" id="chipC" data-p="custom" title="Custom range - the start box above takes it as X-X (for example 12-45), Enter commits">C</button>
         <button class="chip" data-p="1">1</button>
         <button class="chip" data-p="5">5</button>
         <button class="chip on" data-p="20">20</button>
@@ -635,7 +638,25 @@ function renderMd(text, el){
     if(/^\s*$/.test(ln)){ fp(); cl(); i++; continue; }
     para.push(inline(ln.trim())); i++;
   }
-  fp(); cl(); el.innerHTML=html;
+  fp(); cl(); el.innerHTML='<div class="md" dir="'+(digestIsRtl()?"rtl":"ltr")+'">'+html+'</div>';
+}
+
+/* ---- Digest Direction (Arabic reads right-to-left) ----
+   Two roads flip the digest to RTL: the language dropdown asking for Arabic
+   (the stream must run right-to-left from the FIRST character, before any
+   text lands), and the text itself - a summary that came back overwhelmingly
+   Arabic carries its own direction even when the select stayed English. */
+function digestIsRtl(){
+  try{ if((S.mode==="web"?$("langW"):$("lang")).value==="Arabic") return true; }catch(e){}
+  var s=S.full.length>8000?S.full.slice(0,8000):S.full;
+  var ar=0, la=0;
+  for(var i=0;i<s.length;i++){
+    var c=s.charCodeAt(i);
+    if((c>=0x0600&&c<=0x06FF)||(c>=0x0750&&c<=0x077F)||(c>=0x08A0&&c<=0x08FF)||
+       (c>=0xFB50&&c<=0xFDFF)||(c>=0xFE70&&c<=0xFEFF)) ar++;
+    else if((c>=0x41&&c<=0x5A)||(c>=0x61&&c<=0x7A)||(c>=0xC0&&c<=0x24F)||(c>=0x370&&c<=0x3FF)) la++;
+  }
+  return ar>0 && ar*10>=(ar+la)*3;
 }
 
 /* ---- Typewriter (20ms tick) ---- */
@@ -893,7 +914,6 @@ function updatePagesLeft(){
   $("stPagesLeft").textContent=left>0?(left+" pages left"):"End of document";
 }
 var startBoxFocused=false;
-var customBoxFocused=false;
 function refreshNav(){
   var end=fmtRange();
   if(!startBoxFocused){
@@ -909,10 +929,9 @@ function refreshNav(){
     var p=c.dataset.p==="all"?1000000:parseInt(c.dataset.p,10);
     c.className="chip"+(!S.customMode&&p===S.rangePages?" on":"");
   });
-  var box=$("customBox");
-  var show=S.customMode&&S.mode==="doc";
-  box.style.display=show?"inline-block":"none";
-  if(show&&!customBoxFocused) box.value=S.start+"-"+end;
+  // the custom tint rides the navigator's box: the SAME input the reader
+  // always used, now speaking the free X-X road the C chip arms
+  $("startBox").classList.toggle("custom", S.customMode);
   updatePagesLeft();
 }
 function status(t){ $("stStatus").textContent=t||""; }
@@ -968,7 +987,9 @@ function checkPrefetchBuffer(){
 /* ---- StartBox Input Handling ---- */
 $("startBox").addEventListener("focus", function(){
   startBoxFocused=true;
-  this.value=String(S.start);
+  // custom mode keeps the pair in view - the user is here to edit BOTH ends;
+  // the plain road collapses to the lone start page as it always did
+  this.value=S.customMode?(S.start+"-"+fmtRange()):String(S.start);
   this.select();
 });
 $("startBox").addEventListener("blur", function(){
@@ -997,6 +1018,11 @@ function commitStartBox(str){
   var s=(str||"").trim();
   if(s.indexOf("-")>=0){                 // an X-X pair rides the custom road
     commitCustomRange(s);
+    return;
+  }
+  if(S.customMode){                     // the C chip armed the box: the pair
+    status("Custom range must be X-X - for example "+S.start+"-"+Math.min(S.start+S.rangePages-1,S.pageCount));
+    refreshNav();
     return;
   }
   var v=parseInt(s.replace(/[^0-9]/g,""),10);
@@ -1245,8 +1271,9 @@ function fillCombos(m){
   // click here is not consent to generate; the next Start / right arrow run
   // rolls a fresh buffer with the new settings when the buffer is on)
   $("words").onchange=function(){ post({type:"set-setting", key:"summary.words", val:this.value}); invalidatePrefetch(); };
-  $("lang").onchange=function(){ post({type:"set-setting", key:"summary.lang", val:this.value}); invalidatePrefetch(); };
+  $("lang").onchange=function(){ post({type:"set-setting", key:"summary.lang", val:this.value}); invalidatePrefetch(); paint(); };
   $("genre").onchange=function(){ post({type:"set-setting", key:"summary.default_genre", val:this.value}); invalidatePrefetch(); };
+  $("langW").onchange=function(){ post({type:"set-setting", key:"summary.lang", val:this.value}); invalidatePrefetch(); paint(); };
 
   $("prompt").innerHTML="";
   var ps=m.prompts||[];
@@ -1388,17 +1415,17 @@ document.querySelectorAll(".chip").forEach(function(c){
 
 /* ---- Custom Range (the C chip) ----
    C is short for custom: the chip flips the range logic from the fixed chips
-   to free manual input - an X-X box stands in for the chip row, and the typed
-   pair (it HAS to be X-X, two numbers and the dash) becomes the stretch.
-   Committing a range is navigation, not generation: it moves S.start and
-   S.rangePages, saves the pair, and waits - Start and the right arrow stay
-   the only two buttons that ever turn the pump. */
+   to free manual input, carried by the navigator's OWN start box - no second
+   input. The typed pair (it HAS to be X-X, two numbers and the dash) becomes
+   the stretch. Committing a range is navigation, not generation: it moves
+   S.start and S.rangePages, saves the pair, and waits - Start and the right
+   arrow stay the only two buttons that ever turn the pump. */
 function enterCustomMode(){
   S.customMode=true;
   refreshNav();
-  var box=$("customBox");
-  box.value=S.start+"-"+fmtRange();
-  box.focus(); box.select();
+  var box=$("startBox");   // the existing input takes the custom seat: the
+                           // focus handler keeps the X-Y pair, selected
+  box.focus();
 }
 function exitCustomMode(){
   if(!S.customMode) return;
@@ -1428,30 +1455,6 @@ function commitCustomRange(str){
   status("Custom range "+X+"-"+Y+" - press Start to summarize");
   return true;
 }
-$("customBox").addEventListener("focus", function(){
-  customBoxFocused=true;
-  this.select();
-});
-$("customBox").addEventListener("keydown", function(e){
-  if(e.key==="Enter"){
-    e.preventDefault();
-    customBoxFocused=false;
-    commitCustomRange(this.value);
-    this.blur();
-  }else if(e.key==="Escape"){
-    e.preventDefault();
-    e.stopPropagation();   // same rule as the start box: revert, don't fold
-    customBoxFocused=false;
-    refreshNav();          // the display falls back to the committed range
-    this.blur();
-  }
-});
-$("customBox").addEventListener("blur", function(){
-  if(!customBoxFocused) return;
-  customBoxFocused=false;
-  commitCustomRange(this.value);
-});
-
 document.addEventListener("keydown", function(e){
   if(e.key==="Escape"){ window.__sumSaveScroll(); post({type:"close"}); return; }
   if(e.ctrlKey||e.altKey||e.shiftKey||e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;

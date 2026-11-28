@@ -344,6 +344,173 @@ def make_broken_code_recovery(b):
     return b.build(1)
 
 
+def png_predictor_encode(rows):
+    """PNG predictor 12 encoder: row 0 rides filter 0 (None), the rest filter
+    2 (Up) - the exact shape the real linearized PDF 1.5 files carry on their
+    cross-reference streams (/DecodeParms <</Columns 4 /Predictor 12>>)."""
+    width = len(rows[0])
+    out = bytearray()
+    prev = bytes(width)
+    for i, row in enumerate(rows):
+        if i == 0:
+            out.append(0)
+            out += row
+        else:
+            out.append(2)
+            out += bytes((row[j] - prev[j]) & 0xFF for j in range(width))
+        prev = row
+    return bytes(out)
+
+
+def make_predicted_xref(b):
+    """The shape two real Moroccan family-code PDFs die on: a PDF 1.5 file
+    whose cross-reference STREAM is FlateDecode wrapped in PNG predictor 12.
+    Without ReversePredictor the rows decode to noise and the file fails to
+    open - the whole document lands in OCR and the reader 'detects nothing'."""
+    content = b"BT /F1 18 Tf 72 720 Td (Predicted) Tj ET\n"
+    b.add(1, "<< /Type /Catalog /Pages 2 0 R >>")
+    b.add(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    b.add(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+             "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>")
+    b.add(4, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+    b.add(5, stream_obj("", content))
+    head = b"%PDF-1.5\r\n%\xE2\xE3\xCF\xD3\r\n"
+    body = bytearray(head)
+    offsets = {}
+    for num in sorted(b.objs):
+        offsets[num] = len(body)
+        body += b"%d 0 obj\r\n" % num + b.objs[num] + b"\rendobj\r\n"
+    rows = bytearray()
+    rows += bytes([0]) + (0).to_bytes(2, "big") + (0).to_bytes(1, "big")    # object 0: free
+    for num in range(1, 6):
+        rows += bytes([1]) + int(offsets[num]).to_bytes(2, "big") + (0).to_bytes(1, "big")
+    packed = zlib.compress(png_predictor_encode([bytes(rows[i:i + 4]) for i in range(0, len(rows), 4)]))
+    xref_at = len(body)
+    xref = stream_obj("/Type /XRef /Size 6 /W [1 2 1] /Root 1 0 R "
+                      "/DecodeParms <</Columns 4 /Predictor 12>> /Filter /FlateDecode", packed)
+    body += b"6 0 obj\r\n" + xref + b"\rendobj\r\n"
+    body += b"startxref\r\n%d\r\n%%%%EOF\r\n" % xref_at
+    return bytes(body)
+
+
+def lzw_encode(data):
+    """PDF LZW (the decoder's inverse): MSB-first codes, EarlyChange 1 - the
+    width bumps when the next code would collide with the high code."""
+    table = {bytes([i]): i for i in range(256)}
+    next_code = 258
+    width = 9
+    bits = []
+
+    def emit(code):
+        bits.append((code, width))
+
+    emit(256)                                     # clear
+    w = b""
+    for ch in data:
+        c = w + bytes([ch])
+        if c in table:
+            w = c
+        else:
+            emit(table[w])
+            table[c] = next_code
+            next_code += 1
+            if width < 12 and next_code == (1 << width) - 1:   # early change
+                width += 1
+            w = bytes([ch])
+    if w:
+        emit(table[w])
+    emit(257)                                     # end of data
+    out = bytearray()
+    acc = 0
+    nbits = 0
+    for code, wdt in bits:
+        acc = (acc << wdt) | code
+        nbits += wdt
+        while nbits >= 8:
+            out.append((acc >> (nbits - 8)) & 0xFF)
+            nbits -= 8
+    if nbits:
+        out.append((acc << (8 - nbits)) & 0xFF)
+    return bytes(out)
+
+
+def make_lzw_content(b):
+    """A legacy producer's shape: the page's content stream rides LZWDecode
+    (EarlyChange defaulting to 1). Old Arabic-government files still ship it."""
+    content = b"BT /F1 24 Tf 72 720 Td (Hello LZW) Tj ET\n"
+    b.add(1, "<< /Type /Catalog /Pages 2 0 R >>")
+    b.add(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>")
+    b.add(3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+             "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>")
+    b.add(4, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+    b.add(5, stream_obj("/Filter /LZWDecode", lzw_encode(content)))
+    return b.build(1)
+
+
+def make_objstm_fonts(b):
+    """The font dict lives inside an object stream and the content stream
+    fires /F1 three times - the shape real PDF 1.5 Arabic files carry. Every
+    Tf resolves the same ObjStm-resident dict; the memo keeps the font cache
+    (keyed by dict address) hitting instead of re-reading the font and
+    re-inflating its ToUnicode on every single Tf. Streams cannot sit inside
+    an ObjStm, so the content (6) and ToUnicode (8) streams stay top-level
+    while the font dict (5) rides the ObjStm (7)."""
+    codes = [b"\x00\x01", b"\x00\x02", b"\x00\x03", b"\x00\x04"]
+    chars = ["\u0627", "\u0644", "\u0645", "\u062D"]
+    body = "".join(hexstr(codes[i]) for i in range(4)).encode("latin-1")
+    content = (b"BT /F1 18 Tf 72 720 Td " + body + b" Tj ET\n"
+               b"BT /F1 18 Tf 72 660 Td " + body + b" Tj ET\n"
+               b"BT /F1 18 Tf 72 600 Td " + body + b" Tj ET\n")
+    uni = tounicode_cmap(list(zip(codes, chars)))
+    obj_bodies = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+           b"/Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R >>",
+        5: b"<< /Type /Font /Subtype /Type0 /BaseFont /Ar /Encoding /Identity-H "
+           b"/DescendantFonts [<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Ar "
+           b"/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> >>] "
+           b"/ToUnicode 8 0 R >>",
+    }
+    header = ""
+    payload = bytearray()
+    ordinal = {}
+    for k, num in enumerate(sorted(obj_bodies)):
+        ordinal[num] = k
+        header += "%d %d " % (num, len(payload))
+        payload += obj_bodies[num] + b" "
+    stm = stream_obj("/Type /ObjStm /N %d /First %d /Filter /FlateDecode"
+                     % (len(obj_bodies), len(header.encode("latin-1"))),
+                     zlib.compress(header.encode("latin-1") + bytes(payload)))
+    head = b"%PDF-1.5\n%\xE2\xE3\xCF\xD3\n"
+    out = bytearray(head)
+    stm_at = len(out)
+    out += b"7 0 obj\n" + stm + b"\nendobj\n"
+    content_at = len(out)
+    out += b"6 0 obj\n" + stream_obj("", content) + b"\nendobj\n"
+    uni_at = len(out)
+    out += b"8 0 obj\n" + stream_obj("", uni) + b"\nendobj\n"
+    rows = bytearray()
+    rows += bytes([0]) + (0).to_bytes(4, "big") + (0).to_bytes(2, "big")    # object 0: free
+    for num in range(1, 9):                       # rows map sequentially: gaps ride free
+        if num in obj_bodies:
+            rows += bytes([2]) + (7).to_bytes(4, "big") + ordinal[num].to_bytes(2, "big")
+        elif num == 6:
+            rows += bytes([1]) + int(content_at).to_bytes(4, "big") + (0).to_bytes(2, "big")
+        elif num == 7:
+            rows += bytes([1]) + int(stm_at).to_bytes(4, "big") + (0).to_bytes(2, "big")
+        elif num == 8:
+            rows += bytes([1]) + int(uni_at).to_bytes(4, "big") + (0).to_bytes(2, "big")
+        else:
+            rows += bytes([0]) + (0).to_bytes(4, "big") + (0).to_bytes(2, "big")
+    packed_rows = zlib.compress(bytes(rows))
+    xref_at = len(out)
+    xref = stream_obj("/Type /XRef /Size 9 /W [1 4 2] /Root 1 0 R /Filter /FlateDecode", packed_rows)
+    out += b"9 0 obj\n" + xref + b"\nendobj\n"
+    out += b"startxref\n%d\n%%%%EOF\n" % xref_at
+    return bytes(out)
+
+
 EXTRA_MAKERS = [
     ("hybrid_xref.pdf", make_hybrid_xref),
     ("arabic_recovery.pdf", make_arabic_recovery),
@@ -351,4 +518,7 @@ EXTRA_MAKERS = [
     ("arabic_embedded_cmap.pdf", make_arabic_embedded_cmap),
     ("arabic_embedded_font.pdf", make_arabic_embedded_font),
     ("broken_code_recovery.pdf", make_broken_code_recovery),
+    ("predicted_xref.pdf", make_predicted_xref),
+    ("lzw_content.pdf", make_lzw_content),
+    ("objstm_fonts.pdf", make_objstm_fonts),
 ]

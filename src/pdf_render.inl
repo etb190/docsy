@@ -916,14 +916,22 @@ static void TtTrim(DocState& D, int keepIdx) {
 
 // The engine text layer's cells for one page, or false when the page takes the
 // OCR fallback: the file could not be parsed (or is encrypted), the page has
-// no text (a scan), or the extraction produced mostly U+FFFD (an encoding the
-// port does not carry - KillerPDF's predefined shift-CID CMap data). The
-// letters land in page-DIP space the way KillerPDF's ReadTextPage does:
+// no text (a scan), or the extraction is essentially all U+FFFD (>90% - a
+// junk layer nothing can name; anything KillerPDF would show stays native).
+// The letters land in page-DIP space the way KillerPDF's ReadTextPage does:
 // cropbox-relative points, the page's /Rotate quarter-turns applied, y down.
 static bool TtNativeBuild(DocState& D, int i, TxtPage& pt) {
     pdftext::PageText* pg = TtPdfPage(D, i);
     if (!pg || pg->letters.empty()) return false;
-    if (pg->fffd * 5 > (int)pg->letters.size()) return false;   // >20% unmapped
+    // The OCR gate only fires on a page whose text layer is essentially ALL
+    // placeholders (>90% unmapped): that is a scan with a junk text layer or
+    // an encoding nothing can name. Everything under that keeps its native
+    // letters - KillerPDF shows the same page to its reader with whatever the
+    // ToUnicode carried, and the old 20% rule was the "detects nothing" bug:
+    // a real Arabic file whose fonts map a fifth of their glyphs oddly (a
+    // lam-alef ligature here, a kashida there) threw away nine pages of real
+    // Arabic and OCR'd them into nothing the user never consented to.
+    if (pg->fffd * 10 > (int)pg->letters.size() * 9) return false;
     int rot = ((pg->rotation % 360) + 360) % 360;
     if (rot % 90) rot = (int)(((rot + 45) / 90) * 90) % 360;
     double rw = (rot % 2 == 0) ? pg->boxW : pg->boxH;
