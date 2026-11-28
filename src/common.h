@@ -1202,9 +1202,10 @@ struct FlipLock {
     }
     ~FlipLock() {
         if (g_flipDepth > 0 && --g_flipDepth == 0 && w) {
-            UnlockWindowUpdate(w);
-            UpdateWindow(w);          // the flip's one paint, now - not on the
-                                      // queue's next idle beat
+            LockWindowUpdate(nullptr);   // the unlock: NULL ends the deferral and
+                                         // hands the accumulated region back
+            UpdateWindow(w);             // the flip's one paint, now - not on the
+                                         // queue's next idle beat
         }
     }
 };
