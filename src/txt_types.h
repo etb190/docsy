@@ -43,6 +43,13 @@ struct TxtLine {                      // a contiguous slice of the flattened cel
 struct TxtPage {
     float w = 0, h = 0;               // page size in DIPs
     unsigned long long tick = 0;      // LRU stamp
+    bool parked = false;              // a pump's placeholder, not a build: the AI
+                                      // index and the summary extraction park empty
+                                      // entries here to mark "OCR in flight" - TtFor
+                                      // must rebuild a parked page on touch instead
+                                      // of serving the empty shell as the page's
+                                      // final truth (selection went dead mid-session
+                                      // when a pump crossed the page first)
     std::vector<TxtCell> cells;
     std::vector<TxtLine> lines;
 };

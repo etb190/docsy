@@ -969,7 +969,11 @@ static bool TtNativeBuild(DocState& D, int i, TxtPage& pt) {
 static TxtPage* TtFor(DocState& D, int i) {
     if (!D.n || i < 0 || i >= D.n) return nullptr;
     auto it = D.txt.find(i);
-    if (it != D.txt.end()) { it->second.tick = ++D.tick; return &it->second; }
+    // A parked shell (the pumps' "OCR in flight" marker) is not the page's
+    // text: serving it made every pump-crossed page go dead for the rest of
+    // the session - selectable at launch, gone a little later, back after a
+    // restart. A parked page rebuilds here, on the touch that wants it.
+    if (it != D.txt.end() && !it->second.parked) { it->second.tick = ++D.tick; return &it->second; }
     TxtPage pt; pt.w = D.pw[i]; pt.h = D.ph[i];
     // KillerPDF's engine text layer first (pdf_text.inl): the PDF's own text,
     // decoded letter by letter through the fonts' ToUnicode CMaps and standard

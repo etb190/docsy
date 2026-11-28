@@ -277,7 +277,21 @@ static void AiOcrArrive(AiOcrPayload* pl) {
     DocState& D = DVF();
     if (!path.empty() && path == D.path && page >= 0 && page < D.n && !D.txt.count(page)) {
         TxtPage pt; pt.w = D.pw[page]; pt.h = D.ph[page];
-        if (ok) {
+        // The engine text layer first, KillerPDF's own order: a page the
+        // extractor can read caches its OWN letters, never the flight's OCR
+        // boxes. The pumps fly OCR at every uncached page they cross, native
+        // or scanned, and the old arrival installed whatever OCR saw - on an
+        // Arabic page the OS engine (often without an Arabic pack) misread it
+        // into nothing or gibberish and that landed in the selection cache as
+        // the page's text: selectable at launch, gone or garbage a little
+        // later, back after a restart. Native-first also feeds the pumps: the
+        // re-kick after this arrival finds real text instead of an empty
+        // shell, so the summary and the index read the page it really has.
+        bool native = false;
+        try { native = TtNativeBuild(D, page, pt); } catch (...) { native = false; }
+        if (native) {
+            TtLines(pt);        // TtLines sorts every RTL line into reading order itself
+        } else if (ok) {
             float kx = pt.w / max(1, ow), ky = pt.h / max(1, oh);
             for (auto& c : cells) {
                 TxtCell s;
@@ -290,6 +304,11 @@ static void AiOcrArrive(AiOcrPayload* pl) {
             }
             TtLines(pt);
             TtSplitChars(pt);   // word boxes -> KillerPDF's letter-granular cells
+        } else {
+            // the render failed: park a PLACEHOLDER, not a verdict - TtFor
+            // rebuilds a parked page on the next touch instead of serving the
+            // empty entry as the page's final truth for the rest of the session
+            pt.parked = true;
         }
         pt.tick = ++D.tick;
         D.txt[page] = std::move(pt);
@@ -342,18 +361,44 @@ static void AiRangeTick() {
     while (g_range.cur <= g_range.last) {
         int p = g_range.cur; // 1-based page number
         auto it = D.txt.find(p - 1);              // 0-based page index
-        if (it == D.txt.end()) {
-            // The page's text layer is not built: fire the OCR flight (its
-            // render is the only this-thread step) and PARK - the old pump
-            // called TtFor here and froze the message loop 100-300ms per page,
-            // the machine-wide lag the reading phase was famous for. The
-            // arrival re-kicks this pump in 1ms.
-            if (AiOcrPrewarm(D, p - 1)) { parked = true; break; }
-            // no engine / render failed: park an empty page, read L"", move on
-            TxtPage empty; empty.w = D.pw[p - 1]; empty.h = D.ph[p - 1];
-            empty.tick = ++D.tick;
-            it = D.txt.emplace(p - 1, std::move(empty)).first;
-            TtTrim(D, p - 1);
+        if (it == D.txt.end() || it->second.parked) {
+            // The engine text layer first, and synchronously: a native page
+            // decodes in microseconds with no render and no OCR pack, so the
+            // flight stays what it was built for - the scanned page the
+            // engine cannot read. (The old fast path fired OCR at every
+            // uncached page, native included: on a machine without the OCR
+            // pack every flight failed, the page parked empty, and both the
+            // pump's range text and the page's own selection read nothing the
+            // file actually carried.) A build that lands here also replaces
+            // any parked shell under the same key.
+            TxtPage nat; nat.w = D.pw[p - 1]; nat.h = D.ph[p - 1];
+            bool native = false;
+            try { native = TtNativeBuild(D, p - 1, nat); } catch (...) { native = false; }
+            if (native) {
+                TtLines(nat);   // TtLines sorts every RTL line into reading order itself
+                nat.tick = ++D.tick;
+                D.txt[p - 1] = std::move(nat);
+                TtTrim(D, p - 1);
+                it = D.txt.find(p - 1);
+            } else if (it == D.txt.end()) {
+                // No engine text: fire the OCR flight (its render is the only
+                // this-thread step) and PARK - the old pump called TtFor here
+                // and froze the message loop 100-300ms per page on scans. The
+                // arrival re-kicks this pump in 1ms.
+                if (AiOcrPrewarm(D, p - 1)) { parked = true; break; }
+                // no engine text and no OCR seat: park a placeholder, read
+                // L"", move on (parked=true: TtFor rebuilds the page on the
+                // user's touch instead of serving the shell as final truth)
+                TxtPage empty; empty.w = D.pw[p - 1]; empty.h = D.ph[p - 1];
+                empty.parked = true;
+                empty.tick = ++D.tick;
+                it = D.txt.emplace(p - 1, std::move(empty)).first;
+                TtTrim(D, p - 1);
+            }
+            // a parked shell stays put: its page already failed a flight (or
+            // had no seat), and re-firing from every re-kick would loop the
+            // same failing render forever - TtFor gives the user's touch the
+            // retry instead
         }
         std::wstring t = AiPageTextOf(it->second);
         if (!t.empty()) g_range.text += L"[p. " + std::to_wstring(p) + L"]\n" + t + L"\n\n";
@@ -626,15 +671,35 @@ static void AiIndexTick() {
     }
     // the same disease the range pump had: TtFor built the page synchronously
     // and froze the message loop 100-200ms a page while the index built. The
-    // async flight parks this pump instead; the arrival re-kicks it in 1ms.
+    // engine text layer first, and synchronously - a native page decodes in
+    // microseconds with no render and no OCR pack, so the async flight parks
+    // this pump only for the scanned pages it was built for; the arrival
+    // re-kicks it in 1ms.
     auto it = D.txt.find(p);
-    if (it == D.txt.end()) {
-        if (AiOcrPrewarm(D, p)) return;   // parked; the flight's arrival continues
-        TxtPage empty; empty.w = D.pw[p]; empty.h = D.ph[p];   // no engine / render failed
-        empty.tick = ++D.tick;
-        D.txt.emplace(p, std::move(empty));
-        TtTrim(D, p);
-        it = D.txt.find(p);
+    if (it == D.txt.end() || it->second.parked) {
+        TxtPage nat; nat.w = D.pw[p]; nat.h = D.ph[p];
+        bool native = false;
+        try { native = TtNativeBuild(D, p, nat); } catch (...) { native = false; }
+        if (native) {
+            TtLines(nat);   // TtLines sorts every RTL line into reading order itself
+            nat.tick = ++D.tick;
+            D.txt[p] = std::move(nat);   // replaces a parked shell under the same key
+            TtTrim(D, p);
+            it = D.txt.find(p);
+        } else if (it == D.txt.end()) {
+            if (AiOcrPrewarm(D, p)) return;   // parked; the flight's arrival continues
+            // no engine text and no OCR seat: a placeholder the index moves
+            // past - TtFor rebuilds the page on the user's touch, not a verdict
+            TxtPage empty; empty.w = D.pw[p]; empty.h = D.ph[p];
+            empty.parked = true;
+            empty.tick = ++D.tick;
+            D.txt.emplace(p, std::move(empty));
+            TtTrim(D, p);
+            it = D.txt.find(p);
+        }
+        // a parked shell stays put: its page already failed a flight (or had
+        // no seat) - re-firing from every re-kick would loop the same failing
+        // render forever; TtFor gives the user's touch the retry instead
     }
     if (it != D.txt.end() && !it->second.cells.empty()) {
         std::vector<AiWordIn> words;
