@@ -471,6 +471,48 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE, PWSTR, int show) {
         return Shot(argv[2], c.right, c.bottom);                     // toggle does) - re-read it
     }
 
+    // One Docsy: when the file association (or a second double-click) starts
+    // another copy while one is already up, the new process hands its files to
+    // the running window - they land as new tabs through the same queue a drop
+    // rides - brings that window to the front, and goes away. A refused
+    // handshake (an elevated first instance, say) stays a second copy, like the
+    // old behavior; the mutex is held for this process's life either way, so
+    // the next launch finds this window instead.
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\Docsy.SingleInstance");
+    if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND up = nullptr;                       // the running window: it may still be
+        for (int tries = 0; tries < 30 && !up; tries++) {   // building it - a moment's wait
+            up = FindWindowW(L"Docsy", nullptr);
+            if (!up) Sleep(100);
+        }
+        if (up) {
+            std::wstring files;
+            for (int a = 1; a < argc; a++) {     // full paths: the running reader's
+                wchar_t full[MAX_PATH * 4];      // working directory is not this launch's
+                if (GetFullPathNameW(argv[a], (DWORD)_countof(full), full, nullptr))
+                    files += std::wstring(full) + L"\n";
+            }
+            bool delivered = false;
+            if (!files.empty()) {
+                DWORD pid = 0;
+                GetWindowThreadProcessId(up, &pid);
+                AllowSetForegroundWindow(pid);   // hand this launch's foreground right to
+                                                 // the window before it claims the front
+                COPYDATASTRUCT cd{};
+                cd.dwData = 0x44535931;          // 'DSY1': the handshake's tag
+                cd.cbData = (DWORD)((files.size() + 1) * sizeof(wchar_t));
+                cd.lpData = (void*)files.c_str();
+                delivered = SendMessageW(up, WM_COPYDATA, 0, (LPARAM)&cd) == TRUE;   // synchronous:
+            }                                    // the files are read before this leaves
+            if (delivered || files.empty()) {
+                SetForegroundWindow(up);
+                CloseHandle(mutex);
+                return 0;                        // the file opens as a tab over there
+            }
+            // the handshake was refused: keep this copy and let it open the files
+        }
+    }
+
     WxLoadDisk();
     BmLoad();                                  // the bookmarks' list: one file read, before any
                                                // window can paint the bar

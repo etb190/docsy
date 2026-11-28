@@ -745,6 +745,30 @@ static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         delete p;
         return 0;
     }
+    case WM_COPYDATA: {                       // a second launch's handshake: the default
+        const COPYDATASTRUCT* cd = (const COPYDATASTRUCT*)lp;   // reader's files land as new
+        if (!cd || cd->dwData != 0x44535931 || !cd->lpData || !cd->cbData) return FALSE;   // tabs here
+        const wchar_t* s = (const wchar_t*)cd->lpData;
+        size_t len = cd->cbData / sizeof(wchar_t);
+        bool any = false;
+        for (size_t i = 0; i < len && s[i]; ) {
+            std::wstring one;
+            while (i < len && s[i] && s[i] != L'\n') one += s[i++];
+            if (i < len && s[i] == L'\n') i++;
+            if (!one.empty()) {
+                g_dropQ.push_back(one);       // the drop queue's road: one document per
+                g_dropPane.push_back(FocusB());   // posted message, the window painting
+                any = true;                   // between loads, a tab for every file
+            }
+        }
+        if (any) {
+            if (IsIconic(h)) ShowWindow(h, SW_RESTORE);   // the reader comes to the front
+            BringWindowToTop(h);
+            SetForegroundWindow(h);           // the launch granted us its foreground right
+            PostMessageW(h, WM_APP + 3, 0, 0);
+        }
+        return TRUE;
+    }
     case WM_APP + 3: {                        // the drop queue's drain: one document per
         if (!g_dropQ.empty()) {               // message, so the window paints between loads
             std::wstring p = std::move(g_dropQ.front());
