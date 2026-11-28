@@ -1,0 +1,21 @@
+main.cpp
+D:\a\docsy\docsy\src\tabs.inl(136): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tabs.inl(140): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\annotations.inl(608): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\annotations.inl(889): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\annotations.inl(979): warning C4805: '!=': unsafe mix of type 'bool' and type 'int' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(246): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(249): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(254): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(274): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(295): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(314): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(341): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\tab_strip.inl(368): warning C4805: '==': unsafe mix of type 'int' and type 'bool' in operation
+D:\a\docsy\docsy\src\browser.inl(2511): warning C4805: '!=': unsafe mix of type 'bool' and type 'int' in operation
+D:\a\docsy\docsy\src\ai_core.inl(120): warning C4473: 'sscanf_s' : not enough arguments passed for format string
+D:\a\docsy\docsy\src\ai_core.inl(120): note: placeholders and their parameters expect 6 variadic arguments, but 5 were provided
+D:\a\docsy\docsy\src\ai_core.inl(120): note: the missing variadic argument 6 is required by format string '%c'
+D:\a\docsy\docsy\src\ai_core.inl(120): note: this argument is used as a buffer size
+Generating code
+Finished generating code

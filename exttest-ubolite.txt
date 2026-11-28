@@ -1,0 +1,14 @@
+﻿Docsy extension self-test  2026-11-28 21:10:44
+target: ddkjiahejlhfcafbddmgiahcphecmpfh
+runtime: 157.0.4341.60
+user data folder: C:\Users\runneradmin\AppData\Local\Docsy\WebView2
+extensions flag: on, mv2 keep-alive arguments set
+controller: created
+profile: ICoreWebView2Profile7 ok
+profile carries 2 extension(s) already
+  installed: dgiklkfkllikcanfonkcabmbdfmgleag
+  installed: mhjfbmdgcfjbbpaeojofohoefgiehjai
+download/unpack: ok -> C:\Users\runneradmin\AppData\Local\Docsy\Extensions\ddkjiahejlhfcafbddmgiahcphecmpfh
+AddBrowserExtension: 0x00000000 S_OK
+VERDICT: PASS - ddkjiahejlhfcafbddmgiahcphecmpfh is installed and listed
+exit code: 0
