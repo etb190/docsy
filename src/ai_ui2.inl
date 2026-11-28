@@ -1729,9 +1729,15 @@ static void AiSpanLineRects(const TxtPage& pt, const FRect& span,
     for (int i = 0; i < (int)pt.cells.size(); i++) {
         if (!inSpan(pt.cells[i])) continue;
         int ln = pt.cells[i].line;
-        auto& rng = perLine[ln];
-        if (rng.first < 0) rng.first = i;
-        rng.second = i;
+        // explicit insert: operator[] would default the pair to (0,0) and a
+        // line's recorded range would start at cell 0 - the range scan below
+        // would then sweep earlier cited lines into this line's rect
+        auto it = perLine.find(ln);
+        if (it == perLine.end()) perLine.emplace(ln, std::make_pair(i, i));
+        else {
+            it->second.first = min(it->second.first, i);
+            it->second.second = max(it->second.second, i);
+        }
     }
     for (auto& kv : perLine) {
         if (kv.first < 0 || kv.first >= (int)pt.lines.size()) continue;

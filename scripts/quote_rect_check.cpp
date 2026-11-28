@@ -525,6 +525,26 @@ int main() {
         Expect(sr.size() == 1, "a page-wide span paints the page's lines whole");
     }
 
+    // 22. two cited lines of different lengths under one wide span: each
+    //     line's rect keeps its own extent - a shorter line must not inherit
+    //     the longer one's right edge (the per-line range scan is per line)
+    {
+        PageBuilder p14;
+        const wchar_t* l0[] = { L"aa", L"bb", L"cc", L"dd", L"ee", L"ff", L"gg", L"hh", L"ii", L"jj" };
+        const wchar_t* l1[] = { L"aa", L"bb", L"cc" };
+        p14.Line(l0, 10, 72, 100, 112, 0);   // words every 16pt: ends at 226
+        p14.Line(l1, 3, 72, 130, 142, 1);    // ends at 114
+        FRect span{ 72.f, 98.f, 154.f, 46.f };   // covers both lines whole
+        std::vector<FRect> sr;
+        AiSpanLineRects(p14.pt, span, sr);
+        Expect(sr.size() == 2, "the wide span still paints one rect per line");
+        if (sr.size() == 2) {
+            Expect(Near(sr[0].w, 154.f, 0.5f), "the long line keeps its full extent");
+            Expect(Near(sr[1].w, 42.f, 0.5f),
+                   "the short line ends at its own last word, not the long line's");
+        }
+    }
+
     printf("%d checks, %d failed\n", g_total, g_failed);
     return g_failed ? 1 : 0;
 }
