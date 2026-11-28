@@ -1,0 +1,7 @@
+// Generated at build time: the CI job overwrites this file with
+//   501 RCDATA "pdfium.dll"
+// when pdfium.dll is in the build tree, so the exe carries the PDFium
+// renderer inside (resource 501, extracted to %LOCALAPPDATA%\docsy\ on
+// first use by FpuEmbedded in pdf_fpu.inl). Local builds without the dll
+// keep this stub: FindResource answers null, the embedded-extract path
+// stands down, and renders fall back to the Windows engine.

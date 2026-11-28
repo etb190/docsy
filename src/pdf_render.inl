@@ -222,16 +222,16 @@ static HBITMAP RenderCore(winrt::Windows::Data::Pdf::PdfDocument doc, int page, 
 static HBITMAP Render(DocState& D, int i, int w, int h) {
     int rot = D.prot.count(i) ? D.prot[i] : 0;
     int flip = D.pflip.count(i) ? D.pflip[i] : 0;
-    // the fallback first: a page whose images the engine cannot decode (the
-    // text parser flags JPX/JBIG2 scans) renders with PDFium - KillerPDF's
-    // engine reads those pages fine, and so does PDFium. The engine render
-    // stays underneath for every page the parser cleared or the dll misses.
+    // PDFium first: the engine Chrome and Edge ship reads every codec and
+    // transparency feature the Windows engine garbles (JPX/JBIG2 scans, CMYK
+    // JPEGs, SMask chains - the black boxes over the words). The engine render
+    // stays underneath for the rare page PDFium cannot produce: no dll (the
+    // exe's embedded copy missed too), a document PDFium refuses, a page that
+    // fails to load.
     bool used = false;
-    if (TtPageFpu(D, i) > 0) {
-        HBITMAP fb = FpuRenderPage(D.path, i, w, h, rot, flip, &used);
-        if (fb && used) return fb;
-        if (fb) DeleteObject(fb);
-    }
+    HBITMAP fb = FpuRenderPage(D.path, i, w, h, rot, flip, &used);
+    if (fb && used) return fb;
+    if (fb) DeleteObject(fb);
     return RenderCore(D.doc, i, w, h, rot, flip);
 }
 
@@ -257,10 +257,9 @@ struct RJob {
     int w, h, rot, flip;                    // rot: quarter-turns; flip: 1=X 2=Y (RenderCore's own bits)
     winrt::agile_ref<winrt::Windows::Data::Pdf::PdfDocument> doc;
     unsigned long long seq;
-    bool fpu;                               // the page's images ride a codec the
-                                            // engine cannot decode: the worker renders
-                                            // it with the PDFium fallback instead
-    std::wstring path;                      // the fallback's own file handle rides the path
+    std::wstring path;                      // PDFium renders first now - its own file
+                                            // handle rides the path; the engine ref is
+                                            // the fallback's
 };
 struct RRes {
     int docId, page, kind;
@@ -293,7 +292,7 @@ static void RqEnqueue(DocState& D, int i, int kind, int w, int h, int rot, int f
         if (r.docId == D.id && r.page == i && r.kind == kind &&
             r.w == w && r.h == h && r.rot == rot && r.flip == flip) return;   // drain: no second render
     g_rq.push_back(RJob{ D.id, i, kind, w, h, rot, flip, winrt::make_agile(D.doc), ++g_rqSeq,
-                         TtPageFpu(D, i) > 0, D.path });
+                         D.path });
     g_rqCv.notify_one();
 }
 static void RqPurgeThumbs(int docId, int first, int last) {
@@ -334,14 +333,16 @@ static DWORD WINAPI RqWorker(LPVOID) {
         winrt::Windows::Graphics::Imaging::SoftwareBitmap soft{ nullptr };
         try {
             if (j.kind == RJ_OCR) {
-                // the OCR flight's raster rides the same fallback: a flagged
-                // page must not feed the recognizer the engine's garbage
+                // the OCR flight's raster rides the same PDFium-first road:
+                // garbage pixels would feed the recognizer garbage text, and
+                // that text poisons the selection layer, the AI index and the
+                // summarizer alike
                 bool used = false;
-                if (j.fpu) soft = FpuRenderSoftPage(j.path, j.page, j.w, j.h, j.rot, j.flip, &used);
+                soft = FpuRenderSoftPage(j.path, j.page, j.w, j.h, j.rot, j.flip, &used);
                 if (!used) soft = RenderSoftDoc(j.doc, j.page, j.w, j.h, j.rot, j.flip);
             } else {
                 bool used = false;
-                if (j.fpu) b = FpuRenderPage(j.path, j.page, j.w, j.h, j.rot, j.flip, &used);
+                b = FpuRenderPage(j.path, j.page, j.w, j.h, j.rot, j.flip, &used);
                 if (!used) b = RenderCore(j.doc.get(), j.page, j.w, j.h, j.rot, j.flip);
             }
         } catch (...) {}
@@ -465,14 +466,13 @@ static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoftDoc(
 static winrt::Windows::Graphics::Imaging::SoftwareBitmap RenderSoft(DocState& D, int i, int w, int h) {
     int rot = D.prot.count(i) ? D.prot[i] : 0;
     int flip = D.pflip.count(i) ? D.pflip[i] : 0;
-    // the OCR flight's raster follows the same fallback: garbage pixels would
+    // the OCR flight's raster follows the page render: PDFium first, the
+    // engine's raster only when PDFium cannot answer - garbage pixels would
     // feed the recognizer garbage text, and that text poisons the selection
     // layer, the AI index and the summarizer alike
     bool used = false;
-    if (TtPageFpu(D, i) > 0) {
-        auto fb = FpuRenderSoftPage(D.path, i, w, h, rot, flip, &used);
-        if (used) return fb;
-    }
+    auto fb = FpuRenderSoftPage(D.path, i, w, h, rot, flip, &used);
+    if (used) return fb;
     return RenderSoftDoc(winrt::make_agile(D.doc), i, w, h, rot, flip);
 }
 

@@ -2380,10 +2380,13 @@ if (!opened || index < 0 || index >= (int)pages.size()) throw PdfError();
     // Windows.Data.Pdf cannot decode JPXDecode (JPEG2000) or JBIG2Decode
     // images: pages riding them - scans of books above all - come back as
     // garbage, vertical streaks and black boxes over the words, while
-    // KillerPDF's own engine shows the same page fine. This walk flags every
-    // page whose XObject tree (form XObjects included, cycle-capped) draws
-    // such an image, or such a soft mask; the render path hands those pages
-    // to the PDFium fallback (pdf_fpu.inl) instead of the engine.
+    // KillerPDF's own engine shows the same page fine. This walk records
+    // which pages draw such an image or soft mask (form XObjects included,
+    // cycle-capped). The render path no longer needs the flag - every page
+    // renders through PDFium now (pdf_fpu.inl), the engine only answers when
+    // PDFium cannot - but the scan stays: it documents the engine's gaps and
+    // answers TtPageFpu for anything that wants to know whether the Windows
+    // raster of a given page was ever trustworthy.
     static bool IsBrokenImageFilter(const PdfObj* n) {
         return n && n->t == PdfObj::NAME &&
                (n->name == "JPXDecode" || n->name == "JP2Decode" ||
@@ -2490,10 +2493,12 @@ static void TtPdfSessionDrop(DocState& D) {
 }
 
 // The page's image codecs, cached per page (1 = the page draws a JPX/JBIG2
-// image the Windows engine cannot decode - the PDFium fallback renders it;
-// 0 = the engine reads it fine; -1 = unknown, no parser session for this
-// file). First call may build the text session: the file read and xref parse
-// the text path needs anyway, one time, shared.
+// image the Windows engine cannot decode; 0 = the engine reads it fine;
+// -1 = unknown, no parser session for this file). Informational now - the
+// render path renders every page through PDFium - and kept for anything
+// that needs to know whether the engine's own raster was ever safe. First
+// call may build the text session: the file read and xref parse the text
+// path needs anyway, one time, shared.
 static int TtPageFpu(DocState& D, int i) {
     pdftext::PdfTextSession* ts = TtPdfSession(D);
     if (!ts->ready || i < 0 || i >= (int)ts->s.pages.size()) return -1;

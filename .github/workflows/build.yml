@@ -21,10 +21,7 @@ jobs:
           mkdir wv2 && tar -xf wv2.zip -C wv2
           if not exist wv2\build\native\include\webview2.h exit 1
           if not exist wv2\build\native\x64\WebView2LoaderStatic.lib exit 1
-      - name: Build
-        shell: cmd
-        run: rc /nologo /fo src\docsy.res src\docsy.rc && cl /nologo /std:c++20 /utf-8 /EHsc /O1 /GS- /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /I"wv2\build\native\include" /Fe:docsy.exe src\main.cpp src\docsy.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /FILEALIGN:512 /NODEFAULTLIB:libucrt.lib /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest /LIBPATH:"wv2\build\native\x64" WebView2LoaderStatic.lib advapi32.lib winmm.lib ucrt.lib > build.log 2>&1
-      - name: PDFium fallback renderer
+      - name: PDFium renderer (downloaded before the build - the dll embeds into the exe)
         shell: cmd
         run: |
           curl -sSL -o pdfium.tgz https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-win-x64.tgz
@@ -33,6 +30,10 @@ jobs:
           copy /b pdfium\LICENSE pdfium-PDFIUM-LICENSE.txt >nul
           if not exist pdfium.dll exit 1
           if not exist pdfium-PDFIUM-LICENSE.txt exit 1
+          > src\pdfium_embed.rc echo 501 RCDATA "pdfium.dll"
+      - name: Build
+        shell: cmd
+        run: rc /nologo /fo src\docsy.res src\docsy.rc && rc /nologo /fo src\pdfium.res src\pdfium_embed.rc && cl /nologo /std:c++20 /utf-8 /EHsc /O1 /GS- /GL /MT /DNDEBUG /DUNICODE /D_UNICODE /I"wv2\build\native\include" /Fe:docsy.exe src\main.cpp src\docsy.res src\pdfium.res /link /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /LTCG /FILEALIGN:512 /NODEFAULTLIB:libucrt.lib /MANIFEST:EMBED /MANIFESTINPUT:src\app.manifest /LIBPATH:"wv2\build\native\x64" WebView2LoaderStatic.lib advapi32.lib winmm.lib ucrt.lib > build.log 2>&1
       - name: Show build log
         if: always()
         shell: bash
@@ -126,7 +127,7 @@ jobs:
           files=""
           for f in docsy.exe pdfium.dll pdfium-PDFIUM-LICENSE.txt preview.png preview-default.png preview-empty.png preview-split.png preview-info.png preview-tools.png preview-textbar.png preview-shapebar.png preview-hlbar.png preview-ask.png preview-split2.png preview-tabs.png preview-web.png preview-save.png preview-reopen.png saved.pdf preview-big.png preview-big-reopen.png saved-big.pdf preview-locked.png build.log shot.log sample.pdf extlog.txt exttest-ubolite.txt exttest-tampermonkey.txt extcheck.txt extcheck-mv2.txt; do if [ -s "$f" ]; then files="$files $f"; fi; done
           set +e
-          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable exe + pdfium.dll (the fallback renderer for JPX/JBIG2 scans). Put both files in the same folder; without the dll the app still runs, scans the Windows engine cannot decode render as before." > release.log 2>&1
+          gh release create "build-$GITHUB_RUN_NUMBER" $files --target "$GITHUB_SHA" --latest --title "Docsy build $GITHUB_RUN_NUMBER" --notes "Portable exe. Pages now render through PDFium (Chrome's engine), and the renderer's dll is embedded inside the exe - extracted to %LocalAppData%\\docsy\\ on first use, no extra file to download. The loose pdfium.dll still ships: a copy placed beside the exe overrides the embedded one." > release.log 2>&1
           echo "release exit: $?" >> release.log
           mkdir dist && cp $files release.log dist/ && cd dist
           git init -q -b dist && git config user.name ci && git config user.email ci@users.noreply.github.com

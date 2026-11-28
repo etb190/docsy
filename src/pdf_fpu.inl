@@ -1,25 +1,34 @@
 // ---------------------------------------------------------------------------
-// pdf_fpu.inl - the PDFium fallback raster for pages the Windows engine
-// cannot decode.
+// pdf_fpu.inl - PDFium, the app's FIRST raster.
 //
-// docsy renders with Windows.Data.Pdf, and that engine cannot decode every
-// image codec PDFs ride. JPXDecode (JPEG2000) and JBIG2Decode pages - scans
-// of books above all, exactly the files docsy is aimed at - come back as
-// garbage: vertical streaks and black boxes over the words, while KillerPDF's
-// own engine shows the same page fine. pdf_text.inl flags every page whose
-// XObject tree draws such an image (TtPageFpu); this file renders those pages
-// with PDFium, the renderer Edge and Chrome ship, instead.
+// docsy used to render with Windows.Data.Pdf and call PDFium only for the
+// pages pdf_text.inl flagged (JPXDecode/JBIG2Decode images). Two real books
+// later the black boxes were still there: the loose pdfium.dll the release
+// ships only works when the user copies it beside the exe (a step the notes
+// beg for and downloads skip), and the engine garbles more than the two
+// codecs the scan knows - CMYK JPEGs, 12/16-bit images, exotic SMask chains,
+// features no scan can enumerate. So the preference flipped: every page
+// renders with PDFium, the renderer Edge and Chrome ship and the engine the
+// reference reader tracks, and Windows.Data.Pdf becomes the fallback for the
+// rare file PDFium refuses to open or a page it cannot load. One engine's
+// quirks instead of a patchwork of "what the scan happened to catch".
 //
-// Optional by design: pdfium.dll is looked up beside the exe (the CI job
-// downloads it next to the build), and a machine without it keeps today's
-// behavior untouched - the Windows render, garbage included. Every entry
-// point binds through GetProcAddress: no import table, no header to ship.
+// Still self-sufficient: pdfium.dll is looked up beside the exe first (a dll
+// the user dropped there wins, updates without a new build), then the dll
+// the CI build carried INSIDE the exe (resource 501) - extracted to
+// %LOCALAPPDATA%\docsy\pdfium.dll on first use, reused while its size and
+// ends checksum match the embedded bytes, rewritten when a new build ships a
+// different one. A machine with neither keeps a working app: every render
+// attempt reports !used and Windows.Data.Pdf answers. Every entry point
+// binds through GetProcAddress: no import table, no header to ship.
 //
 // Threading: every raster call lands on the one render worker, or on the UI
 // thread in shot mode - the serialization g_renderM gives Windows.Data.Pdf.
 // The fallback keeps its own mutex so a sync UI render (save writer, shot
 // mode, OCR prewarm) can never race the worker's fallback on the same
-// cached FPDF_DOCUMENT.
+// cached FPDF_DOCUMENT. FpuBind runs under that same mutex, so the one-time
+// dll lookup and the embedded extraction are as serialized as the renders
+// they serve.
 // ---------------------------------------------------------------------------
 #ifndef DOCSY_PDF_FPU_INL
 #define DOCSY_PDF_FPU_INL
@@ -62,6 +71,88 @@ static FpuFnBmpBuffer f_BmpBuffer = nullptr;
 static FpuFnBmpFill f_BmpFill = nullptr;
 static FpuFnRender f_RenderPage = nullptr;
 
+// The build's embedded copy: resource 501 (pdfium_embed.rc - the CI job
+// writes "501 RCDATA \"pdfium.dll\"" when the dll is in the build tree, a
+// comment-only stub when it is not, so FindResource answers null and the
+// engine render stands in). Extraction lands in %LOCALAPPDATA%\docsy\, the
+// one directory the app already owns for its state: Program Files installs
+// make the exe's own folder read-only, and %TEMP% gets swept. The file is
+// reused while it matches the embedded bytes (size + an FNV-1a over the
+// first and last 64KB - a version bump changes the size in practice, and
+// the ends check catches the coincidence), rewritten when a newer build
+// ships a different dll, and written through a .tmp + MoveFileEx REPLACE so
+// a crash mid-extract never leaves a half dll that "matches" by size.
+// Everything runs under g_fpuM (the caller's lock): the worker and the sync
+// paths cannot race the extraction.
+static bool FpuEndsMatch(const void* data, DWORD len, const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)) return false;
+    long long sz = ((long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow;
+    if (sz != (long long)len) return false;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    auto fnv = [&](long long off, long long cnt) {
+        unsigned long long hv = 1469598103934665603ULL;
+        BYTE buf[4096];
+        LARGE_INTEGER li{}; li.QuadPart = off;
+        if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) return hv;
+        for (long long r = 0; r < cnt; r += sizeof(buf)) {
+            DWORD want = (DWORD)min((long long)sizeof(buf), cnt - r), got = 0;
+            if (!ReadFile(h, buf, want, &got, nullptr) || got != want) return hv;
+            for (DWORD k = 0; k < got; k++) { hv ^= buf[k]; hv *= 1099511628211ULL; }
+        }
+        return hv;
+    };
+    unsigned long long a = fnv(0, min((long long)len, 65536));
+    unsigned long long b = fnv(max(0, (long long)len - 65536), min((long long)len, 65536));
+    CloseHandle(h);
+    const BYTE* p = (const BYTE*)data;
+    auto finv = [&](DWORD off, DWORD cnt) {
+        unsigned long long hv = 1469598103934665603ULL;
+        for (DWORD k = 0; k < cnt; k++) { hv ^= p[off + k]; hv *= 1099511628211ULL; }
+        return hv;
+    };
+    return a == finv(0, min((DWORD)len, 65536u)) &&
+           b == finv(len - min((DWORD)len, 65536u), min((DWORD)len, 65536u));
+}
+
+static HMODULE FpuEmbedded() {
+    HRSRC hs = FindResourceW(nullptr, MAKEINTRESOURCEW(501), (LPCWSTR)RT_RCDATA);
+    HGLOBAL hg = hs ? LoadResource(nullptr, hs) : nullptr;
+    const void* data = hg ? LockResource(hg) : nullptr;
+    DWORD len = hs ? SizeofResource(nullptr, hs) : 0;
+    if (!data || !len) return nullptr;               // a build without the dll: the
+                                                     // engine render stands in
+    wchar_t root[MAX_PATH];
+    DWORD rl = GetEnvironmentVariableW(L"LOCALAPPDATA", root, MAX_PATH);
+    if (!rl || rl >= MAX_PATH - 32) return nullptr;
+    wchar_t dir[MAX_PATH];
+    lstrcpyW(dir, root); lstrcatW(dir, L"\\docsy");
+    CreateDirectoryW(dir, nullptr);
+    wchar_t path[MAX_PATH], tmp[MAX_PATH];
+    lstrcpyW(path, dir); lstrcatW(path, L"\\pdfium.dll");
+    lstrcpyW(tmp, dir); lstrcatW(tmp, L"\\pdfium.dll.tmp");
+    // already there and byte-identical at the probe points: load it, no rewrite
+    if (FpuEndsMatch(data, len, path)) return LoadLibraryW(path);
+    HANDLE h = CreateFileW(tmp, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return LoadLibraryW(path);   // locked or unwritable:
+                                                                // an older copy beats none
+    DWORD wrote = 0, off = 0;
+    const BYTE* p = (const BYTE*)data;
+    while (off < len && WriteFile(h, p + off, min(len - off, 0x100000u), &wrote, nullptr) && wrote)
+        off += wrote;
+    CloseHandle(h);
+    if (off != len) { DeleteFileW(tmp); return LoadLibraryW(path); }
+    if (!MoveFileExW(tmp, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmp);
+        return LoadLibraryW(path);                   // a loaded dll the replace could
+                                                     // not take: the old one still works
+    }
+    return LoadLibraryW(path);
+}
+
 static bool FpuBind() {
     if (g_fpuTried) return g_fpuMod != nullptr;
     g_fpuTried = true;
@@ -70,7 +161,10 @@ static bool FpuBind() {
     wchar_t* sl = wcsrchr(dir, L'\\');
     if (sl) *(sl + 1) = 0; else dir[0] = 0;
     std::wstring dll = std::wstring(dir) + L"pdfium.dll";
-    g_fpuMod = LoadLibraryW(dll.c_str());
+    g_fpuMod = LoadLibraryW(dll.c_str());            // a dll the user dropped beside
+                                                     // the exe wins: updates without
+                                                     // waiting for a new build
+    if (!g_fpuMod) g_fpuMod = FpuEmbedded();         // else the copy the build carried
     if (!g_fpuMod) return false;
     struct Bind { const char* name; void** out; } binds[] = {
         { "FPDF_InitLibrary", (void**)&f_FpuInit },
